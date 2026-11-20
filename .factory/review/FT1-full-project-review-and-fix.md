@@ -1,6 +1,6 @@
 ---
 branch: factory/FT1-full-project-review-and-fix
-round: 2
+round: 3
 ---
 # 全项目 review 并修复发现的问题
 
@@ -110,3 +110,27 @@ notes:
 未检查：未启动真实 Chrome；真实 UI/CDP 事件投递、截图、网络拦截、systemd、Docker、跨平台均未实测；未注入磁盘写满和轮转重开失败。无关联 issue/PR，无需 GitHub 评论。
 
 第 2/3 轮存在 P1，review/ → new/；下一轮按 fix 列表修复。
+
+
+## factory · plan · 2026-11-21 01:01
+第 3 轮补充计划。
+Behaviour：启动枚举锁外执行并捕获 epoch；idle 仅关闭核定的完整 target；创建在途销毁不得复活；释放和记账由同一生命周期边界负责；所有退出路径等待 RPC 与后台审计生产者；重启与轮转按完整 target ID 恢复。
+Scope：最新 review 六项 P1 及直接相关 audit 容量、关闭记录身份问题，增加 barrier/回环假 CDP 的真实 ListenAndServe 回归；不扩展到 snapshot/CLI 或纯重构。
+Decisions：不跨 CDP 持生命周期锁；创建销毁记录限于在途窗口；旧短 ID 记录无法证明归属，一律不收养并作废，即使只有唯一同后缀候选也不猜测；升级前旧 managed tab 将失去自动 idle 清理，需显式关闭或重新创建。关停关闭 RPC 准入、取消并等待在途 handler，再取消并等待后台任务，最后关闭 session/audit/store。
+Checking：逐项并发回归、重启碰撞顺序变化、轮转完整身份、legacy 替代用户页、启动失败重试、强制关停与在途 handler；完整 gofmt/vet/race 测试和定向重复测试。
+
+## factory · 2026-11-21 01:01
+第 3/3 轮已构建并推送，new/ → review/。
+branch: factory/FT1-full-project-review-and-fix
+head: 62531a7b644ad1c635383271265de8fb967bb331
+本轮两个提交：
+- be46919：修复启动自锁、idle 短 ID 复用误关、sweeper 提前 Forget、create 回包复活已毁 target、后台生产者未等待及短 ID 恢复误收养；完整 ID 写入创建/释放/活跃日志与轮转快照。顺带限制 audit 实际容量，关闭记录绑定完整 target。
+- 62531a7：manager 验证要求去掉旧格式唯一候选推断，旧短 ID 记录一律不收养；补 RPC handler 准入/取消/join，强制关停后仍等待生产者，防止 store 提前关闭。README/AGENTS 同步。
+
+验证：Claude Code 报告最终内容完整 gofmt/vet/race 测试通过；daemon/state/store -race -count=30 通过；启动/重启/关停/legacy 等 -race -count=20 -cpu 1,2,8 通过；handler 关停定向 -race -count=30 通过；两轮共 14 项旧行为变异均被对应测试检出。manager 独立执行 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...，全部通过；核对 origin/main..HEAD 提交范围、diff --check、禁止路径未改和干净工作树。
+安装/依赖：无新增工具，复用已有 Go 1.27.4；go.mod 中 gobwas/ws v1.4.0 从间接改为直接依赖，仅假 CDP 测试直接使用，版本及 go.sum 不变。HOME/cache/临时文件均在本 run TMPDIR。
+
+兼容性：旧短 ID 日志无法证明所有权，首次恢复时丢弃其 managed 归属并告警；旧版创建的存活 tab 不再自动 idle 清理，需显式关闭或重新创建。新格式按完整 ID 恢复；降级旧版会恢复旧风险。
+留给 review：创建在途记录保留边界、背景事件与过期枚举交错、FIFO 锁序/容量、全 ID 日志轮转、强制关停 producer join。忽略 context 的底层调用会让关停持续等待，刻意不在生产者完成前关闭 store；正常 CDP 调用遵守取消。
+未检查：未启动真实 Chrome，真实 CDP 事件投递/UI/截图/网络拦截、systemd、Docker、跨平台未验证；未注入磁盘写满、轮转重开失败。两项关停回归包含 200/300ms 等待假设，重复运行通过但并非纯 barrier。既有 handler 关停测试等待从 3s 放宽到 10s，coder 在旧 HEAD 复现了 net/http 空连接最长 5s 等待导致的原有失败。
+仍未修复的范围外问题：tab_list tabs/focus 快照不一致、旧枚举复活已关闭 registry target、两项 snapshot ref、run --help=true、run -- --foo.js。六项 P1 的修复仍需独立 review，不宣称全库无缺陷。无关联 issue/PR。
