@@ -382,10 +382,10 @@ func TestTabIdleRepeatedReconcileDoesNotRenew(t *testing.T) {
 	}
 
 	// Simulate repeated target syncs (e.g. tab_list polling) while the tab sits
-	// idle. Reconciliation must not reset the already-tracked idle timer.
+	// idle. Syncing must not reset the already-tracked idle timer.
 	deadline := time.Now().Add(timeout + 40*time.Millisecond)
 	for time.Now().Before(deadline) {
-		srv.reconcileIdleFromLog(srv.syncTabsFromTargets(fc.infos))
+		srv.syncTabsFromTargets(fc.infos)
 		time.Sleep(15 * time.Millisecond)
 	}
 
@@ -439,8 +439,7 @@ func TestTabIdleRestartRestoresManagedTab(t *testing.T) {
 		},
 	}}
 	srvB := newIdleTestServerWithState(fcB, timeout, stateDir)
-	snaps := srvB.syncTabsFromTargets(fcB.infos)
-	srvB.reconcileIdleFromLog(snaps)
+	srvB.syncTabsFromTargets(fcB.infos)
 
 	time.Sleep(60 * time.Millisecond)
 	srvB.closeExpiredTabs(context.Background())
@@ -493,8 +492,7 @@ func TestTabIdleRestartGraceDelaysClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.tabHook = fc
-	snaps := srv.syncTabsFromTargets(fc.infos)
-	srv.reconcileIdleFromLog(snaps)
+	srv.syncTabsFromTargets(fc.infos)
 
 	srv.closeExpiredTabs(context.Background())
 	if len(fc.infos) != 1 {
@@ -533,28 +531,6 @@ func TestUnwritableStateDirErrors(t *testing.T) {
 	}
 }
 
-func TestSyncTabIdlePresenceKeepsLog(t *testing.T) {
-	stateDir := t.TempDir()
-	fc := &fakeConn{infos: []*target.Info{}}
-	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
-	postRPC(t, srv, rpcReq(protocol.MethodTabNew, map[string]any{}, 1))
-	if len(fc.infos) != 1 {
-		t.Fatal("expected tab")
-	}
-	drainRPCLog(t, srv)
-
-	srv.syncTabIdlePresence(nil)
-
-	logPath := filepath.Join(stateDir, store.RPCLogFile())
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(data) == 0 {
-		t.Fatal("rpc log cleared by presence sync")
-	}
-}
-
 // restartWithUserTab reopens the state dir against a browser whose only tab is
 // a user-opened one, and returns the tabs the daemon adopted as managed.
 func restartWithUserTab(t *testing.T, stateDir string, userTab target.ID) map[target.ID]time.Time {
@@ -562,7 +538,7 @@ func restartWithUserTab(t *testing.T, stateDir string, userTab target.ID) map[ta
 	fc := &fakeConn{infos: []*target.Info{{TargetID: userTab, Type: "page", URL: "https://user.example"}}}
 	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
 	t.Cleanup(func() { _ = srv.closeAudit() })
-	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(fc.infos))
+	srv.syncTabsFromTargets(fc.infos)
 	return srv.tabIdle.Snapshot()
 }
 
@@ -625,7 +601,7 @@ func TestReconcileReleasesManagedTabsGoneAcrossRestart(t *testing.T) {
 
 	// Chrome restarted: the managed tab is gone when the daemon comes back.
 	srvB := newIdleTestServerWithState(&fakeConn{}, time.Minute, stateDir)
-	srvB.reconcileIdleFromLog(srvB.syncTabsFromTargets(nil))
+	srvB.syncTabsFromTargets(nil)
 	if err := srvB.closeAudit(); err != nil {
 		t.Fatal(err)
 	}

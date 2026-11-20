@@ -63,13 +63,11 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	listCtx, cancel := context.WithTimeout(ctx, timeout.Operation)
 	targets, terr := sess.PageTargetsContext(listCtx)
 	cancel()
-	snaps := s.syncInitialTargets(sess, targets, terr)
-	// Perform the initial managed-tab recovery. If target enumeration failed,
-	// runTargetSync does it after its successful retry instead: reconciling
-	// against an empty registry would release every persisted managed tab.
-	if terr == nil {
-		s.reconcileIdleFromLog(snaps)
-	}
+	// A successful enumeration also performs the one-time managed-tab recovery.
+	// If it failed, the first enumeration that does succeed (runTargetSync's
+	// retry, or an RPC) performs it instead: recovering against an empty
+	// registry would release every persisted managed tab.
+	s.syncInitialTargets(sess, targets, terr)
 	go s.runCDPWatchdog(ctx, sess)
 	if s.logger != nil {
 		s.logger.Info("browser CDP session connected", "debugger", s.cfg.DebuggerURL)
@@ -120,13 +118,11 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		}
 		if sess.ConsumeTargetDirty() {
 			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
-			snaps, err := s.listAndSyncTabs(probe, sess)
+			// A resync never re-reads rpc.jsonl: once the startup recovery has run,
+			// managed state only changes by full target id (see syncTabsFromTargetsSince).
+			_, err := s.listAndSyncTabs(probe, sess)
 			cancel()
-			if err == nil {
-				// Reconciliation is idempotent for tabs already tracked in memory and
-				// is required when the startup target enumeration failed.
-				s.reconcileIdleFromLog(snaps)
-			} else {
+			if err != nil {
 				sess.MarkTargetDirty()
 				s.triggerBrowserProbe()
 				if s.logger != nil {

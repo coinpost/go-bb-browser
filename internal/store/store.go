@@ -69,6 +69,7 @@ type Store struct {
 	maxLogBytes int64
 	seq         atomic.Uint64
 	managed     map[string]time.Time
+	startup     map[string]time.Time
 	memLogs     []LogRecord
 	logger      *slog.Logger
 	inMemory    bool
@@ -142,6 +143,7 @@ func Open(cfg OpenConfig) (*Store, error) {
 	s.logFile = f
 	s.logPath = logPath
 	s.managed = managed
+	s.startup = cloneManaged(managed)
 	if fi, err := f.Stat(); err == nil {
 		s.logBytes = fi.Size()
 	}
@@ -354,7 +356,9 @@ func (s *Store) writeManagedSnapshotLocked() error {
 	return err
 }
 
-// ReplayManagedTabActivity returns managed tab short ids and last activity, rebuilt by replaying the log at startup.
+// ReplayManagedTabActivity returns managed tab short ids and last activity as
+// of the records appended so far. Records still queued by the daemon are not
+// reflected, so it must not drive decisions about live tabs.
 func (s *Store) ReplayManagedTabActivity() map[string]time.Time {
 	if s == nil {
 		return nil
@@ -362,4 +366,16 @@ func (s *Store) ReplayManagedTabActivity() map[string]time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneManaged(s.managed)
+}
+
+// StartupManagedTabActivity returns the managed tabs the previous run left in
+// the log, as replayed at Open. Unlike ReplayManagedTabActivity it never
+// changes, so recovery reads the same thing however late it runs.
+func (s *Store) StartupManagedTabActivity() map[string]time.Time {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneManaged(s.startup)
 }

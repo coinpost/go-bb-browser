@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/state"
 	"github.com/yiplee/go-bb-browser/internal/store"
 	"github.com/yiplee/go-bb-browser/internal/timeout"
@@ -50,11 +51,32 @@ type Server struct {
 	tabMuOps    sync.Mutex
 	tabCDPLocks map[string]*tabLockEntry
 
-	auditMu     sync.Mutex
-	auditClosed bool
-	auditCh     chan store.LogRecord
-	auditDone   chan struct{}
-	auditWG     sync.WaitGroup
+	// lifeMu is the single serial boundary for managed-tab lifecycle: marking a
+	// tab managed, releasing it, and queueing the rpc.jsonl records that say so.
+	// Whatever order two lifecycle steps take under it is the order of their
+	// log lines. It is never held across a CDP call.
+	lifeMu sync.Mutex
+	// idleRecovered is set by the first successful target enumeration, the only
+	// point at which managed tabs are adopted from the previous run's log.
+	idleRecovered bool
+	// goneBeforeRecovery holds short ids released before that point, so recovery
+	// cannot hand one to an unrelated tab that derived the same short id since.
+	goneBeforeRecovery map[string]struct{}
+	// closing tracks targets with an explicit tab_close RPC in flight.
+	closing map[target.ID]*closingTab
+
+	// Audit records form one FIFO: auditPending, appended under auditMu, written
+	// in order by whoever holds auditWriteMu (the writer, or an enqueuer once
+	// the queue is over auditQueueCap or the writer has stopped).
+	auditMu       sync.Mutex
+	auditWriteMu  sync.Mutex
+	auditPending  []store.LogRecord
+	auditQueueCap int
+	auditClosed   bool
+	auditWake     chan struct{}
+	auditStop     chan struct{}
+	auditDone     chan struct{}
+	auditWG       sync.WaitGroup
 
 	// shutdownTimeout bounds http.Server.Shutdown. Zero uses the default.
 	// A timed-out shutdown gets one more timeout.Operation to drain handlers.
@@ -84,8 +106,14 @@ func NewServer(cfg Config, logger *slog.Logger) (*Server, error) {
 		obsStore:     obsStore,
 		tabIdle:      state.NewTabIdleTracker(),
 		probeTrigger: make(chan struct{}, 1),
-		auditCh:      make(chan store.LogRecord, 256),
-		auditDone:    make(chan struct{}),
+		closing:      make(map[target.ID]*closingTab),
+
+		goneBeforeRecovery: make(map[string]struct{}),
+
+		auditQueueCap: defaultAuditQueueCap,
+		auditWake:     make(chan struct{}, 1),
+		auditStop:     make(chan struct{}),
+		auditDone:     make(chan struct{}),
 	}
 	stateDir := effectiveStateDir(cfg)
 	if strings.TrimSpace(cfg.StateDir) == stateDirDisabled {
@@ -282,28 +310,56 @@ func (s *Server) shutdownHTTP(srv *http.Server) error {
 	return nil
 }
 
-// closeAudit rejects further channel sends, drains the writer, and closes the store.
-// A handler that loses the race appends synchronously while the file is still open.
+// defaultAuditQueueCap bounds how many audit records wait for the writer.
+const defaultAuditQueueCap = 256
+
+// closeAudit stops the writer, drains the queue, and closes the store.
+// A handler that loses the race appends synchronously, in queue order.
 func (s *Server) closeAudit() error {
 	if s.store == nil {
 		return nil
 	}
+	s.stopAuditWriter()
+	s.auditWriteMu.Lock()
+	defer s.auditWriteMu.Unlock()
+	return s.store.Close()
+}
+
+// stopAuditWriter ends the writer goroutine after it has drained the queue.
+// Later records are written by their enqueuer.
+func (s *Server) stopAuditWriter() {
 	s.auditMu.Lock()
 	if !s.auditClosed {
 		s.auditClosed = true
-		close(s.auditCh)
+		close(s.auditStop)
 	}
 	s.auditMu.Unlock()
 	<-s.auditDone
-	s.auditMu.Lock()
-	err := s.store.Close()
-	s.auditMu.Unlock()
-	return err
 }
 
 func (s *Server) runAuditWriter() {
 	defer close(s.auditDone)
-	for rec := range s.auditCh {
+	for {
+		select {
+		case <-s.auditWake:
+			s.flushAudit()
+		case <-s.auditStop:
+			s.flushAudit()
+			return
+		}
+	}
+}
+
+// flushAudit writes every queued record in queue order. Batches are taken and
+// written under auditWriteMu, so concurrent flushers cannot interleave them.
+func (s *Server) flushAudit() {
+	s.auditWriteMu.Lock()
+	defer s.auditWriteMu.Unlock()
+	s.auditMu.Lock()
+	batch := s.auditPending
+	s.auditPending = nil
+	s.auditMu.Unlock()
+	for _, rec := range batch {
 		if err := s.store.AppendRPC(rec); err != nil && s.logger != nil {
 			s.logger.Warn("append rpc log failed", "err", err, "action", rec.Action)
 		}

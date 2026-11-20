@@ -307,11 +307,7 @@ func TestScheduleAuditAfterCloseDoesNotPanic(t *testing.T) {
 		}
 	})
 
-	srv.auditMu.Lock()
-	srv.auditClosed = true
-	close(srv.auditCh)
-	srv.auditMu.Unlock()
-	<-srv.auditDone
+	srv.stopAuditWriter()
 
 	ctx := contextWithAudit(context.Background(), &auditMeta{
 		action: protocol.MethodTabList,

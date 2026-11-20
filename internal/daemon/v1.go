@@ -148,17 +148,26 @@ func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeJSONRPCBytes(ctx context.Context, w http.ResponseWriter, id json.RawMessage, build func() ([]byte, error)) {
 	b, err := build()
+	if !s.writeJSONRPCRaw(w, b, err) {
+		return
+	}
+	s.scheduleAudit(ctx, b)
+}
+
+// writeJSONRPCRaw sends an already-built response and reports whether there
+// was one to send.
+func (s *Server) writeJSONRPCRaw(w http.ResponseWriter, b []byte, err error) bool {
 	if err != nil {
 		s.logger.Error("json-rpc marshal failed", "err", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+		return false
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(b); err != nil && s.logger != nil {
 		s.logger.Error("json-rpc write failed", "err", err)
 	}
-	s.scheduleAudit(ctx, b)
+	return true
 }
 
 func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
@@ -183,29 +192,25 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 	s.enqueueAudit(rec)
 }
 
-// enqueueAudit keeps the non-blocking send. Once closeAudit has closed the
-// channel, the record is appended under auditMu so store.Close cannot race it
-// and a late handler cannot panic on a closed channel.
+// enqueueAudit appends rec to the audit FIFO; its position is final once this
+// returns. Normally the writer goroutine persists it. When the queue is over
+// its bound, or the writer has stopped, the caller writes the backlog itself,
+// in order and ending with rec: that is the backpressure, and it never lets a
+// record overtake one queued before it. Flushing only takes audit and store
+// locks, so it is safe under lifeMu.
 func (s *Server) enqueueAudit(rec store.LogRecord) {
 	s.auditMu.Lock()
-	defer s.auditMu.Unlock()
-	if s.auditClosed {
-		s.appendAudit(rec)
+	s.auditWG.Add(1)
+	s.auditPending = append(s.auditPending, rec)
+	inline := s.auditClosed || len(s.auditPending) > s.auditQueueCap
+	s.auditMu.Unlock()
+	if inline {
+		s.flushAudit()
 		return
 	}
-	s.auditWG.Add(1)
 	select {
-	case s.auditCh <- rec:
+	case s.auditWake <- struct{}{}:
 	default:
-		// Preserve the recovery log while bounding memory and goroutine count.
-		s.appendAudit(rec)
-		s.auditWG.Done()
-	}
-}
-
-func (s *Server) appendAudit(rec store.LogRecord) {
-	if err := s.store.AppendRPC(rec); err != nil && s.logger != nil {
-		s.logger.Warn("append rpc log failed", "err", err, "action", rec.Action)
 	}
 }
 
@@ -469,16 +474,26 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		})
 		return
 	}
+	seq, ok := s.nextSeq(ctx, w, id)
+	if !ok {
+		return
+	}
+	// Register, mark managed and queue the tab_new record as one lifecycle
+	// step. The target can be destroyed at any moment after createTarget; were
+	// the record queued only after the response is written, the synthetic
+	// tab_close could precede it and leave the short id managed on disk.
+	s.lifeMu.Lock()
 	short := s.tabs.RegisterPageTarget(tid)
 	s.markTabManaged(tid, short, initial, p.Silent)
 	if !p.Silent {
 		s.tabs.Select(short)
 	}
-	seq, ok := s.nextSeq(ctx, w, id)
-	if !ok {
-		return
+	resp, err := protocol.MarshalResponse(id, protocol.TabNewResult{Tab: short, Seq: seq})
+	if err == nil {
+		s.scheduleAudit(ctx, resp)
 	}
-	s.rpcOK(ctx, w, id, protocol.TabNewResult{Tab: short, Seq: seq})
+	s.lifeMu.Unlock()
+	s.writeJSONRPCRaw(w, resp, err)
 }
 
 func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.RawMessage, params json.RawMessage) {

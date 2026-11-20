@@ -66,6 +66,17 @@ func (t *TabIdleTracker) Touch(id target.ID) {
 	}
 }
 
+// IsManaged reports whether id is tracked for idle cleanup.
+func (t *TabIdleTracker) IsManaged(id target.ID) bool {
+	if t == nil || id == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.managed[id]
+	return ok
+}
+
 // Forget removes a tab from idle tracking and reports whether it was managed.
 func (t *TabIdleTracker) Forget(id target.ID) bool {
 	if t == nil || id == "" {

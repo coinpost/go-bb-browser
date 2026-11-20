@@ -30,6 +30,9 @@ type fakeConn struct {
 	pingCalls   atomic.Int64
 	evalCalls   atomic.Int64
 	focusCalls  atomic.Int64
+	// onClose runs inside CloseTarget, before it returns: the window in which
+	// the daemon can already have handled Target.targetDestroyed.
+	onClose func(target.ID)
 }
 
 func (f *fakeConn) PageTargets() ([]*target.Info, error) {
@@ -67,6 +70,9 @@ func (f *fakeConn) CreatePageTarget(initialURL string, _ bool) (target.ID, error
 }
 
 func (f *fakeConn) CloseTarget(id target.ID) error {
+	if f.onClose != nil {
+		f.onClose(id)
+	}
 	if f.closeErr != nil {
 		return f.closeErr
 	}

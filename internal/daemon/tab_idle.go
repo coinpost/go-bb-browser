@@ -35,20 +35,37 @@ func (s *Server) forgetTabManaged(tid target.ID) bool {
 	return s.tabIdle != nil && s.tabIdle.Forget(tid)
 }
 
-// releaseManagedTab stops idle tracking for a tab that is gone and, if it was
-// managed, records that in rpc.jsonl. Only the tab_close RPC writes such a line
-// on its own; every other removal has to, or the short id stays managed on disk.
-func (s *Server) releaseManagedTab(tid target.ID, short string) {
-	if s.forgetTabManaged(tid) {
-		s.logManagedTabGone(short)
+// closingTab is the state of one explicit tab_close RPC in flight. If the
+// target's destruction is observed before Target.closeTarget returns, the
+// release is parked here so the RPC decides the single log record: its own on
+// success, the synthetic one if it fails after all.
+type closingTab struct {
+	goneShort string
+}
+
+// releaseManagedTabLocked stops idle tracking for a tab that is gone and, if it
+// was managed, queues the rpc.jsonl record saying so. Only the tab_close RPC
+// writes such a line on its own; every other removal has to, or the short id
+// stays managed on disk. Caller holds lifeMu, which is what orders this record
+// after the tab's tab_new record.
+func (s *Server) releaseManagedTabLocked(tid target.ID, short string) {
+	if !s.idleRecovered && short != "" {
+		s.goneBeforeRecovery[short] = struct{}{}
 	}
+	if !s.forgetTabManaged(tid) {
+		return
+	}
+	if c := s.closing[tid]; c != nil {
+		c.goneShort = short
+		return
+	}
+	s.logManagedTabGone(short)
 }
 
 func (s *Server) logManagedTabGone(short string) {
 	if s.store == nil || short == "" {
 		return
 	}
-	// Same queue as RPC audit lines, so it lands after the tab's tab_new record.
 	s.enqueueAudit(store.ManagedTabGoneRecord(short, time.Now().UTC()))
 }
 
@@ -71,20 +88,29 @@ func (s *Server) listAndSyncTabs(ctx context.Context, conn tabConn) ([]state.Tab
 	return s.syncTabsFromTargetsSince(targets, epoch), nil
 }
 
+// syncTabsFromTargetsSince is the one place an enumeration changes daemon
+// state. Managed tabs are released by full target id, and only those the
+// registry removed for this enumeration; nothing is adopted from rpc.jsonl
+// except by the very first successful enumeration after startup.
 func (s *Server) syncTabsFromTargetsSince(infos []*target.Info, epoch uint64) []state.TabSnapshot {
-	snaps, removed, kept := s.tabs.SyncPageTargetsSince(infos, epoch)
+	s.lifeMu.Lock()
+	snaps, removed, _ := s.tabs.SyncPageTargetsSince(infos, epoch)
 	for _, tab := range removed {
-		s.clearRemovedTarget(tab.TargetID, tab.ShortID)
+		s.releaseManagedTabLocked(tab.TargetID, tab.ShortID)
 	}
-	s.syncTabIdlePresence(snaps, kept...)
+	s.recoverIdleFromLogLocked(snaps)
+	s.lifeMu.Unlock()
+	for _, tab := range removed {
+		s.clearTargetResources(tab.TargetID, tab.ShortID)
+	}
 	return snaps
 }
 
-func (s *Server) clearRemovedTarget(tid target.ID, short string) {
+// clearTargetResources drops the non-lifecycle state of a removed target.
+func (s *Server) clearTargetResources(tid target.ID, short string) {
 	if s.obsStore != nil {
 		s.obsStore.ClearTarget(tid)
 	}
-	s.releaseManagedTab(tid, short)
 	s.forgetTabLock(short)
 	if sess, ok := s.tabConn().(*browser.Session); ok {
 		sess.ForgetTarget(tid)
@@ -92,35 +118,34 @@ func (s *Server) clearRemovedTarget(tid target.ID, short string) {
 }
 
 func (s *Server) removeTargetState(tid target.ID) {
+	s.lifeMu.Lock()
 	short, ok := s.tabs.RemoveTarget(tid)
-	if !ok {
-		return
+	if ok {
+		s.releaseManagedTabLocked(tid, short)
 	}
-	s.clearRemovedTarget(tid, short)
+	s.lifeMu.Unlock()
+	if ok {
+		s.clearTargetResources(tid, short)
+	}
 }
 
-func (s *Server) syncTabIdlePresence(snaps []state.TabSnapshot, kept ...target.ID) {
-	if s.tabIdle == nil {
+// recoverIdleFromLogLocked adopts the managed tabs the previous run left in
+// rpc.jsonl. It runs once, with the first successful enumeration: that is the
+// only moment the log says more about the browser's tabs than memory does.
+// Later the log lags memory (records are written asynchronously), and replaying
+// it would hand a released short id to an unrelated tab that derived the same
+// one. Caller holds lifeMu and has just synced the registry from snaps.
+func (s *Server) recoverIdleFromLogLocked(snaps []state.TabSnapshot) {
+	if s.idleRecovered {
 		return
 	}
-	present := make(map[target.ID]struct{}, len(snaps)+len(kept))
-	for _, tid := range kept {
-		present[tid] = struct{}{}
-	}
-	for _, sn := range snaps {
-		if sn.TargetID == "" {
-			continue
-		}
-		present[sn.TargetID] = struct{}{}
-	}
-	s.tabIdle.SyncPresent(present)
-}
-
-func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
+	s.idleRecovered = true
+	gone := s.goneBeforeRecovery
+	s.goneBeforeRecovery = nil
 	if s.tabIdle == nil || s.store == nil {
 		return
 	}
-	loaded := s.store.ReplayManagedTabActivity()
+	loaded := s.store.StartupManagedTabActivity()
 
 	now := time.Now()
 	timeout := s.cfg.TabIdleTimeout
@@ -139,10 +164,15 @@ func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 	}
 	for shortID, lastAt := range loaded {
 		tid, ok := s.tabs.Lookup(shortID)
-		if !ok {
-			// The registry was just synced from a successful enumeration, so this
-			// tab is gone (typically across a Chrome/daemon restart). Release its
-			// short id on disk before an unrelated tab can inherit it.
+		if ok && s.tabIdle.IsManaged(tid) {
+			// Created by a tab_new of this run; its own record keeps it managed.
+			continue
+		}
+		_, released := gone[shortID]
+		if !ok || released {
+			// The previous run's tab is gone: absent from a successful
+			// enumeration, or seen to go before it. Release its short id on
+			// disk; whichever tab holds it now is not ours.
 			s.logManagedTabGone(shortID)
 			continue
 		}
@@ -181,17 +211,43 @@ func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab st
 	if !ok {
 		return errTabCloseUnknownID
 	}
-	if err := closeTarget(ctx, conn, tid); err != nil {
-		return err
+	// A tab_close RPC logs its own record on success. Announce it before the
+	// CDP call: targetDestroyed can be handled before closeTarget returns.
+	viaRPC := auditMetaFrom(ctx) != nil
+	if viaRPC {
+		s.lifeMu.Lock()
+		s.closing[tid] = &closingTab{}
+		s.lifeMu.Unlock()
 	}
-	if auditMetaFrom(ctx) != nil {
-		// A tab_close RPC logs its own record; skip the synthetic one.
-		s.forgetTabManaged(tid)
+	err := closeTarget(ctx, conn, tid)
+
+	s.lifeMu.Lock()
+	if viaRPC {
+		c := s.closing[tid]
+		delete(s.closing, tid)
+		if err != nil && c != nil && c.goneShort != "" {
+			// The tab went away, but this RPC reports failure and so logs no
+			// successful tab_close: the release needs the synthetic record.
+			s.logManagedTabGone(c.goneShort)
+		}
+		if err == nil {
+			s.forgetTabManaged(tid)
+		}
 	}
-	// Target.closeTarget succeeded, so clear every target-scoped resource even if
-	// no later lifecycle event is delivered.
-	s.removeTargetState(tid)
-	return nil
+	var short string
+	var removed bool
+	if err == nil {
+		// Target.closeTarget succeeded, so clear every target-scoped resource
+		// even if no later lifecycle event is delivered.
+		if short, removed = s.tabs.RemoveTarget(tid); removed {
+			s.releaseManagedTabLocked(tid, short)
+		}
+	}
+	s.lifeMu.Unlock()
+	if removed {
+		s.clearTargetResources(tid, short)
+	}
+	return err
 }
 
 func (s *Server) runTabIdleSweeper(ctx context.Context) {
@@ -270,7 +326,9 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 		unlock()
 		if err != nil {
 			if errors.Is(err, errTabCloseUnknownID) {
-				s.releaseManagedTab(tid, short)
+				s.lifeMu.Lock()
+				s.releaseManagedTabLocked(tid, short)
+				s.lifeMu.Unlock()
 				continue
 			}
 			if s.logger != nil {
