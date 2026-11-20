@@ -134,3 +134,34 @@ head: 62531a7b644ad1c635383271265de8fb967bb331
 留给 review：创建在途记录保留边界、背景事件与过期枚举交错、FIFO 锁序/容量、全 ID 日志轮转、强制关停 producer join。忽略 context 的底层调用会让关停持续等待，刻意不在生产者完成前关闭 store；正常 CDP 调用遵守取消。
 未检查：未启动真实 Chrome，真实 CDP 事件投递/UI/截图/网络拦截、systemd、Docker、跨平台未验证；未注入磁盘写满、轮转重开失败。两项关停回归包含 200/300ms 等待假设，重复运行通过但并非纯 barrier。既有 handler 关停测试等待从 3s 放宽到 10s，coder 在旧 HEAD 复现了 net/http 空连接最长 5s 等待导致的原有失败。
 仍未修复的范围外问题：tab_list tabs/focus 快照不一致、旧枚举复活已关闭 registry target、两项 snapshot ref、run --help=true、run -- --foo.js。六项 P1 的修复仍需独立 review，不宣称全库无缺陷。无关联 issue/PR。
+
+
+## factory · review · 2026-11-21 01:11
+head: 62531a7b644ad1c635383271265de8fb967bb331
+verdict: fix
+fix:
+- [P1] internal/daemon/v1.go:528: 创建期间已确认 target 销毁，仍返回成功及已释放短 ID；回包前用户页复用该 ID，调用方关闭返回值会关闭用户页。保留完整 ID 创建/释放审计，但向调用方返回 target 已消失的 RPC 错误，覆盖成功响应前复用交错。
+- [P1] internal/daemon/tab_idle.go:280: 显式关闭排队后才解析短 ID，两个针对原页的并发关闭会先后关闭原页和复用短 ID 的用户页。排队前绑定完整 target ID，取得操作锁后复核映射，变化则返回失效错误。
+- [P1] internal/browser/session.go:282: 附着已有用户页后初始化失败直接 cancel，chromedp 会关闭该用户页；本地假 CDP 仅令 Page.getFrameTree 失败即可复现。已有 target 的失败清理只 detach，断言无 Target.closeTarget。
+- [P1] internal/browser/session.go:313: target discovery 实际在页面 session 上启用，生命周期监听却在 browser 层；按实际订阅会话投递事件时，创建回包前的销毁未到跟踪器，已消失 target 仍被管理且磁盘只有 tab_new。在 browser executor 显式启用 discovery 并检查结果，假 CDP 按订阅会话投递。
+- [P1] internal/daemon/browser_reconnect.go:53: 首次连接丢弃父 context 取消且握手没有期限；假 CDP 暂扣 attach 回复时取消 daemon，ListenAndServe 直到释放回复才退出。为初次握手设置可取消的独立期限，已有页仅 detach。
+notes:
+- [P2] internal/daemon/tab_idle.go:319: 显式关闭成功未通知在途创建跟踪器，关闭先于创建回包且销毁事件未处理时，已空浏览器仍留下 managed 状态及 tab_close,tab_new。成功关闭应在 lifeMu 内登记完整 ID 销毁并协调唯一释放记录。
+- [P2] internal/daemon/browser_reconnect.go:130: 生命周期队列溢出后，重同步仍继续消费旧枚举前事件，旧 created 复活已消失 target。为事件和重同步建立次序边界。
+- [P2] internal/daemon/v1.go:268: 成功操作后再按短 ID 查 target 写活跃审计，复用时把旧 target 的操作记到新 target。首次解析保存完整 ID，用于续期和审计。
+- [P2] internal/daemon/v1.go:493: 强制关停时创建已执行、回包尚在途，handler 取消后留下未管理也未记成功创建的页面。为已发创建命令提供有界收尾并按可证明归属的完整 ID 记账。
+- [P2] internal/store/store.go:331: 轮转先改名旧日志再发布快照，中断窗口重启丢失所有 managed 归属。先写完整临时快照再原子发布并覆盖中断恢复。
+- [P2] internal/store/store.go:322: 轮转重开失败后 logFile 永久为 nil，后续释放持续失败；触发轮转的 append 却报成功。保留旧可写句柄至切换成功，检查改名错误并支持重试。
+- [P2] internal/state/tab_registry.go:108: 旧枚举重新注册已关闭 target。记录删除版本，拒绝过期枚举复活。
+- [P2] internal/daemon/v1.go:318: 列表与焦点来自不同时点，复现 tabs=[]、focus=1234。使用同一注册表快照。
+- [P2] internal/browser/snapshot.go:109: 清理旧 ref 早于 selector_scope 解析，上次 ref 作为范围得到空结果；先保存根节点。
+- [P2] internal/browser/snapshot.go:108: 脱离文档的旧标记未清除，插回后 ref 重复；跟踪并直接清理上轮标记节点。
+- [P2] cmd/bb-browser/main.go:1036: run adapter.js --help=true 仍发 eval；统一布尔帮助选项，确保零 RPC。
+- [P3] cmd/bb-browser/main.go:956: run -- --foo.js 拒绝存在的脚本；保留 -- 消歧边界。
+
+验证：Codex 独立审查 origin/main...HEAD 的 11 个提交、32 个文件。配置 gofmt/vet/go test -race 全通过；从本机缓存恢复锁定模块后关闭代理、清除测试结果缓存，完整配置测试再次通过。daemon 定向 race 重复20次、state/store全包重复30次通过。额外只读 overlay + barrier/回环假 CDP 诊断重复5次；诊断 PASS 表示成功复现异常。manager 核对配置离线日志、交错复现输出及关键实现，HEAD 未变，工作树干净；无代码提交、禁止路径未改。
+前轮六项 P1 中，启动枚举锁自锁、idle 完整 ID 关闭、sweeper 释放记账、producer join、完整 ID 重启恢复的原交错已修复；创建销毁覆盖仍有事件会话和成功回包缺口。audit FIFO/容量竞争测试通过，未发现反向 lifeMu 锁序。
+安装：复用已有 Go 1.27.4 和 Node，无新增工具或依赖清单修改，仅恢复锁定依赖。HOME/cache/overlay/临时文件位于本 run TMPDIR；复现源码与日志保留在本 review run 的 evidence/FT1-62531a7/。未找到 review-code skill，按独立代码审查执行。
+未检查：未启动真实 Chrome；真实 UI/CDP、截图、网络拦截、systemd、Docker、跨平台、磁盘写满未实测。无关联 issue/PR，无需 GitHub 评论。
+
+第3/3轮仍有5项P1，已达 max_rounds，留在 review/ 等 owner 决定；如需继续修复，请添加说明并移回 new/。本轮不自动开始第4轮。
