@@ -82,3 +82,31 @@ README、AGENTS 同步恢复和 FIFO 说明。禁止路径未改，manager 核�
 
 留给 review：满队列入队方可在 lifeMu 下同步落盘，writer 不取 lifeMu；应继续核对锁序、背压和关停。显式 tab_close 的 RPC 审计仍在响应后入队，同短 ID 的新 tab_new 若抢先入队，重启可能少恢复该 managed tab；coder 明确保留该风险。仅短 ID 持久化导致的停机期间碰撞风险未变。最新 review 中两项 snapshot P2、run --help=true P2、run -- --foo.js P3 未在本轮修复。
 未检查：未启动真实 Chrome，真实 CDP 事件/响应顺序与 runTargetSync 实际事件流未验；connectBrowserLocked/runTargetSync 循环无直接单测，仅覆盖所调用同步入口。日志轮转与新 audit 队列组合未新增专测；未验 UI、systemd、Docker 或跨平台。无关联 issue/PR。
+
+## factory · review · 2026-11-21 00:10
+head: 30ff5033ceff3110b7275e5c99963eb69c075864
+verdict: fix
+fix:
+- [P1] internal/daemon/tab_idle.go:115: 启动持 tabMu 写锁执行初始枚举；旧枚举漏掉同步循环刚注册的 target，清理时 tabConn 再取读锁，HTTP 监听前自锁。缩小写锁范围，在锁外枚举/清理，并让初始枚举带开始时 epoch；用真实 ListenAndServe + 回环假 CDP 覆盖。
+- [P1] internal/daemon/tab_idle.go:317: idle 过期判断使用完整 target ID，实际关闭却重新查短 ID；期间销毁和短 ID 复用会直接关闭用户页。把已核定的完整 tid 传给 CloseTarget，状态清理同样按该 tid，补充 barrier 回归。
+- [P1] internal/daemon/tab_idle.go:293: 销毁流程持 lifeMu 移除映射后，sweeper 在锁外 Forget，抢先移除 managed 状态，使销毁流程跳过合成 tab_close；重启错误收养同短 ID 用户页。取消管理和记账必须由 lifeMu 内释放路径独占；sweeper 无映射时不得提前 Forget。
+- [P1] internal/daemon/v1.go:486: targetCreated/targetDestroyed 都先于创建 RPC 返回时，回包处理重新注册已销毁 target，仅留下 tab_new，重启收养并 idle 关闭同短 ID 用户页。跟踪创建请求在途期间观察到的完整 target 销毁信息，注册前核对并完整记账，补交错测试。
+- [P1] internal/daemon/server.go:231: 关停没有等待所有审计生产者；idle CDP 关闭成功但尚未记账时服务已返回并关闭 store，随后合成记录写入失败，重启错误收养用户页。所有退出路径先取消并等待 sweeper/target 同步等生产者，再排空 writer 和关闭 store，覆盖在途关闭。
+- [P1] internal/daemon/tab_idle.go:166: 仅短 ID 持久化恢复会误收养用户页；已复现重启前后同两页均未变化，仅枚举顺序改变就把用户页从 01234 分配为 1234，随后 idle 关闭用户页。创建审计与轮转快照持久化完整 target ID 并据此恢复；旧格式有歧义时不得自动收养，补重启排序和兼容回归。
+notes:
+- [P2] internal/daemon/v1.go:204: 本轮先 append 后检查容量，阻塞 writer 时容量 2 实际 pending 32；FIFO 成立但容量无界。取得容量后再追加或先保序排空再重试。
+- [P2] internal/daemon/v1.go:653: 显式关闭仍在响应后审计，短 ID 复用时 tab_new、tab_new、tab_close 导致重启漏恢复新 managed tab。短 ID 可复用前确定并排入旧 target 唯一关闭记录。
+- [P2] internal/daemon/v1.go:295: 快照生成后、旧资源清理期间新建并选中 target，tab_list 仍可返回 tabs=[]、focus=1234。列表和选中项应来自同一快照。
+- [P2] internal/state/tab_registry.go:108: epoch 只保护新增，已关闭 target 可被旧枚举重新注册；console_clear 对失效短 ID 返回成功。记录删除版本，拒绝过期枚举复活 target。
+- [P2] internal/browser/snapshot.go:109: 上次 ref selector 用作 scope 时，提前清理属性导致空 refs；先保存根节点。
+- [P2] internal/browser/snapshot.go:108: 脱离文档的旧标记未清理，插回后 ref 重复；跟踪并清除上一轮标记节点。
+- [P2] cmd/bb-browser/main.go:1036: run adapter.js --help=true 实际发出 eval；统一布尔帮助选项并确保零 RPC。
+- [P3] cmd/bb-browser/main.go:956: run -- --foo.js 错误拒绝存在的脚本；保留 -- 的选项终止边界。
+
+前轮两个 P1 的原始复现路径已修复，以上为新增证实的其他交错或既有未解决路径；本轮新增队列容量问题为 P2，不将已知 P2 简单升级。短 ID 恢复风险本次已在浏览器 target 集合完全不变的重启场景证实，不只是停机期间变化的推测。
+
+验证：Codex 独立审查 origin/main...HEAD 全部 9 个提交、25 个文件；配置 gofmt 检查、go vet ./...、go test -race ./... 全通过。daemon 生命周期/审计/恢复/关停定向及 state/store 全包 -race -count=30 通过。只读 overlay + barrier 关键交错重复 5 次，诊断测试 PASS 表示异常已复现；真实 ListenAndServe 配回环假 CDP 捕获启动阻塞栈及关停后写入失败；小阈值日志轮转/FIFO 正常路径 5 次通过。manager 核对配置测试日志、交错输出、启动栈、关停日志和相关代码。HEAD 未变，工作树干净，无代码提交。
+安装：复用 Go 1.27.4 和已有 Node，无新增工具或依赖清单变更。测试使用本 run TMPDIR 内临时 HOME/cache，仅使用本地假 CDP/回环服务。证据源码和日志保留于本 review run 的 evidence/FT1-30ff503/，临时目录按流程清理。
+未检查：未启动真实 Chrome；真实 UI/CDP 事件投递、截图、网络拦截、systemd、Docker、跨平台均未实测；未注入磁盘写满和轮转重开失败。无关联 issue/PR，无需 GitHub 评论。
+
+第 2/3 轮存在 P1，review/ → new/；下一轮按 fix 列表修复。
