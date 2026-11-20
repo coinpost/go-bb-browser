@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/chromedp/cdproto/target"
@@ -51,12 +52,31 @@ func (s *Server) logManagedTabGone(short string) {
 	s.enqueueAudit(store.ManagedTabGoneRecord(short, time.Now().UTC()))
 }
 
+// syncTabsFromTargets applies an enumeration that is known to be current.
+// Request paths that fetch the list themselves use listAndSyncTabs instead.
 func (s *Server) syncTabsFromTargets(infos []*target.Info) []state.TabSnapshot {
-	snaps, removed := s.tabs.SyncPageTargetsDetailed(infos)
+	return s.syncTabsFromTargetsSince(infos, math.MaxUint64)
+}
+
+// listAndSyncTabs enumerates page targets and reconciles daemon state with the
+// reply. Target.getTargets can be answered before a concurrent tab_new's
+// Target.createTarget and applied after it; the registry epoch captured up
+// front keeps such a tab registered and managed instead of treating it as gone.
+func (s *Server) listAndSyncTabs(ctx context.Context, conn tabConn) ([]state.TabSnapshot, error) {
+	epoch := s.tabs.Epoch()
+	targets, err := pageTargets(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	return s.syncTabsFromTargetsSince(targets, epoch), nil
+}
+
+func (s *Server) syncTabsFromTargetsSince(infos []*target.Info, epoch uint64) []state.TabSnapshot {
+	snaps, removed, kept := s.tabs.SyncPageTargetsSince(infos, epoch)
 	for _, tab := range removed {
 		s.clearRemovedTarget(tab.TargetID, tab.ShortID)
 	}
-	s.syncTabIdlePresence(snaps)
+	s.syncTabIdlePresence(snaps, kept...)
 	return snaps
 }
 
@@ -79,11 +99,14 @@ func (s *Server) removeTargetState(tid target.ID) {
 	s.clearRemovedTarget(tid, short)
 }
 
-func (s *Server) syncTabIdlePresence(snaps []state.TabSnapshot) {
+func (s *Server) syncTabIdlePresence(snaps []state.TabSnapshot, kept ...target.ID) {
 	if s.tabIdle == nil {
 		return
 	}
-	present := make(map[target.ID]struct{}, len(snaps))
+	present := make(map[target.ID]struct{}, len(snaps)+len(kept))
+	for _, tid := range kept {
+		present[tid] = struct{}{}
+	}
 	for _, sn := range snaps {
 		if sn.TargetID == "" {
 			continue
@@ -151,8 +174,7 @@ func (s *Server) closeTabByShort(ctx context.Context, tab string) error {
 func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab string) error {
 	tid, ok := s.tabs.Lookup(tab)
 	if !ok {
-		if targets, err := pageTargets(ctx, conn); err == nil {
-			s.syncTabsFromTargets(targets)
+		if _, err := s.listAndSyncTabs(ctx, conn); err == nil {
 			tid, ok = s.tabs.Lookup(tab)
 		}
 	}

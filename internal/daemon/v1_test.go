@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -562,5 +563,75 @@ func TestV1MissingID(t *testing.T) {
 		bytes.NewBufferString(`{"jsonrpc":"2.0","method":"tab_list"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+// staleTargetsConn answers the first enumeration with the target list as it was
+// when the call started, but only after release — the shape of a Target.getTargets
+// reply that Chrome produced before a concurrent Target.createTarget.
+type staleTargetsConn struct {
+	*fakeConn
+	once     sync.Once
+	captured chan struct{}
+	release  chan struct{}
+}
+
+func (c *staleTargetsConn) PageTargetsContext(context.Context) ([]*target.Info, error) {
+	infos := append([]*target.Info(nil), c.fakeConn.infos...)
+	c.once.Do(func() {
+		close(c.captured)
+		<-c.release
+	})
+	return infos, nil
+}
+
+// A sync from an enumeration that predates tab_new must not unregister the new
+// tab: that silently dropped it from idle tracking, so it was never auto-closed.
+func TestStaleEnumerationDoesNotDropConcurrentTabNew(t *testing.T) {
+	conn := &staleTargetsConn{fakeConn: &fakeConn{}, captured: make(chan struct{}), release: make(chan struct{})}
+	srv := newIdleTestServer(conn.fakeConn, time.Minute)
+	srv.tabHook = conn
+
+	listDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1", bytes.NewBufferString(rpcReq(protocol.MethodTabList, map[string]any{}, 1)))
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		listDone <- rec
+	}()
+	<-conn.captured
+
+	rec := postRPC(t, srv, rpcReq(protocol.MethodTabNew, map[string]any{}, 2))
+	var created struct {
+		Result protocol.TabNewResult `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.Result.Tab == "" {
+		t.Fatalf("tab_new: %v %s", err, rec.Body.String())
+	}
+	tid, ok := srv.tabs.Lookup(created.Result.Tab)
+	if !ok {
+		t.Fatal("new tab not registered")
+	}
+
+	close(conn.release)
+	if rec := <-listDone; rec.Code != http.StatusOK {
+		t.Fatalf("tab_list status %d", rec.Code)
+	}
+
+	if got, ok := srv.tabs.Lookup(created.Result.Tab); !ok || got != tid {
+		t.Fatal("stale enumeration unregistered the tab created meanwhile")
+	}
+	if _, ok := srv.tabIdle.Snapshot()[tid]; !ok {
+		t.Fatal("stale enumeration dropped the new tab from idle tracking")
+	}
+
+	// The next, current enumeration is authoritative again.
+	conn.fakeConn.infos = nil
+	postRPC(t, srv, rpcReq(protocol.MethodTabList, map[string]any{}, 3))
+	if _, ok := srv.tabs.Lookup(created.Result.Tab); ok {
+		t.Fatal("tab missing from a current enumeration was kept")
+	}
+	if len(srv.tabIdle.Snapshot()) != 0 {
+		t.Fatal("idle tracking kept a tab missing from a current enumeration")
 	}
 }

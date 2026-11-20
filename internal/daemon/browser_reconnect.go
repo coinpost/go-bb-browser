@@ -120,10 +120,9 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		}
 		if sess.ConsumeTargetDirty() {
 			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
-			infos, err := sess.PageTargetsContext(probe)
+			snaps, err := s.listAndSyncTabs(probe, sess)
 			cancel()
 			if err == nil {
-				snaps := s.syncTabsFromTargets(infos)
 				// Reconciliation is idempotent for tabs already tracked in memory and
 				// is required when the startup target enumeration failed.
 				s.reconcileIdleFromLog(snaps)

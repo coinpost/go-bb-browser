@@ -1,6 +1,7 @@
 package state
 
 import (
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -16,6 +17,12 @@ type TabRegistry struct {
 	targetToShort map[target.ID]string
 	shortToTarget map[string]target.ID
 	selected      string // short id; empty if none
+
+	// epoch counts registrations; registeredAt is the epoch at which each
+	// target was first registered. Together they tell a sync whether a target
+	// missing from its enumeration was registered after that enumeration began.
+	epoch        uint64
+	registeredAt map[target.ID]uint64
 }
 
 type RemovedTab struct {
@@ -27,7 +34,16 @@ func NewTabRegistry() *TabRegistry {
 	return &TabRegistry{
 		targetToShort: make(map[target.ID]string),
 		shortToTarget: make(map[string]target.ID),
+		registeredAt:  make(map[target.ID]uint64),
 	}
+}
+
+// Epoch returns a marker to capture before asking the browser for its targets
+// and to hand to SyncPageTargetsSince with the reply.
+func (r *TabRegistry) Epoch() uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.epoch
 }
 
 // SyncPageTargets updates registration from the current set of page-type targets.
@@ -40,6 +56,16 @@ func (r *TabRegistry) SyncPageTargets(infos []*target.Info) []TabSnapshot {
 // SyncPageTargetsDetailed also reports removals so callers can clear every
 // target-scoped resource through one lifecycle path (INV-6).
 func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
+	tabs, removed, _ := r.SyncPageTargetsSince(infos, math.MaxUint64)
+	return tabs, removed
+}
+
+// SyncPageTargetsSince is SyncPageTargetsDetailed for an enumeration requested
+// when Epoch() returned epoch. A target registered after that (tab_new, or a
+// targetCreated event, racing the enumeration) may legitimately be absent from
+// infos; it is kept and reported in kept rather than removed. The next sync,
+// started after its registration, is authoritative for it.
+func (r *TabRegistry) SyncPageTargetsSince(infos []*target.Info, epoch uint64) (tabs []TabSnapshot, removed []RemovedTab, kept []target.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -51,9 +77,12 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 		present[info.TargetID] = struct{}{}
 	}
 
-	var removed []RemovedTab
 	for id, short := range r.targetToShort {
 		if _, ok := present[id]; !ok {
+			if r.registeredAt[id] > epoch {
+				kept = append(kept, id)
+				continue
+			}
 			removed = append(removed, RemovedTab{TargetID: id, ShortID: short})
 			r.removeLocked(id)
 		}
@@ -81,7 +110,7 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 			URL:      tabURL(infos, id),
 		})
 	}
-	return out, removed
+	return out, removed, kept
 }
 
 // RemoveTarget removes one target and returns its former short id.
@@ -150,6 +179,7 @@ func (r *TabRegistry) removeLocked(id target.ID) {
 	}
 	delete(r.targetToShort, id)
 	delete(r.shortToTarget, short)
+	delete(r.registeredAt, id)
 	if r.selected == short {
 		r.selected = ""
 	}
@@ -186,6 +216,8 @@ func (r *TabRegistry) assignShortLocked(id target.ID) string {
 func (r *TabRegistry) registerLocked(id target.ID, short string) {
 	r.targetToShort[id] = short
 	r.shortToTarget[short] = id
+	r.epoch++
+	r.registeredAt[id] = r.epoch
 }
 
 func hexRunes(s string) []rune {
