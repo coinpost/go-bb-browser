@@ -635,3 +635,41 @@ func TestStaleEnumerationDoesNotDropConcurrentTabNew(t *testing.T) {
 		t.Fatal("idle tracking kept a tab missing from a current enumeration")
 	}
 }
+
+func TestSnapRefSelectorEscapesRef(t *testing.T) {
+	for ref, want := range map[string]string{
+		"3":  `[__bb_snap_ref="3"]`,
+		"@3": `[__bb_snap_ref="3"]`,
+		// A trailing backslash used to escape the closing quote.
+		`3\`:  `[__bb_snap_ref="3\\"]`,
+		`a"b`: `[__bb_snap_ref="a\"b"]`,
+		// `\"` used to end the string early, turning the rest into selectors
+		// of its own (here: `,body,`).
+		`x\"],body,[y="`: `[__bb_snap_ref="x\\\"],body,[y=\""]`,
+	} {
+		if got := snapRefSelector(ref); got != want {
+			t.Errorf("snapRefSelector(%q) = %s, want %s", ref, got, want)
+		}
+	}
+}
+
+// click must hand the escaped selector to the browser, not just build it.
+type clickRecorder struct {
+	*fakeConn
+	selector string
+}
+
+func (c *clickRecorder) Click(_ target.ID, selector string) error {
+	c.selector = selector
+	return nil
+}
+
+func TestClickRefIsEscapedInSelector(t *testing.T) {
+	conn := &clickRecorder{fakeConn: &fakeConn{infos: []*target.Info{{TargetID: "AAAA00001234", Type: "page"}}}}
+	srv := newIdleTestServer(conn.fakeConn, 0)
+	srv.tabHook = conn
+	postRPC(t, srv, rpcReq(protocol.MethodClick, map[string]any{"tab": "1234", "ref": `x\"],body,[y="`}, 1))
+	if want := `[__bb_snap_ref="x\\\"],body,[y=\""]`; conn.selector != want {
+		t.Fatalf("selector = %s, want %s", conn.selector, want)
+	}
+}

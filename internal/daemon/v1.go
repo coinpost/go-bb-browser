@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -762,8 +761,7 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
-		ref = strings.TrimPrefix(ref, "@")
-		sel = fmt.Sprintf(`[__bb_snap_ref="%s"]`, strings.ReplaceAll(ref, `"`, `\"`))
+		sel = snapRefSelector(ref)
 	}
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -1184,8 +1182,7 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
-		ref = strings.TrimPrefix(ref, "@")
-		sel = fmt.Sprintf(`[__bb_snap_ref="%s"]`, strings.ReplaceAll(ref, `"`, `\"`))
+		sel = snapRefSelector(ref)
 	}
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -1234,6 +1231,15 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.FillResult{Tab: tab, Seq: seq})
+}
+
+// snapRefSelector expands a snapshot ref ("3" or "@3") to its attribute
+// selector. Backslash must be escaped before the quote: otherwise a trailing
+// backslash swallows the closing quote, and `\"` in a ref ends the string
+// early so the rest of the ref is parsed as further selectors.
+func snapRefSelector(ref string) string {
+	ref = strings.TrimPrefix(ref, "@")
+	return `[__bb_snap_ref="` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(ref) + `"]`
 }
 
 func (s *Server) resolveTab(ctx context.Context, conn tabConn, tab string) (target.ID, bool) {
