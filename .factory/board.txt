@@ -1,0 +1,22 @@
+go-bb-browser - factory board
+=============================
+Nothing at your gates | 0 with the agent | 0 done
+Drawn Nov 20, 22:31 | https://github.com/coinpost/go-bb-browser
+
+BACKLOG (0)                                 never built
+    Nothing here
+
+NEW (0)
+    Nothing here
+
+REVIEW (0)
+    Nothing here
+
+READY (0)
+    Nothing here
+
+DONE (0)
+    Nothing here
+
+* waits for you. [!] a stage that holds one.
+Each item's thread is its file in .factory/<folder>/.

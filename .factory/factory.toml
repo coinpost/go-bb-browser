@@ -1,0 +1,86 @@
+# .factory/factory.toml: how the factory works on this repository.
+#
+# It lives on the branch factory_board, which holds only .factory/ and
+# shares no history with the code. Set it up once, from a clean checkout:
+#
+#   git switch --orphan factory_board
+#   mkdir -p .factory/{backlog,new,review,ready,done,stop}
+#   touch .factory/{backlog,new,review,ready,done,stop}/.gitkeep
+#   cp /path/to/this/factory.toml .factory/    # then set the values
+#   git add .factory && git commit -m "Start the factory board"
+#   git push -u origin factory_board && git switch main
+#
+# To edit the board, keep a second worktree of it beside your clone:
+#   git worktree add ../<repo>-board factory_board
+#
+# To show the board as a web page on GitHub Pages, see board-pages.yml.
+
+# The branch builds start from, and a ship run merges into: the only
+# time the factory pushes to it. The remote is origin.
+base = "main"
+
+# Names whose "## name · time" sections count as yours: requests,
+# answers and notes. Sections by other names are read as
+# information only. The manager signs its own sections "factory";
+# leave that name out.
+owners = ["yiplee", "Guoyin"]
+
+# What must pass: after each build, in each review, and on base before
+# a ship run pushes it. A ship runs only each item's own tests after its
+# merge, and this command once after the last.
+test = 'test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...'
+
+# Run after changes that need generated files or catalogs updated.
+after_change = []
+
+# Read before building or reviewing.
+read = ["README.md", "AGENTS.md"]
+
+# Paths the factory must never change.
+never = [".github/workflows/", ".factory/factory.toml"]
+
+# Added to the coder's rules for this repository.
+rules = [
+  "Scripted tests get a throwaway HOME.",
+  "与 owner 及看板沟通使用中文。",
+  "测试不依赖真实外网；需要 Chrome 时，启动非 headless Chrome，并启用 CDP 远程调试。",
+]
+
+# How many builds an item gets. A review that finds P0 or P1 sends the
+# item back to new/ for a fix round while its round is below this; at
+# the limit it stays in review/ and you decide. Default: 1 (every P0/P1
+# review waits for you).
+max_rounds = 3
+
+# What a ship does with the items it takes, in this order:
+#   merge  merge each item into base and run test on the result
+#   tag    tag the merged base with the next version: v1.4.2, then v1.4.3
+#          (v0.1.0 when there is no vX.Y.Z tag yet)
+#   push   push base and the tag, close linked issues and PRs, and move
+#          the items to done/
+#   clean  after push, delete the factory/ branches of items in done/
+#          that are merged into base (needs the branch rules in
+#          github-app.md to allow it)
+# Leave out tag to ship without tags. Without push, a ship only checks
+# that the items merge and pass, and says so; nothing is pushed or moved.
+# [] stops ships from merging anything. Default: merge, tag and push.
+# This list is configuration only; it is not authorization to ship or
+# auto-merge. Do not add tag: a v* tag triggers goreleaser release.
+ship = ["merge", "push"]
+
+# Capital letters before item numbers: FT16 in file names, branches and
+# messages, so they are not mistaken for issue or PR numbers. Default: FT.
+prefix = "FT"
+
+# How you see the board, besides the item files:
+#   web   a page on GitHub Pages, published on each push by board-pages.yml
+#         (set it up once; the factory itself does nothing)
+#   text  .factory/board.txt, plain text the factory rewrites after each run
+#         that changes the board: read it on GitHub, or with cat after a pull
+#   off   neither
+# Default: web. Switching away from text leaves board.txt as it is.
+board = "text"
+
+# The clock for section times and the board page (scripts/board.py),
+# so CI in UTC shows the same times as the files. Default: the machine's.
+timezone = "Asia/Shanghai"
