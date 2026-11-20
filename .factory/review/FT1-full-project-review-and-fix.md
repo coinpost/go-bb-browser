@@ -1,6 +1,6 @@
 ---
 branch: factory/FT1-full-project-review-and-fix
-round: 1
+round: 2
 ---
 # 全项目 review 并修复发现的问题
 
@@ -60,3 +60,25 @@ notes:
 局限/执行偏差：coder 使用隔离的 headless Chrome、本地页面和回环服务验证了 DOM/ref、daemon 错误与 CLI 行为；这不符合配置要求的非 headless Chrome，因此不将其视为符合要求的可视浏览器验收。未验证非 headless UI、systemd 实际运行、Docker、截图、网络拦截和跨平台启动。并发 P1 复现不依赖 Chrome。复现源码和日志保留在本 review run 的 evidence/FT1-58c80bf/ 下，临时目录按流程清理。
 
 第 1/3 轮存在 P1，review/ → new/；下一轮构建修复 fix 列表。无关联 issue/PR，未发 GitHub 评论。
+
+## factory · plan · 2026-11-20 23:56
+第 2 轮补充计划。
+Behaviour：创建/销毁/响应审计并发、满 audit 队列、初次枚举失败重试和运行期 resync 时，保持日志顺序，禁止误收养用户 tab；空 tabs、错误路径维持协议。
+Scope：最新 review 两项 P1 及直接相关 lifecycle/state 交错和回归测试，不扩展到无关重构。
+Decisions：统一 managed lifecycle 串行边界和 FIFO；运行期不重放旧日志；锁不跨 CDP 调用，满队列施加保序背压。
+Checking：fake/barrier 测试覆盖审计乱序、异步落盘 resync、首次恢复、关闭成功失败及快照一致性，定向 -race 重复测试并执行配置完整测试。
+
+## factory · 2026-11-20 23:56
+第 2/3 轮已构建并推送，new/ → review/。
+branch: factory/FT1-full-project-review-and-fix
+head: 30ff503
+本轮两个主题提交：
+- 7d767c8：lifeMu 串行管理创建/释放与审计入队；满队列按 FIFO 排空；恢复只在首次成功枚举读取启动快照一次，运行期按完整 target ID 清理；覆盖初次失败重试和恢复前短 ID 释放。直接相关 P2：仅清理枚举确认移除的 target，显式关闭提前标记 closing，并覆盖成功/失败唯一关闭记录。
+- 30ff503：epoch 保留 tab 纳入枚举返回快照，修复 tabs/tab/focus 不一致。
+README、AGENTS 同步恢复和 FIFO 说明。禁止路径未改，manager 核对提交范围和干净工作树后推送。
+
+验证：Claude Code 报告完整 gofmt/vet/race 测试通过；daemon 生命周期/审计/idle/关停定向 -race -count=30、state/store 全包 -race -count=30 通过；6 种旧行为变异验证对应测试失败。manager 独立执行 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...，全部通过。
+安装：无新增工具，无 manifest/lockfile 变更；复用 Go 1.27.4，仅恢复锁定依赖。测试 HOME/cache/临时文件均位于本 run TMPDIR。
+
+留给 review：满队列入队方可在 lifeMu 下同步落盘，writer 不取 lifeMu；应继续核对锁序、背压和关停。显式 tab_close 的 RPC 审计仍在响应后入队，同短 ID 的新 tab_new 若抢先入队，重启可能少恢复该 managed tab；coder 明确保留该风险。仅短 ID 持久化导致的停机期间碰撞风险未变。最新 review 中两项 snapshot P2、run --help=true P2、run -- --foo.js P3 未在本轮修复。
+未检查：未启动真实 Chrome，真实 CDP 事件/响应顺序与 runTargetSync 实际事件流未验；connectBrowserLocked/runTargetSync 循环无直接单测，仅覆盖所调用同步入口。日志轮转与新 audit 队列组合未新增专测；未验 UI、systemd、Docker 或跨平台。无关联 issue/PR。
