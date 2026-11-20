@@ -1,3 +1,6 @@
+[Unit]
+Description=bb-daemon (attaches to a running Chrome over CDP)
+
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/bb-daemon --debugger-url http://127.0.0.1:9222
@@ -32,3 +35,6 @@ PrivateTmp=yes
 
 # If you need specific writable paths, ensure the parent directories exist
 ReadWritePaths=%h/.local/state/bb-daemon
+
+[Install]
+WantedBy=default.target
