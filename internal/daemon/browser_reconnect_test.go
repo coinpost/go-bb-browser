@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
@@ -158,6 +160,39 @@ func TestTargetClosedIsNotGlobalFatal(t *testing.T) {
 	case err := <-srv.fatalCh:
 		t.Fatalf("unexpected fatal signal: %v", err)
 	default:
+	}
+}
+
+// A page-thrown exception is a reply from a healthy browser. Its text is
+// arbitrary page content and must not take the daemon down.
+func TestPageExceptionIsNotGlobalFatal(t *testing.T) {
+	for name, err := range map[string]error{
+		"exception": &runtime.ExceptionDetails{
+			Text:      "Uncaught",
+			Exception: &runtime.RemoteObject{Description: "Error: WebSocket connection failed: unexpected EOF"},
+		},
+		"protocol error": &cdproto.Error{Code: -32000, Message: "broken pipe in page script"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newSupervisorTestServer(t, 3)
+			if isCDPSessionLost(err) {
+				t.Fatal("browser reply classified as lost CDP session")
+			}
+			if got := srv.cdpHint(err); got == "" {
+				t.Fatal("empty hint")
+			}
+			if srv.browserState == sessionFailed {
+				t.Fatal("page-level error marked browser failed")
+			}
+			select {
+			case err := <-srv.fatalCh:
+				t.Fatalf("unexpected fatal signal: %v", err)
+			default:
+			}
+		})
+	}
+	if !isCDPSessionLost(errors.New("websocket: close 1006 (abnormal closure): unexpected EOF")) {
+		t.Fatal("raw transport error must still be fatal")
 	}
 }
 

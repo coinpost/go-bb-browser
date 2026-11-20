@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/chromedp/cdproto"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
 )
 
@@ -66,6 +68,17 @@ func ErrorKindOf(err error) ErrorKind {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrorTimeout
 	}
+	// A page-thrown JS exception carries arbitrary page text ("typeof", a
+	// "websocket.js" stack frame, ...). It proves the transport delivered a
+	// reply, so its text must never be matched against transport/target markers.
+	var exception *runtime.ExceptionDetails
+	if errors.As(err, &exception) {
+		return ErrorRequest
+	}
+	// A CDP protocol error is likewise a reply from the browser: it may report
+	// a missing target, but never a lost transport.
+	var reply *cdproto.Error
+	browserReplied := errors.As(err, &reply)
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "no target"),
@@ -76,6 +89,8 @@ func ErrorKindOf(err error) ErrorKind {
 		strings.Contains(msg, "no session with given id"),
 		strings.Contains(msg, "no such target"):
 		return ErrorTargetGone
+	case browserReplied:
+		return ErrorRequest
 	case strings.Contains(msg, "eof"),
 		strings.Contains(msg, "connection refused"),
 		strings.Contains(msg, "connection reset"),
