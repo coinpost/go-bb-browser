@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
 Nothing at your gates | 0 with the agent | 0 done
-Drawn Nov 20, 22:59
+Drawn Nov 20, 23:00 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (1)                                 never built
     new     1m  全项目 review 并修复发现的问题
