@@ -33,6 +33,17 @@ func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// From here on the request may record what it does. Shutdown waits for
+	// admitted requests and cancels them through rpcCtx if it has to.
+	if !s.rpcGate.enter() {
+		http.Error(w, "daemon is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.rpcGate.leave()
+	ctx, cancelRPC := context.WithCancel(ctx)
+	defer cancelRPC()
+	defer context.AfterFunc(s.rpcCtx, cancelRPC)()
+
 	rawBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		s.writeJSONRPCBytes(ctx, w, protocol.NullID, func() ([]byte, error) {

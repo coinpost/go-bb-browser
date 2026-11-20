@@ -331,68 +331,45 @@ func writeLegacyLog(t *testing.T, stateDir, short string) {
 	}
 }
 
-// A short-id-only record cannot say which tab it meant. It is adopted only
-// when exactly one open tab can have had that short id; otherwise no tab is
-// adopted. Either way the next run no longer depends on the old line.
-func TestLegacyShortIDRecordIsAdoptedOnlyWhenUnambiguous(t *testing.T) {
-	for name, tc := range map[string]struct {
-		present []target.ID
-		adopted []target.ID
-	}{
-		"two tabs can have had the short id": {present: []target.ID{userTab, ownTab, otherTab}},
-		"no tab can have had the short id":   {present: []target.ID{otherTab}},
-		"exactly one tab":                    {present: []target.ID{ownTab, otherTab}, adopted: []target.ID{ownTab}},
+// A short-id-only record cannot say which tab it meant, so it is never used to
+// adopt one. That includes the case that looks safe: the daemon's tab is gone
+// and a user's page with the same id suffix is the only candidate left.
+func TestLegacyShortIDRecordAdoptsNothing(t *testing.T) {
+	for name, present := range map[string][]target.ID{
+		"sole same-suffix tab is a user page that replaced it": {userTab},
+		"sole same-suffix tab among others":                    {ownTab, otherTab},
+		"two tabs with the suffix":                             {userTab, ownTab, otherTab},
+		"no tab with the suffix":                               {otherTab},
+		"no tabs":                                              {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			stateDir := t.TempDir()
 			writeLegacyLog(t, stateDir, "1234")
 
-			fc := &fakeConn{infos: pageInfos(tc.present...)}
+			fc := &fakeConn{infos: pageInfos(present...)}
 			srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
 			srv.syncTabsFromTargets(fc.infos)
-			managed := srv.tabIdle.Snapshot()
-			if len(managed) != len(tc.adopted) {
-				t.Fatalf("managed = %v, want %v", managed, tc.adopted)
-			}
-			for _, tid := range tc.adopted {
-				if !srv.tabIdle.IsManaged(tid) {
-					t.Fatalf("managed = %v, want %v", managed, tc.adopted)
-				}
+			if got := srv.tabIdle.Snapshot(); len(got) != 0 {
+				t.Fatalf("managed from a short-id-only record: %v", got)
 			}
 			expireAndSweep(srv)
-			if !slices.Equal(fc.closed, tc.adopted) {
-				t.Fatalf("idle cleanup closed %v, want %v", fc.closed, tc.adopted)
+			if len(fc.closed) != 0 || len(fc.infos) != len(present) {
+				t.Fatalf("idle cleanup closed %v", fc.closed)
 			}
 			if err := srv.closeAudit(); err != nil {
 				t.Fatal(err)
 			}
-			// The legacy line is retired; nothing is left to guess from.
+			// The line is retired: the next run has nothing to guess from either.
 			if got := managedOnDisk(t, stateDir); len(got) != 0 {
 				t.Fatalf("managed on disk = %v", got)
 			}
+			srv2 := newIdleTestServerWithState(fc, time.Minute, stateDir)
+			t.Cleanup(func() { _ = srv2.closeAudit() })
+			srv2.syncTabsFromTargets(fc.infos)
+			if got := srv2.tabIdle.Snapshot(); len(got) != 0 {
+				t.Fatalf("managed after the next restart: %v", got)
+			}
 		})
-	}
-}
-
-// An adopted legacy entry is written again under its full target id, so the
-// run after that recovers it without guessing.
-func TestLegacyShortIDRecordIsRewrittenWithFullTargetID(t *testing.T) {
-	stateDir := t.TempDir()
-	writeLegacyLog(t, stateDir, "1234")
-
-	fc := &fakeConn{infos: pageInfos(ownTab)}
-	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
-	srv.syncTabsFromTargets(fc.infos)
-	if err := srv.closeAudit(); err != nil {
-		t.Fatal(err)
-	}
-	if got := managedOnDisk(t, stateDir); !slices.Equal(got, []string{string(ownTab)}) {
-		t.Fatalf("managed on disk = %v, want %s under its full id", got, ownTab)
-	}
-
-	srv2, _ := restartReordered(t, stateDir)
-	if got := srv2.tabIdle.Snapshot(); len(got) != 1 || !srv2.tabIdle.IsManaged(ownTab) {
-		t.Fatalf("managed after second restart = %v, want only %s", got, ownTab)
 	}
 }
 

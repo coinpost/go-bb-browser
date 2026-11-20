@@ -37,8 +37,7 @@ func ManagedTabGoneRecord(short, target string, at time.Time) LogRecord {
 }
 
 // ManagedTabRecord builds a synthetic tab_new line that records target as
-// managed with last activity at: rotation snapshots, and a legacy short-id
-// entry being rewritten with the full id of the tab that owns it.
+// managed with last activity at, as rotation snapshots do.
 func ManagedTabRecord(short, target string, at time.Time) LogRecord {
 	return syntheticRecord(protocol.MethodTabNew, short, target, at)
 }

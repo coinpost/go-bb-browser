@@ -169,7 +169,7 @@ func (s *Server) syncTabsFromTargetsSince(infos []*target.Info, epoch uint64) []
 		s.noteTargetGoneLocked(tab.TargetID)
 		s.releaseManagedTabLocked(tab.TargetID, tab.ShortID)
 	}
-	s.recoverIdleFromLogLocked(snaps)
+	s.recoverIdleFromLogLocked()
 	s.lifeMu.Unlock()
 	for _, tab := range removed {
 		s.clearTargetResources(tab.TargetID, tab.ShortID)
@@ -209,8 +209,8 @@ func (s *Server) removeTargetState(tid target.ID) {
 // Ownership is decided by full target id. Short ids are reassigned on every
 // run, in registration order, so the tab that holds a logged short id now need
 // not be the tab that held it then. Caller holds lifeMu and has just synced the
-// registry from snaps.
-func (s *Server) recoverIdleFromLogLocked(snaps []state.TabSnapshot) {
+// registry.
+func (s *Server) recoverIdleFromLogLocked() {
 	if s.idleRecovered {
 		return
 	}
@@ -248,40 +248,22 @@ func (s *Server) recoverIdleFromLogLocked(snaps []state.TabSnapshot) {
 		adopt(tid, tab.LastActivity)
 	}
 
-	// Entries logged by short id only. The owner of one had that short id as a
-	// suffix of its target id, and nothing else is known about it. It is adopted
-	// only when exactly one tab that is not managed otherwise can have been it;
-	// with none or several the entry is dropped and that tab is left alone for
-	// good, which costs idle cleanup of one tab but never closes a user's page.
-	// Either way the short-id line is retired, and an adopted tab is logged
-	// again under its full id.
+	// Entries logged by short id only, from before records carried a target
+	// id. A short id does not identify a tab: the tab that had it may be gone
+	// and a user's page may be the only one left with the same id suffix, so
+	// even a single matching tab proves nothing. None is adopted. The lines are
+	// retired, and the tabs they meant are no longer idle-closed (they stay
+	// open until closed explicitly); that is the price of never guessing.
 	shorts := make([]string, 0, len(legacy))
 	for short := range legacy {
 		shorts = append(shorts, short)
 	}
 	sort.Strings(shorts)
 	for _, short := range shorts {
-		var owner target.ID
-		candidates := 0
-		for _, sn := range snaps {
-			if _, released := gone[sn.TargetID]; released || s.tabIdle.IsManaged(sn.TargetID) {
-				continue
-			}
-			if state.CouldHaveShort(sn.TargetID, short) {
-				owner = sn.TargetID
-				candidates++
-			}
-		}
 		s.enqueueAudit(store.ManagedTabGoneRecord(short, "", now.UTC()))
-		if candidates != 1 {
-			if s.logger != nil {
-				s.logger.Warn("managed tab logged by short id only is not adopted", "tab", short, "candidates", candidates)
-			}
-			continue
-		}
-		cur, _ := s.tabs.ShortForTarget(owner)
-		s.enqueueAudit(store.ManagedTabRecord(cur, string(owner), legacy[short]))
-		adopt(owner, legacy[short])
+	}
+	if len(shorts) > 0 && s.logger != nil {
+		s.logger.Warn("managed tabs logged by short id only are not recovered; they will not be idle-closed", "tabs", shorts)
 	}
 }
 

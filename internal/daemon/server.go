@@ -91,8 +91,17 @@ type Server struct {
 	auditWG       sync.WaitGroup
 
 	// shutdownTimeout bounds http.Server.Shutdown. Zero uses the default.
-	// A timed-out shutdown gets one more timeout.Operation to drain handlers.
+	// A timed-out shutdown gets shutdownDrain more (zero: timeout.Operation) to
+	// drain handlers before connections are closed.
 	shutdownTimeout time.Duration
+	shutdownDrain   time.Duration
+
+	// RPC handlers are audit producers too. rpcGate admits and counts them so
+	// shutdown can stop admitting, cancel the ones still running (rpcCtx) and
+	// wait for them before the audit queue and the store are closed.
+	rpcGate   handlerGate
+	rpcCtx    context.Context
+	rpcCancel context.CancelFunc
 
 	// CDP loss triggers fatal exit (supervisor restart) instead of in-process reconnect.
 	fatalOnce sync.Once
@@ -127,6 +136,7 @@ func NewServer(cfg Config, logger *slog.Logger) (*Server, error) {
 		auditStop:     make(chan struct{}),
 		auditDone:     make(chan struct{}),
 	}
+	s.rpcCtx, s.rpcCancel = context.WithCancel(context.Background())
 	stateDir := effectiveStateDir(cfg)
 	if strings.TrimSpace(cfg.StateDir) == stateDirDisabled {
 		stateDir = stateDirDisabled
@@ -240,11 +250,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.stopRun = stopRun
 	s.fatalCh = make(chan error, 1)
 
-	// Exit order, on every path: handlers are drained by shutdownHTTP, then the
-	// background goroutines are cancelled and joined, and only then are the
-	// session, the audit queue and the store closed. A sweeper that has closed a
-	// tab in Chrome must still get to log the release, or the next run would
-	// find the tab managed on disk.
+	// Exit order, on every path: shutdownHTTP drains handlers within its
+	// budget; then no further RPC is admitted, the ones still running are
+	// cancelled and joined; then the background goroutines are cancelled and
+	// joined; and only then are the session, the audit queue and the store
+	// closed. Whoever has changed a tab in Chrome must still get to log it, or
+	// the next run would read a log that disagrees with the browser.
 	defer func() { _ = s.closeAudit() }()
 	defer func() {
 		s.tabMu.Lock()
@@ -259,6 +270,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		stopRun()
 		s.bg.Wait()
 	}()
+	defer s.stopRPCHandlers()
 
 	if !s.SkipBrowserAttach && s.tabHook == nil {
 		if err := s.connectBrowser(runCtx); err != nil {
@@ -320,13 +332,74 @@ func (s *Server) shutdownHTTP(srv *http.Server) error {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	shutdownCtx, cancel = context.WithTimeout(context.Background(), timeout.Operation)
+	drain := s.shutdownDrain
+	if drain <= 0 {
+		drain = timeout.Operation
+	}
+	shutdownCtx, cancel = context.WithTimeout(context.Background(), drain)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		_ = srv.Close()
 		return err
 	}
 	return nil
+}
+
+// handlerGate admits RPC handlers until it is closed and lets the closer wait
+// for the admitted ones. Admission and closing take the same lock, so a handler
+// is either counted before the wait starts or turned away.
+type handlerGate struct {
+	mu     sync.Mutex
+	closed bool
+	active int
+	idle   chan struct{} // closed when the last admitted handler leaves a closed gate
+}
+
+func (g *handlerGate) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.active++
+	return true
+}
+
+func (g *handlerGate) leave() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.active--
+	if g.closed && g.active == 0 {
+		close(g.idle)
+	}
+}
+
+// close stops admission and returns a channel that is closed once no admitted
+// handler is left.
+func (g *handlerGate) close() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.closed {
+		g.closed = true
+		g.idle = make(chan struct{})
+		if g.active == 0 {
+			close(g.idle)
+		}
+	}
+	return g.idle
+}
+
+// stopRPCHandlers ends RPC handling for good: nothing new is admitted, the
+// context of every handler still running is cancelled, and it returns when
+// they have all returned. After a graceful HTTP shutdown none is left and this
+// is immediate. After a forced one the wait lasts as long as the handlers take
+// to notice the cancellation; a CDP call that ignores its context holds it up,
+// which is the price of never closing the store under a handler that may
+// still record what it did. No lock is held while waiting.
+func (s *Server) stopRPCHandlers() {
+	idle := s.rpcGate.close()
+	s.rpcCancel()
+	<-idle
 }
 
 // defaultAuditQueueCap bounds how many audit records wait for the writer.

@@ -290,18 +290,3 @@ func (r *TabRegistry) Selected() string {
 	defer r.mu.RUnlock()
 	return r.selected
 }
-
-// CouldHaveShort reports whether assignShortLocked can ever give id the short
-// id short: a suffix of at least four of its hex digits, all of its hex digits,
-// or (for an id with no hex digits) the id itself. It is what is left to go on for a short id read
-// from a log line that did not record the target id.
-func CouldHaveShort(id target.ID, short string) bool {
-	if id == "" || short == "" {
-		return false
-	}
-	digits := string(hexRunes(string(id)))
-	if digits == "" {
-		return short == sanitizeShort(string(id)) || short == string(id)
-	}
-	return short == digits || (len(short) >= 4 && strings.HasSuffix(digits, short))
-}
