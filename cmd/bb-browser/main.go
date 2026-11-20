@@ -942,8 +942,20 @@ func newRunCmd() *cobra.Command {
 First argument is a path to a .js file. Remaining tokens are passed to the script:
 positional arguments map to @meta "args" keys in JSON source order, then arg1, arg2, …;
 use --name value or --name=value for named flags (see references/script-system.md).`),
-		Args: cobra.MinimumNArgs(1),
+		// Adapter flags (--count 20) are free-form, so cobra must not parse them:
+		// it rejects every flag it does not know. CLI flags are picked out by hand.
+		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			args, help, err := takeCLIFlags(cmd, args)
+			if err != nil {
+				return err
+			}
+			if help {
+				return cmd.Help()
+			}
+			if len(args) == 0 || strings.HasPrefix(args[0], "--") {
+				return errors.New("run needs a script path before adapter arguments")
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 180*time.Second)
 			defer cancel()
 			scriptPath := strings.TrimSpace(args[0])
@@ -1010,6 +1022,43 @@ use --name value or --name=value for named flags (see references/script-system.m
 			return nil
 		},
 	}
+}
+
+// takeCLIFlags applies the CLI's own flags (--json, --tab, --url, --api-token,
+// in --name value or --name=value form) found anywhere in args and returns the
+// rest untouched for the adapter. A bare "--" ends the search and is dropped.
+func takeCLIFlags(cmd *cobra.Command, args []string) (rest []string, help bool, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return append(rest, args[i+1:]...), help, nil
+		}
+		if a == "-h" || a == "--help" {
+			help = true
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(a, "--"), "=")
+		if !strings.HasPrefix(a, "--") || cmd.Flag(name) == nil {
+			rest = append(rest, a)
+			continue
+		}
+		f := cmd.Flag(name)
+		if !hasValue {
+			switch {
+			case f.NoOptDefVal != "":
+				value = f.NoOptDefVal
+			case i+1 < len(args):
+				i++
+				value = args[i]
+			default:
+				return nil, false, fmt.Errorf("flag --%s needs a value", name)
+			}
+		}
+		if err := f.Value.Set(value); err != nil {
+			return nil, false, fmt.Errorf("invalid --%s: %w", name, err)
+		}
+	}
+	return rest, help, nil
 }
 
 var loginHintRe = regexp.MustCompile(`(?i)401|403|unauthorized|forbidden|not\s*logged|login\s*required|sign\s*in|auth`)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -259,4 +260,89 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = orig
 	_ = w.Close()
 	return <-done
+}
+
+// `run` documents free-form adapter flags (`run x.js hello --count 20`). Cobra
+// used to reject them as unknown flags before the adapter parser ever ran.
+func TestRunPassesAdapterFlagsAndKeepsCLIFlags(t *testing.T) {
+	t.Setenv("BB_BROWSER_API_TOKEN", "")
+	script := filepath.Join(t.TempDir(), "x.js")
+	if err := os.WriteFile(script, []byte("/* @meta {\"name\":\"x\",\"args\":{\"q\":{}}} */\nasync function(args){return args}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		args     []string // %s is the script path
+		wantArgs string
+		wantErr  string
+	}{
+		{name: "named flag", args: []string{"--tab", "ab12", "--json", "run", "%s", "hello", "--count", "20"}, wantArgs: `{"arg1":"hello","count":"20","q":"hello"}`},
+		{name: "equals form", args: []string{"run", "%s", "--sort=new", "hello", "--json=true", "--tab", "ab12"}, wantArgs: `{"arg1":"hello","q":"hello","sort":"new"}`},
+		{name: "cli flags after script", args: []string{"run", "%s", "hello", "--tab", "ab12", "--json", "--count", "20"}, wantArgs: `{"arg1":"hello","count":"20","q":"hello"}`},
+		{name: "cli flags before script", args: []string{"run", "--json", "--tab=ab12", "%s", "hello"}, wantArgs: `{"arg1":"hello","q":"hello"}`},
+		{name: "cli flags before command", args: []string{"--tab", "ab12", "--json", "run", "%s", "hello"}, wantArgs: `{"arg1":"hello","q":"hello"}`},
+		{name: "double dash", args: []string{"run", "--tab", "ab12", "--json", "%s", "--", "--tab", "x"}, wantArgs: `{"tab":"x"}`},
+		{name: "negative number", args: []string{"run", "--tab", "ab12", "--json", "%s", "-5"}, wantArgs: `{"arg1":"-5","q":"-5"}`},
+		{name: "missing script", args: []string{"run", "--count", "20"}, wantErr: "script path"},
+		{name: "cli flag without value", args: []string{"run", "%s", "--tab"}, wantErr: "--tab needs a value"},
+		{name: "adapter flag without value", args: []string{"run", "--tab", "ab12", "%s", "--count"}, wantErr: "--count needs a value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotTab, gotScript string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					Method string `json:"method"`
+					Params struct {
+						Tab    string `json:"tab"`
+						Script string `json:"script"`
+					} `json:"params"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Method != protocol.MethodEval {
+					t.Errorf("unexpected request: %v %q", err, req.Method)
+				}
+				gotTab, gotScript = req.Params.Tab, req.Params.Script
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tab":"ab12","seq":1,"result":{}}}`))
+			}))
+			defer srv.Close()
+
+			args := []string{"--url", srv.URL}
+			for _, a := range tc.args {
+				args = append(args, strings.ReplaceAll(a, "%s", script))
+			}
+			root := newRootCmd()
+			root.SetArgs(args)
+			root.SilenceUsage, root.SilenceErrors = true, true
+			stdout := os.Stdout
+			null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stdout = null
+			err = root.Execute()
+			os.Stdout = stdout
+			null.Close()
+
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want it to mention %q", err, tc.wantErr)
+				}
+				if gotScript != "" {
+					t.Fatal("eval sent despite argument error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotTab != "ab12" {
+				t.Fatalf("tab = %q, want ab12 (--tab not applied)", gotTab)
+			}
+			if !jsonOut {
+				t.Fatal("--json not applied")
+			}
+			if want := "})( " + tc.wantArgs + " )"; !strings.HasSuffix(gotScript, want) {
+				t.Fatalf("adapter args: script ends %q, want %q", gotScript[max(0, len(gotScript)-80):], want)
+			}
+		})
+	}
 }
