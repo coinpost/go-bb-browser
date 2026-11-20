@@ -1,13 +1,13 @@
 go-bb-browser - factory board
 =============================
 Nothing at your gates | 1 with the agent | 0 done
-Drawn Nov 20, 23:02 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 20, 23:03 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (0)                                 never built
     Nothing here
 
 NEW (1)
-    new     1m  全项目 review 并修复发现的问题
+    FT1     1m  全项目 review 并修复发现的问题
 
 REVIEW (0)
     Nothing here
