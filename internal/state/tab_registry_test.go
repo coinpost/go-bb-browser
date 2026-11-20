@@ -84,8 +84,8 @@ func TestSyncPageTargetsSinceKeepsTargetsRegisteredAfterEpoch(t *testing.T) {
 	// The reply lists neither target: the old one is gone, the new one was
 	// created after the browser answered.
 	tabs, removed, kept := r.SyncPageTargetsSince(nil, epoch)
-	if len(tabs) != 0 {
-		t.Fatalf("tabs = %#v", tabs)
+	if len(tabs) != 1 || tabs[0].TargetID != "BBBB2222" || tabs[0].ShortID != "2222" {
+		t.Fatalf("tabs = %#v, want the kept target", tabs)
 	}
 	if len(removed) != 1 || removed[0].TargetID != "AAAA1111" {
 		t.Fatalf("removed = %#v", removed)

@@ -63,8 +63,10 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 // SyncPageTargetsSince is SyncPageTargetsDetailed for an enumeration requested
 // when Epoch() returned epoch. A target registered after that (tab_new, or a
 // targetCreated event, racing the enumeration) may legitimately be absent from
-// infos; it is kept and reported in kept rather than removed. The next sync,
-// started after its registration, is authoritative for it.
+// infos; it is kept and reported in kept rather than removed. It is also part
+// of tabs (title and URL unknown), so the returned snapshot agrees with what
+// Lookup and Selected say afterwards. The next sync, started after its
+// registration, is authoritative for it.
 func (r *TabRegistry) SyncPageTargetsSince(infos []*target.Info, epoch uint64) (tabs []TabSnapshot, removed []RemovedTab, kept []target.ID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -88,10 +90,11 @@ func (r *TabRegistry) SyncPageTargetsSince(infos []*target.Info, epoch uint64) (
 		}
 	}
 
-	ids := make([]target.ID, 0, len(present))
+	ids := make([]target.ID, 0, len(present)+len(kept))
 	for id := range present {
 		ids = append(ids, id)
 	}
+	ids = append(ids, kept...)
 	slices.SortFunc(ids, func(a, b target.ID) int {
 		if x, y := string(a), string(b); x < y {
 			return -1

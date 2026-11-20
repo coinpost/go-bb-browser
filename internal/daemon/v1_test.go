@@ -620,8 +620,20 @@ func TestStaleEnumerationDoesNotDropConcurrentTabNew(t *testing.T) {
 	}
 
 	close(conn.release)
-	if rec := <-listDone; rec.Code != http.StatusOK {
-		t.Fatalf("tab_list status %d", rec.Code)
+	listRec := <-listDone
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("tab_list status %d", listRec.Code)
+	}
+	// tabs, tab and focus describe one snapshot: the focused new tab is listed.
+	var listed struct {
+		Result protocol.TabListResult `json:"result"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	res := listed.Result
+	if res.Focus != created.Result.Tab || res.Tab != res.Focus || len(res.Tabs) != 1 || res.Tabs[0].Tab != res.Focus {
+		t.Fatalf("tab_list = %s, want tabs, tab and focus all naming %s", listRec.Body.String(), created.Result.Tab)
 	}
 
 	if got, ok := srv.tabs.Lookup(created.Result.Tab); !ok || got != tid {
