@@ -45,19 +45,28 @@ func isCDPSessionLost(err error) bool {
 	return browser.ErrorKindOf(err) == browser.ErrorTransport
 }
 
-// connectBrowserLocked attaches a new chromedp session. Caller must hold s.tabMu.
-func (s *Server) connectBrowserLocked(ctx context.Context) error {
+// connectBrowser attaches a new chromedp session and applies the first target
+// enumeration. tabMu is held only to publish the session: enumerating and
+// applying the result take the locks they need themselves (cleanup of a removed
+// target reads the session back through tabConn).
+func (s *Server) connectBrowser(ctx context.Context) error {
 	sess, err := browser.Connect(context.WithoutCancel(ctx), s.cfg.DebuggerURL)
 	if err != nil {
 		return err
 	}
+	s.tabMu.Lock()
 	s.tabLive = sess
 	s.sessDone = sess.Close
 	s.browserState = sessionReady
 	s.browserFailures = 0
 	s.browserLastProbe = time.Now()
+	s.tabMu.Unlock()
 	s.watchCDPSession(sess)
-	go s.runTargetSync(ctx, sess)
+	// The sync loop registers targets from events while the enumeration below
+	// is in flight. The epoch from before both keeps a target the loop
+	// registered and the (older) reply does not list.
+	epoch := s.tabs.Epoch()
+	s.bg.Go(func() { s.runTargetSync(ctx, sess) })
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
 	listCtx, cancel := context.WithTimeout(ctx, timeout.Operation)
@@ -67,8 +76,8 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	// If it failed, the first enumeration that does succeed (runTargetSync's
 	// retry, or an RPC) performs it instead: recovering against an empty
 	// registry would release every persisted managed tab.
-	s.syncInitialTargets(sess, targets, terr)
-	go s.runCDPWatchdog(ctx, sess)
+	s.syncInitialTargets(sess, targets, terr, epoch)
+	s.bg.Go(func() { s.runCDPWatchdog(ctx, sess) })
 	if s.logger != nil {
 		s.logger.Info("browser CDP session connected", "debugger", s.cfg.DebuggerURL)
 	}
@@ -79,9 +88,11 @@ type targetDirtyMarker interface {
 	MarkTargetDirty()
 }
 
-func (s *Server) syncInitialTargets(marker targetDirtyMarker, targets []*target.Info, err error) []state.TabSnapshot {
+// syncInitialTargets applies the enumeration requested when the registry
+// epoch was epoch.
+func (s *Server) syncInitialTargets(marker targetDirtyMarker, targets []*target.Info, err error, epoch uint64) []state.TabSnapshot {
 	if err == nil {
-		return s.syncTabsFromTargets(targets)
+		return s.syncTabsFromTargetsSince(targets, epoch)
 	}
 	if s.logger != nil {
 		s.logger.Warn("list targets after browser connect", "err", err)

@@ -111,7 +111,7 @@ bb-daemon --debugger-url 127.0.0.1:9222 --api-token-file /path/to/api-tokens --a
 bb-browser tab list
 ```
 
-**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl` 求出这些 tab 的最后活跃时间来恢复 idle 跟踪（短 tab id 由 CDP target id 确定性派生，跨重启稳定）。该恢复只在启动后第一次成功枚举 tab 时执行一次；运行期只按完整 CDP target id 更新 managed 状态，不再回读 `rpc.jsonl`。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 最后活跃时间），因此恢复只需读当前文件即可保持完整。
+**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl` 求出这些 tab 的最后活跃时间来恢复 idle 跟踪。managed tab 的归属按**完整 CDP target id** 持久化与恢复：日志行带 `target` 字段（`tab_new`、关闭/释放记录、活跃记录、轮转快照）；短 tab id 只在同一时刻的 tab 之间唯一，重启后可能分配给另一个 tab，因此不作为恢复依据。升级前只含短 id 的旧记录：仅当当前恰好有一个未被管理的 tab 可能拥有该短 id 时才收养（并改写为带完整 id 的记录），零个或多个候选时不收养（该 tab 不再被 idle 清理，但不会误关用户页面），旧记录随即作废。该恢复只在启动后第一次成功枚举 tab 时执行一次；运行期只按完整 CDP target id 更新 managed 状态，不再回读 `rpc.jsonl`。idle 清理关闭的是判定过期时的那个完整 target id，不会按短 id 重新解析。daemon 退出时先停止并等待 idle 清理、target 同步等后台任务，再排空 audit 队列并关闭日志。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 完整 target id + 最后活跃时间），因此恢复只需读当前文件即可保持完整。
 
 **Docker Compose 示例**（需挂载 volume 才能跨容器重建保留 state）：
 

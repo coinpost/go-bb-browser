@@ -405,7 +405,9 @@ func TestShutdownWaitsForHandlerBeforeClosingAudit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	// http.Server.Shutdown leaves a connection the client dialed but never
+	// used (StateNew) open for up to 5s before closing it.
+	case <-time.After(10 * time.Second):
 		t.Fatal("shutdown timed out waiting for handler")
 	}
 	select {

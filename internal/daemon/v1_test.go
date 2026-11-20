@@ -33,6 +33,11 @@ type fakeConn struct {
 	// onClose runs inside CloseTarget, before it returns: the window in which
 	// the daemon can already have handled Target.targetDestroyed.
 	onClose func(target.ID)
+	// onCreate runs inside CreatePageTarget, before it returns: the window in
+	// which Chrome's events about the new target can already have been handled.
+	onCreate func(target.ID)
+	// closed lists the targets CloseTarget was asked to close.
+	closed []target.ID
 }
 
 func (f *fakeConn) PageTargets() ([]*target.Info, error) {
@@ -66,10 +71,14 @@ func (f *fakeConn) CreatePageTarget(initialURL string, _ bool) (target.ID, error
 		Title:    "",
 		URL:      initialURL,
 	})
+	if f.onCreate != nil {
+		f.onCreate(id)
+	}
 	return id, nil
 }
 
 func (f *fakeConn) CloseTarget(id target.ID) error {
+	f.closed = append(f.closed, id)
 	if f.onClose != nil {
 		f.onClose(id)
 	}

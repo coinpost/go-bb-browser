@@ -183,6 +183,7 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 		Action:   meta.action,
 		Body:     meta.body,
 		Tab:      tab,
+		Target:   string(meta.target),
 		SenderIP: meta.senderIP,
 		Seq:      seq,
 		OK:       ok,
@@ -193,24 +194,32 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 }
 
 // enqueueAudit appends rec to the audit FIFO; its position is final once this
-// returns. Normally the writer goroutine persists it. When the queue is over
-// its bound, or the writer has stopped, the caller writes the backlog itself,
-// in order and ending with rec: that is the backpressure, and it never lets a
-// record overtake one queued before it. Flushing only takes audit and store
+// returns. Normally the writer goroutine persists it. When the queue is at its
+// bound the caller first writes the backlog itself, in order, and only then
+// queues rec: that is the backpressure, it keeps the queue within auditQueueCap,
+// and it never lets a record overtake one queued before it. Once the writer has
+// stopped the caller also writes rec. Flushing only takes audit and store
 // locks, so it is safe under lifeMu.
 func (s *Server) enqueueAudit(rec store.LogRecord) {
-	s.auditMu.Lock()
 	s.auditWG.Add(1)
-	s.auditPending = append(s.auditPending, rec)
-	inline := s.auditClosed || len(s.auditPending) > s.auditQueueCap
-	s.auditMu.Unlock()
-	if inline {
+	for {
+		s.auditMu.Lock()
+		if len(s.auditPending) < max(s.auditQueueCap, 1) {
+			s.auditPending = append(s.auditPending, rec)
+			closed := s.auditClosed
+			s.auditMu.Unlock()
+			if closed {
+				s.flushAudit()
+				return
+			}
+			select {
+			case s.auditWake <- struct{}{}:
+			default:
+			}
+			return
+		}
+		s.auditMu.Unlock()
 		s.flushAudit()
-		return
-	}
-	select {
-	case s.auditWake <- struct{}{}:
-	default:
 	}
 }
 
@@ -246,6 +255,9 @@ func (s *Server) touchSuccessfulRPC(ctx context.Context, result any) {
 		}
 	}
 	if tid, ok := s.tabs.Lookup(tab); ok {
+		// The record names the target, so replay renews this tab and no other
+		// that had the same short id before or after it.
+		meta.target = tid
 		s.touchTabActivity(tid)
 	}
 }
@@ -465,8 +477,10 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	initial := strings.TrimSpace(p.URL)
+	create := s.beginCreate()
 	tid, err := createPageTarget(ctx, conn, initial, p.Silent)
 	if err != nil {
+		s.endCreate(create)
 		s.logger.Error("tab_new create target failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
 			Error: "failed to create tab",
@@ -476,23 +490,41 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 	}
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
+		s.endCreate(create)
 		return
 	}
 	// Register, mark managed and queue the tab_new record as one lifecycle
 	// step. The target can be destroyed at any moment after createTarget; were
 	// the record queued only after the response is written, the synthetic
-	// tab_close could precede it and leave the short id managed on disk.
+	// tab_close could precede it and leave the tab managed on disk.
 	s.lifeMu.Lock()
+	// Its destruction can even have been handled already, before createTarget
+	// returned. Then there is no tab to manage: the request still succeeded, so
+	// it gets its tab_new record, immediately followed by the release.
+	gone := s.endCreateLocked(create, tid)
 	short := s.tabs.RegisterPageTarget(tid)
-	s.markTabManaged(tid, short, initial, p.Silent)
-	if !p.Silent {
-		s.tabs.Select(short)
+	if meta := auditMetaFrom(ctx); meta != nil {
+		meta.target = tid
+	}
+	if gone {
+		s.tabs.RemoveTarget(tid)
+	} else {
+		s.markTabManaged(tid)
+		if !p.Silent {
+			s.tabs.Select(short)
+		}
 	}
 	resp, err := protocol.MarshalResponse(id, protocol.TabNewResult{Tab: short, Seq: seq})
 	if err == nil {
 		s.scheduleAudit(ctx, resp)
+		if gone {
+			s.logManagedTabGone(tid, short)
+		}
 	}
 	s.lifeMu.Unlock()
+	if gone {
+		s.clearTargetResources(tid, short)
+	}
 	s.writeJSONRPCRaw(w, resp, err)
 }
 

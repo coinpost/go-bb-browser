@@ -106,3 +106,33 @@ func TestSyncPageTargetsSinceKeepsTargetsRegisteredAfterEpoch(t *testing.T) {
 		t.Fatalf("registry not empty: %#v", removed)
 	}
 }
+
+func TestCouldHaveShort(t *testing.T) {
+	for _, tc := range []struct {
+		id    target.ID
+		short string
+		want  bool
+	}{
+		{"AAAA00001234", "1234", true},
+		{"AAAA00001234", "01234", true},
+		{"AAAA00001234", "aaaa00001234", true},
+		{"AAAA00001234", "234", false},  // shorter than any assigned short id
+		{"AAAA00001234", "9234", false}, // not a suffix
+		{"AAAA00001234", "", false},
+		{"", "1234", false},
+		{"xyz-!", "xyz-!", true}, // no hex digits: the id itself
+		{"xyz-!", "xyz", false},
+		{"no-hex-!!", "e", true}, // fewer than four hex digits: all of them
+	} {
+		if got := CouldHaveShort(tc.id, tc.short); got != tc.want {
+			t.Errorf("CouldHaveShort(%q, %q) = %v, want %v", tc.id, tc.short, got, tc.want)
+		}
+	}
+	// Whatever the registry assigns is something CouldHaveShort accepts.
+	r := NewTabRegistry()
+	for _, id := range []target.ID{"AAAA00001234", "BBBB99991234", "CCCC99991234", "no-hex-!!"} {
+		if short := r.RegisterPageTarget(id); !CouldHaveShort(id, short) {
+			t.Errorf("registry gave %q the short id %q, which CouldHaveShort rejects", id, short)
+		}
+	}
+}

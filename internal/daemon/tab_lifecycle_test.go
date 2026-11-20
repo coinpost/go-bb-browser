@@ -115,9 +115,10 @@ func TestTargetDestroyedBeforeTabNewAuditKeepsLogOrder(t *testing.T) {
 	}
 }
 
-// A full audit queue applies backpressure by letting the enqueuer write, but it
-// must write the backlog first: a synthetic tab_close written directly would
-// overtake the still-queued tab_new of the same tab.
+// A full audit queue applies backpressure: the enqueuer writes the backlog
+// first and only then queues its own record. A synthetic tab_close written
+// directly would overtake the still-queued tab_new of the same tab, and a
+// record appended before the wait would let the queue outgrow its bound.
 func TestFullAuditQueueKeepsFIFO(t *testing.T) {
 	stateDir := t.TempDir()
 	fc := &fakeConn{createID: lifecycleManaged}
@@ -135,12 +136,12 @@ func TestFullAuditQueueKeepsFIFO(t *testing.T) {
 		defer close(destroyed)
 		srv.removeTargetState(lifecycleManaged) // third record: over the bound
 	}()
-	waitAuditPending(t, srv, 3)
 	select {
 	case <-destroyed:
 		t.Fatal("enqueue over the bound returned without writing")
-	case <-time.After(20 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond):
 	}
+	waitAuditPending(t, srv, 2) // the bound holds while the writer is stalled
 	if data, _ := os.ReadFile(filepath.Join(stateDir, store.RPCLogFile())); len(data) != 0 {
 		t.Fatalf("record written past the stalled queue:\n%s", data)
 	}
@@ -155,6 +156,42 @@ func TestFullAuditQueueKeepsFIFO(t *testing.T) {
 	}
 	if got := restartWithUserTab(t, stateDir, lifecycleUserTab); len(got) != 0 {
 		t.Fatalf("user tab adopted as managed after restart: %v", got)
+	}
+}
+
+// However many producers pile up behind a stalled writer, the queue never
+// holds more than its bound.
+func TestAuditQueueStaysWithinBound(t *testing.T) {
+	srv := newIdleTestServerWithState(&fakeConn{}, time.Minute, t.TempDir())
+	srv.auditQueueCap = 2
+
+	srv.auditWriteMu.Lock()
+	const producers = 32
+	done := make(chan struct{}, producers)
+	for range producers {
+		go func() {
+			srv.enqueueAudit(store.LogRecord{
+				Action: protocol.MethodEval,
+				Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"eval"}`),
+				Time:   time.Now().UTC(),
+			})
+			done <- struct{}{}
+		}()
+	}
+	waitAuditPending(t, srv, 2)
+	time.Sleep(50 * time.Millisecond)
+	srv.auditMu.Lock()
+	pending := len(srv.auditPending)
+	srv.auditMu.Unlock()
+	if pending != 2 {
+		t.Fatalf("pending with a stalled writer = %d, want the bound 2", pending)
+	}
+	srv.auditWriteMu.Unlock()
+	for range producers {
+		<-done
+	}
+	if err := srv.closeAudit(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -263,7 +300,7 @@ func TestIdleRecoveryRunsOnceOnFirstSuccessfulEnumeration(t *testing.T) {
 	t.Cleanup(func() { _ = srv.closeAudit() })
 
 	marker := &dirtyMarker{}
-	srv.syncInitialTargets(marker, nil, errors.New("temporary target enumeration failure"))
+	srv.syncInitialTargets(marker, nil, errors.New("temporary target enumeration failure"), 0)
 	drainRPCLog(t, srv)
 	if !marker.marked.Load() {
 		t.Fatal("failed initial enumeration did not schedule a retry")
@@ -306,7 +343,7 @@ func TestIdleRecoverySkipsShortIDReleasedBeforeIt(t *testing.T) {
 
 	fc := &fakeConn{}
 	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
-	srv.syncInitialTargets(&dirtyMarker{}, nil, errors.New("temporary target enumeration failure"))
+	srv.syncInitialTargets(&dirtyMarker{}, nil, errors.New("temporary target enumeration failure"), 0)
 	srv.tabs.RegisterPageTarget(lifecycleManaged) // Target.targetCreated
 	srv.removeTargetState(lifecycleManaged)       // Target.targetDestroyed
 
@@ -326,7 +363,8 @@ func TestIdleRecoverySkipsShortIDReleasedBeforeIt(t *testing.T) {
 }
 
 // A tab_new of this run made before the first successful enumeration keeps its
-// own record: recovery must not release a short id it holds.
+// own record: recovery releases the previous run's target, by full id, and not
+// the new tab that holds the same short id.
 func TestIdleRecoveryKeepsTabCreatedBeforeIt(t *testing.T) {
 	stateDir := t.TempDir()
 	seedManagedLog(t, stateDir) // previous run's 1234 is gone
@@ -343,9 +381,36 @@ func TestIdleRecoveryKeepsTabCreatedBeforeIt(t *testing.T) {
 	if err := srv.closeAudit(); err != nil {
 		t.Fatal(err)
 	}
-	if got := logActions(readRPCLog(t, stateDir)); got != "tab_new,tab_new" {
-		t.Fatalf("rpc log = %s, want tab_new,tab_new", got)
+	recs := readRPCLog(t, stateDir)
+	if got := logActions(recs); got != "tab_new,tab_new,tab_close" {
+		t.Fatalf("rpc log = %s, want tab_new,tab_new,tab_close", got)
 	}
+	if got := recs[2].Target; got != string(lifecycleManaged) {
+		t.Fatalf("released target = %q, want the previous run's %q", got, lifecycleManaged)
+	}
+	if got := managedOnDisk(t, stateDir); len(got) != 1 || got[0] != string(lifecycleUserTab) {
+		t.Fatalf("managed on disk = %v, want only this run's tab", got)
+	}
+}
+
+// managedOnDisk replays the state dir's rpc.jsonl and returns the full target
+// ids it leaves managed; it fails if any short-id-only entry is left.
+func managedOnDisk(t *testing.T, stateDir string) []string {
+	t.Helper()
+	st, err := store.Open(store.OpenConfig{StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	tabs, legacy := st.StartupManaged()
+	if len(legacy) != 0 {
+		t.Fatalf("short-id-only entries left on disk: %v", legacy)
+	}
+	out := make([]string, 0, len(tabs))
+	for _, tab := range tabs {
+		out = append(out, tab.Target)
+	}
+	return out
 }
 
 // Target.targetDestroyed is often handled before Target.closeTarget returns.

@@ -28,21 +28,34 @@ const (
 	maxLogBackups = 3
 )
 
-// snapshotBody is the placeholder request body written for synthetic tab_new
-// records emitted at rotation time (recovery only needs Action/Tab/Time).
-var snapshotBody = json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{}}`)
-
 // ManagedTabGoneRecord builds the synthetic tab_close line the daemon appends
 // when a managed tab disappears without a tab_close RPC (idle cleanup, closed in
-// Chrome, gone across a restart). Without it the short id stays managed in the
-// log forever and a later unrelated tab that derives the same short id would be
-// adopted — and idle-closed — after a restart.
-func ManagedTabGoneRecord(short string, at time.Time) LogRecord {
-	tab, _ := json.Marshal(short) // a string always marshals
+// Chrome, gone across a restart). target is the tab's full CDP target id; it is
+// empty only when releasing a legacy short-id entry.
+func ManagedTabGoneRecord(short, target string, at time.Time) LogRecord {
+	return syntheticRecord(protocol.MethodTabClose, short, target, at)
+}
+
+// ManagedTabRecord builds a synthetic tab_new line that records target as
+// managed with last activity at: rotation snapshots, and a legacy short-id
+// entry being rewritten with the full id of the tab that owns it.
+func ManagedTabRecord(short, target string, at time.Time) LogRecord {
+	return syntheticRecord(protocol.MethodTabNew, short, target, at)
+}
+
+// syntheticRecord builds a daemon-written line; recovery reads only its
+// action, tab, target and time.
+func syntheticRecord(method, short, target string, at time.Time) LogRecord {
+	params := "{}"
+	if method == protocol.MethodTabClose {
+		tab, _ := json.Marshal(short) // a string always marshals
+		params = `{"tab":` + string(tab) + `}`
+	}
 	return LogRecord{
-		Action: protocol.MethodTabClose,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":` + string(tab) + `}}`),
+		Action: method,
+		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"` + method + `","params":` + params + `}`),
 		Tab:    short,
+		Target: target,
 		OK:     true,
 		Time:   at,
 	}
@@ -68,8 +81,8 @@ type Store struct {
 	logBytes    int64
 	maxLogBytes int64
 	seq         atomic.Uint64
-	managed     map[string]time.Time
-	startup     map[string]time.Time
+	managed     *managedLog
+	startup     *managedLog
 	memLogs     []LogRecord
 	logger      *slog.Logger
 	inMemory    bool
@@ -77,14 +90,17 @@ type Store struct {
 
 // LogRecord is one append-only RPC log line.
 type LogRecord struct {
-	Action   string          `json:"action"`
-	Body     json.RawMessage `json:"body"`
-	Tab      string          `json:"tab,omitempty"`
-	SenderIP string          `json:"sender_ip"`
-	Seq      uint64          `json:"seq,omitempty"`
-	OK       bool            `json:"ok"`
-	Error    string          `json:"error,omitempty"`
-	Time     time.Time       `json:"time"`
+	Action string          `json:"action"`
+	Body   json.RawMessage `json:"body"`
+	Tab    string          `json:"tab,omitempty"`
+	// Target is the full CDP target id the record is about, when the daemon
+	// resolved one. Managed-tab recovery is keyed by it.
+	Target   string    `json:"target,omitempty"`
+	SenderIP string    `json:"sender_ip"`
+	Seq      uint64    `json:"seq,omitempty"`
+	OK       bool      `json:"ok"`
+	Error    string    `json:"error,omitempty"`
+	Time     time.Time `json:"time"`
 }
 
 // Open initializes rpc.jsonl on disk, or in-memory when cfg.StateDir is "" or
@@ -108,7 +124,8 @@ func Open(cfg OpenConfig) (*Store, error) {
 	s := &Store{
 		logger:      logger,
 		inMemory:    useMemory,
-		managed:     make(map[string]time.Time),
+		managed:     newManagedLog(),
+		startup:     newManagedLog(),
 		maxLogBytes: maxLogBytes,
 	}
 	s.seq.Store(uint64(time.Now().UnixNano()))
@@ -131,9 +148,9 @@ func Open(cfg OpenConfig) (*Store, error) {
 		return nil, fmt.Errorf("open rpc log %q: %w", logPath, err)
 	}
 
-	managed := make(map[string]time.Time)
+	managed := newManagedLog()
 	if err := replayLog(f, logger, func(rec LogRecord) error {
-		applyManagedUpdate(managed, rec)
+		managed.apply(rec)
 		return nil
 	}); err != nil {
 		_ = f.Close()
@@ -143,7 +160,7 @@ func Open(cfg OpenConfig) (*Store, error) {
 	s.logFile = f
 	s.logPath = logPath
 	s.managed = managed
-	s.startup = cloneManaged(managed)
+	s.startup = managed.clone()
 	if fi, err := f.Stat(); err == nil {
 		s.logBytes = fi.Size()
 	}
@@ -270,9 +287,9 @@ func (s *Store) AppendRPC(rec LogRecord) error {
 	defer s.mu.Unlock()
 
 	if s.managed == nil {
-		s.managed = make(map[string]time.Time)
+		s.managed = newManagedLog()
 	}
-	applyManagedUpdate(s.managed, rec)
+	s.managed.apply(rec)
 
 	if s.inMemory {
 		s.memLogs = append(s.memLogs, rec)
@@ -325,26 +342,28 @@ func (s *Store) rotateLocked() error {
 }
 
 // writeManagedSnapshotLocked writes one synthetic tab_new record per managed tab
-// (sorted for determinism) to the current log. Caller holds s.mu.
+// (sorted for determinism) to the current log, each with the full target id it
+// was recorded under. Entries still known by short id only stay that way: the
+// snapshot never invents an owner for them. Caller holds s.mu.
 func (s *Store) writeManagedSnapshotLocked() error {
-	if len(s.managed) == 0 {
-		return nil
+	var recs []LogRecord
+	for _, tab := range s.managed.tabs() {
+		recs = append(recs, ManagedTabRecord(tab.Short, tab.Target, tab.LastActivity))
 	}
-	shorts := make([]string, 0, len(s.managed))
-	for short := range s.managed {
+	shorts := make([]string, 0, len(s.managed.legacy))
+	for short := range s.managed.legacy {
 		shorts = append(shorts, short)
 	}
 	sort.Strings(shorts)
-
-	var buf bytes.Buffer
 	for _, short := range shorts {
-		data, err := json.Marshal(LogRecord{
-			Action: protocol.MethodTabNew,
-			Body:   snapshotBody,
-			Tab:    short,
-			OK:     true,
-			Time:   s.managed[short],
-		})
+		recs = append(recs, ManagedTabRecord(short, "", s.managed.legacy[short]))
+	}
+	if len(recs) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	for _, rec := range recs {
+		data, err := json.Marshal(rec)
 		if err != nil {
 			return err
 		}
@@ -356,26 +375,43 @@ func (s *Store) writeManagedSnapshotLocked() error {
 	return err
 }
 
-// ReplayManagedTabActivity returns managed tab short ids and last activity as
-// of the records appended so far. Records still queued by the daemon are not
-// reflected, so it must not drive decisions about live tabs.
+// ReplayManagedTabActivity returns short ids and last activity of the managed
+// tabs in the records appended so far, whichever format recorded them. Records
+// still queued by the daemon are not reflected, and a short id does not
+// identify a tab across runs, so it must not drive decisions about live tabs.
 func (s *Store) ReplayManagedTabActivity() map[string]time.Time {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneManaged(s.managed)
+	return s.managed.shorts()
 }
 
-// StartupManagedTabActivity returns the managed tabs the previous run left in
-// the log, as replayed at Open. Unlike ReplayManagedTabActivity it never
-// changes, so recovery reads the same thing however late it runs.
-func (s *Store) StartupManagedTabActivity() map[string]time.Time {
+// ManagedTabs returns the managed tabs recorded with a full target id in the
+// records appended so far, sorted by target id.
+func (s *Store) ManagedTabs() []ManagedTab {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneManaged(s.startup)
+	return s.managed.tabs()
+}
+
+// StartupManaged returns what the previous run left in the log, as replayed at
+// Open: tabs recorded with their full target id, and legacy entries recorded by
+// short id only (short id to last activity). It never changes afterwards, so
+// recovery reads the same thing however late it runs.
+func (s *Store) StartupManaged() (tabs []ManagedTab, legacy map[string]time.Time) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	legacy = make(map[string]time.Time, len(s.startup.legacy))
+	for short, at := range s.startup.legacy {
+		legacy[short] = at
+	}
+	return s.startup.tabs(), legacy
 }

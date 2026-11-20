@@ -344,34 +344,35 @@ func TestReplayManagedTabActivity(t *testing.T) {
 	t1 := t0.Add(2 * time.Minute)
 	t2 := t1.Add(time.Minute)
 
-	managed := make(map[string]time.Time)
-	applyManagedUpdate(managed, LogRecord{
+	log := newManagedLog()
+	log.apply(LogRecord{
 		Action: protocol.MethodTabNew, Tab: "aa11", Seq: 1, OK: true, Time: t0,
 	})
-	applyManagedUpdate(managed, LogRecord{
+	log.apply(LogRecord{
 		Action: protocol.MethodGoto,
 		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11"},"id":2}`),
 		Tab:    "aa11", Seq: 2, OK: true, Time: t1,
 	})
-	applyManagedUpdate(managed, LogRecord{
+	log.apply(LogRecord{
 		Action: protocol.MethodTabClose,
 		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":"aa11"},"id":3}`),
 		Tab:    "aa11", Seq: 3, OK: true, Time: t2,
 	})
-	applyManagedUpdate(managed, LogRecord{
+	log.apply(LogRecord{
 		Action: protocol.MethodTabNew, Tab: "bb22", Seq: 4, OK: true, Time: t1,
 	})
-	applyManagedUpdate(managed, LogRecord{
+	log.apply(LogRecord{
 		Action: protocol.MethodGoto,
 		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"bb22"},"id":5}`),
 		Tab:    "bb22", Seq: 5, OK: false, Error: "fail", Time: t2,
 	})
-	applyManagedUpdate(managed, LogRecord{
+	log.apply(LogRecord{
 		Action: protocol.MethodGoto,
 		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"cc33"},"id":6}`),
 		Tab:    "cc33", Seq: 6, OK: true, Time: t2,
 	})
 
+	managed := log.shorts()
 	if len(managed) != 1 {
 		t.Fatalf("managed: %#v", managed)
 	}
@@ -394,7 +395,7 @@ func TestManagedTabGoneRecordReleasesTabOnReplay(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AppendRPC(ManagedTabGoneRecord(`a"b`, time.Now().UTC())); err != nil {
+	if err := st.AppendRPC(ManagedTabGoneRecord(`a"b`, "", time.Now().UTC())); err != nil {
 		t.Fatal(err)
 	}
 	if got := st.ReplayManagedTabActivity(); len(got) != 0 {
@@ -410,5 +411,117 @@ func TestManagedTabGoneRecordReleasesTabOnReplay(t *testing.T) {
 	defer st.Close()
 	if got := st.ReplayManagedTabActivity(); len(got) != 0 {
 		t.Fatalf("managed after replay = %v", got)
+	}
+}
+
+func tabRec(action, tab, target string, at time.Time) LogRecord {
+	return LogRecord{
+		Action: action,
+		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"` + action + `","params":{"tab":"` + tab + `"},"id":1}`),
+		Tab:    tab, Target: target, OK: true, Time: at,
+	}
+}
+
+// Records that name a target touch that target's entry only, in any order
+// relative to another tab that held the same short id.
+func TestReplayKeysManagedTabsByFullTargetID(t *testing.T) {
+	t0 := time.Now().UTC().Add(-time.Hour)
+	log := newManagedLog()
+	log.apply(tabRec(protocol.MethodTabNew, "1234", "AAAA1234", t0))
+	log.apply(tabRec(protocol.MethodTabNew, "1234", "BBBB1234", t0.Add(time.Minute)))
+	// Late records about the first tab: its activity, then its close.
+	log.apply(tabRec(protocol.MethodGoto, "1234", "AAAA1234", t0.Add(2*time.Minute)))
+	log.apply(tabRec(protocol.MethodTabClose, "1234", "AAAA1234", t0.Add(3*time.Minute)))
+	// A record without a target says nothing about a full-id entry.
+	log.apply(tabRec(protocol.MethodGoto, "1234", "", t0.Add(4*time.Minute)))
+	log.apply(tabRec(protocol.MethodTabClose, "1234", "", t0.Add(5*time.Minute)))
+
+	tabs := log.tabs()
+	if len(tabs) != 1 || tabs[0].Target != "BBBB1234" || tabs[0].Short != "1234" {
+		t.Fatalf("managed = %+v, want only BBBB1234", tabs)
+	}
+	if !tabs[0].LastActivity.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("last activity = %v, want its own tab_new time", tabs[0].LastActivity)
+	}
+	log.apply(tabRec(protocol.MethodGoto, "1234", "BBBB1234", t0.Add(6*time.Minute)))
+	if got := log.tabs()[0].LastActivity; !got.Equal(t0.Add(6 * time.Minute)) {
+		t.Fatalf("last activity = %v, want the goto time", got)
+	}
+}
+
+// Lines written before records carried a target id stay a separate, short-id
+// keyed set: readable, releasable by an old-style tab_close, and never merged
+// into the full-id entries.
+func TestReplayKeepsLegacyShortIDRecordsApart(t *testing.T) {
+	t0 := time.Now().UTC().Add(-time.Hour)
+	log := newManagedLog()
+	log.apply(tabRec(protocol.MethodTabNew, "aa11", "", t0))
+	log.apply(tabRec(protocol.MethodTabNew, "bb22", "", t0))
+	log.apply(tabRec(protocol.MethodGoto, "aa11", "", t0.Add(time.Minute)))
+	log.apply(tabRec(protocol.MethodTabClose, "bb22", "", t0.Add(time.Minute)))
+	// A full-id release of some tab that had the short id aa11 is not about it.
+	log.apply(tabRec(protocol.MethodTabClose, "aa11", "CCCCaa11", t0.Add(2*time.Minute)))
+
+	if len(log.byTarget) != 0 {
+		t.Fatalf("full-id entries = %v", log.byTarget)
+	}
+	if len(log.legacy) != 1 || !log.legacy["aa11"].Equal(t0.Add(time.Minute)) {
+		t.Fatalf("legacy = %v, want aa11 at its goto time", log.legacy)
+	}
+}
+
+// Rotation must not reduce a managed tab to its short id: two targets that
+// held the same short id at different times stay distinguishable in the fresh
+// log, and a legacy entry stays legacy.
+func TestLogRotationKeepsFullTargetIDs(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(OpenConfig{StateDir: dir, MaxLogBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	for _, rec := range []LogRecord{
+		tabRec(protocol.MethodTabNew, "1234", "AAAA1234", t0),
+		tabRec(protocol.MethodTabClose, "1234", "AAAA1234", t0),
+		tabRec(protocol.MethodTabNew, "1234", "BBBB1234", t0.Add(time.Minute)),
+		tabRec(protocol.MethodTabNew, "91234", "CCCC91234", t0.Add(2*time.Minute)),
+		tabRec(protocol.MethodTabNew, "ee55", "", t0.Add(3*time.Minute)),
+	} {
+		if err := s.AppendRPC(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 40 {
+		if err := s.AppendRPC(tabRec(protocol.MethodTabList, "", "", time.Now().UTC())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, rpcLogFile+".1")); err != nil {
+		t.Fatalf("expected rotated backup rpc.jsonl.1: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(OpenConfig{StateDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	tabs, legacy := s2.StartupManaged()
+	want := []ManagedTab{
+		{Target: "BBBB1234", Short: "1234", LastActivity: t0.Add(time.Minute)},
+		{Target: "CCCC91234", Short: "91234", LastActivity: t0.Add(2 * time.Minute)},
+	}
+	if len(tabs) != len(want) {
+		t.Fatalf("managed after rotation = %+v, want %+v", tabs, want)
+	}
+	for i := range want {
+		if tabs[i].Target != want[i].Target || tabs[i].Short != want[i].Short || !tabs[i].LastActivity.Equal(want[i].LastActivity) {
+			t.Fatalf("managed[%d] = %+v, want %+v", i, tabs[i], want[i])
+		}
+	}
+	if len(legacy) != 1 || !legacy["ee55"].Equal(t0.Add(3*time.Minute)) {
+		t.Fatalf("legacy after rotation = %v, want ee55", legacy)
 	}
 }

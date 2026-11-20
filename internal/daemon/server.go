@@ -59,11 +59,23 @@ type Server struct {
 	// idleRecovered is set by the first successful target enumeration, the only
 	// point at which managed tabs are adopted from the previous run's log.
 	idleRecovered bool
-	// goneBeforeRecovery holds short ids released before that point, so recovery
-	// cannot hand one to an unrelated tab that derived the same short id since.
-	goneBeforeRecovery map[string]struct{}
+	// goneBeforeRecovery holds targets seen to go away before that point, so
+	// recovery does not adopt one from an enumeration that still listed it.
+	goneBeforeRecovery map[target.ID]struct{}
 	// closing tracks targets with an explicit tab_close RPC in flight.
 	closing map[target.ID]*closingTab
+	// creates tracks removals observed while a tab_new's createTarget is in flight.
+	creates createWatch
+
+	// bg counts the goroutines that outlive a request and can queue audit
+	// records (target sync, watchdog, sweepers). ListenAndServe joins them
+	// before the audit queue and the store are closed.
+	bg sync.WaitGroup
+
+	// Test seams: sweeper period (zero derives it from the idle timeout) and a
+	// hook run once an idle close is decided, before its CDP call.
+	idleSweepInterval time.Duration
+	beforeIdleClose   func(target.ID)
 
 	// Audit records form one FIFO: auditPending, appended under auditMu, written
 	// in order by whoever holds auditWriteMu (the writer, or an enqueuer once
@@ -108,7 +120,7 @@ func NewServer(cfg Config, logger *slog.Logger) (*Server, error) {
 		probeTrigger: make(chan struct{}, 1),
 		closing:      make(map[target.ID]*closingTab),
 
-		goneBeforeRecovery: make(map[string]struct{}),
+		goneBeforeRecovery: make(map[target.ID]struct{}),
 
 		auditQueueCap: defaultAuditQueueCap,
 		auditWake:     make(chan struct{}, 1),
@@ -228,8 +240,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.stopRun = stopRun
 	s.fatalCh = make(chan error, 1)
 
+	// Exit order, on every path: handlers are drained by shutdownHTTP, then the
+	// background goroutines are cancelled and joined, and only then are the
+	// session, the audit queue and the store closed. A sweeper that has closed a
+	// tab in Chrome must still get to log the release, or the next run would
+	// find the tab managed on disk.
 	defer func() { _ = s.closeAudit() }()
-	// shutdownHTTP drains handlers before the session and audit store are closed.
 	defer func() {
 		s.tabMu.Lock()
 		if s.sessDone != nil {
@@ -239,14 +255,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		s.sessDone = nil
 		s.tabMu.Unlock()
 	}()
+	defer func() {
+		stopRun()
+		s.bg.Wait()
+	}()
 
 	if !s.SkipBrowserAttach && s.tabHook == nil {
-		s.tabMu.Lock()
-		if err := s.connectBrowserLocked(runCtx); err != nil {
-			s.tabMu.Unlock()
+		if err := s.connectBrowser(runCtx); err != nil {
 			return fmt.Errorf("cdp attach: %w", err)
 		}
-		s.tabMu.Unlock()
 	}
 
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
@@ -268,10 +285,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}()
 
 	if s.cfg.TabIdleTimeout > 0 {
-		go s.runTabIdleSweeper(runCtx)
+		s.bg.Go(func() { s.runTabIdleSweeper(runCtx) })
 	}
 	if s.cfg.ObserverIdleTimeout > 0 {
-		go s.runObserverSweeper(runCtx)
+		s.bg.Go(func() { s.runObserverSweeper(runCtx) })
 	}
 
 	select {
@@ -286,6 +303,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		<-errCh
 		return err
 	case err := <-errCh:
+		// Serve failed on its own; requests already accepted still run.
+		_ = s.shutdownHTTP(srv)
 		return err
 	}
 }
