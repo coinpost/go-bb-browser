@@ -66,14 +66,16 @@ func (t *TabIdleTracker) Touch(id target.ID) {
 	}
 }
 
-// Forget removes a tab from idle tracking.
-func (t *TabIdleTracker) Forget(id target.ID) {
+// Forget removes a tab from idle tracking and reports whether it was managed.
+func (t *TabIdleTracker) Forget(id target.ID) bool {
 	if t == nil || id == "" {
-		return
+		return false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	_, ok := t.managed[id]
 	delete(t.managed, id)
+	return ok
 }
 
 // SyncPresent removes managed entries whose target id is no longer present in the browser.

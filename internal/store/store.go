@@ -32,6 +32,22 @@ const (
 // records emitted at rotation time (recovery only needs Action/Tab/Time).
 var snapshotBody = json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{}}`)
 
+// ManagedTabGoneRecord builds the synthetic tab_close line the daemon appends
+// when a managed tab disappears without a tab_close RPC (idle cleanup, closed in
+// Chrome, gone across a restart). Without it the short id stays managed in the
+// log forever and a later unrelated tab that derives the same short id would be
+// adopted — and idle-closed — after a restart.
+func ManagedTabGoneRecord(short string, at time.Time) LogRecord {
+	tab, _ := json.Marshal(short) // a string always marshals
+	return LogRecord{
+		Action: protocol.MethodTabClose,
+		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":` + string(tab) + `}}`),
+		Tab:    short,
+		OK:     true,
+		Time:   at,
+	}
+}
+
 // RPCLogFile returns the on-disk RPC log filename under StateDir.
 func RPCLogFile() string { return rpcLogFile }
 

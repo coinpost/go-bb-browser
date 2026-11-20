@@ -554,3 +554,102 @@ func TestSyncTabIdlePresenceKeepsLog(t *testing.T) {
 		t.Fatal("rpc log cleared by presence sync")
 	}
 }
+
+// restartWithUserTab reopens the state dir against a browser whose only tab is
+// a user-opened one, and returns the tabs the daemon adopted as managed.
+func restartWithUserTab(t *testing.T, stateDir string, userTab target.ID) map[target.ID]time.Time {
+	t.Helper()
+	fc := &fakeConn{infos: []*target.Info{{TargetID: userTab, Type: "page", URL: "https://user.example"}}}
+	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
+	t.Cleanup(func() { _ = srv.closeAudit() })
+	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(fc.infos))
+	return srv.tabIdle.Snapshot()
+}
+
+// A managed tab that goes away without a tab_close RPC must be released in
+// rpc.jsonl. Short ids are the trailing hex digits of the CDP target id, so a
+// stale entry would make the next daemon adopt — and idle-close — an unrelated
+// user tab that happens to derive the same short id.
+func TestManagedTabGoneWithoutRPCIsReleasedInLog(t *testing.T) {
+	const managed = target.ID("AAAA00001234")
+	const userTab = target.ID("BBBB99991234") // different target, same short id
+
+	for name, vanish := range map[string]func(t *testing.T, srv *Server, fc *fakeConn){
+		"idle cleanup": func(t *testing.T, srv *Server, fc *fakeConn) {
+			srv.tabIdle.MarkManagedAt(managed, time.Now().Add(-time.Hour))
+			srv.closeExpiredTabs(context.Background())
+			if len(fc.infos) != 0 {
+				t.Fatalf("idle tab not closed: %#v", fc.infos)
+			}
+		},
+		"closed in Chrome": func(t *testing.T, srv *Server, fc *fakeConn) {
+			srv.removeTargetState(managed) // Target.targetDestroyed
+		},
+		"dropped from enumeration": func(t *testing.T, srv *Server, fc *fakeConn) {
+			fc.infos = nil
+			srv.syncTabsFromTargets(fc.infos)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			fc := &fakeConn{createID: managed}
+			srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
+			postRPC(t, srv, rpcReq(protocol.MethodTabNew, map[string]any{}, 1))
+			drainRPCLog(t, srv)
+			if got := srv.store.ReplayManagedTabActivity(); len(got) != 1 {
+				t.Fatalf("managed after tab_new = %v", got)
+			}
+
+			vanish(t, srv, fc)
+			if err := srv.closeAudit(); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := restartWithUserTab(t, stateDir, userTab); len(got) != 0 {
+				t.Fatalf("user tab adopted as managed after restart: %v", got)
+			}
+		})
+	}
+}
+
+// Tabs that vanished while the daemon was down (Chrome restart) are released on
+// the first successful reconciliation, not kept until a short id collides.
+func TestReconcileReleasesManagedTabsGoneAcrossRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	fcA := &fakeConn{createID: "AAAA00001234"}
+	srvA := newIdleTestServerWithState(fcA, time.Minute, stateDir)
+	postRPC(t, srvA, rpcReq(protocol.MethodTabNew, map[string]any{}, 1))
+	if err := srvA.closeAudit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Chrome restarted: the managed tab is gone when the daemon comes back.
+	srvB := newIdleTestServerWithState(&fakeConn{}, time.Minute, stateDir)
+	srvB.reconcileIdleFromLog(srvB.syncTabsFromTargets(nil))
+	if err := srvB.closeAudit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := restartWithUserTab(t, stateDir, "BBBB99991234"); len(got) != 0 {
+		t.Fatalf("user tab adopted as managed after restart: %v", got)
+	}
+}
+
+// An explicit tab_close already logs its own record; no synthetic duplicate.
+func TestTabCloseRPCWritesSingleCloseRecord(t *testing.T) {
+	stateDir := t.TempDir()
+	fc := &fakeConn{createID: "AAAA00001234"}
+	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
+	postRPC(t, srv, rpcReq(protocol.MethodTabNew, map[string]any{}, 1))
+	postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": "1234"}, 2))
+	if err := srv.closeAudit(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(stateDir, store.RPCLogFile()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := bytes.Count(data, []byte(`"action":"tab_close"`)); n != 1 {
+		t.Fatalf("tab_close records = %d, want 1:\n%s", n, data)
+	}
+}

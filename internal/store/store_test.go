@@ -379,3 +379,36 @@ func TestReplayManagedTabActivity(t *testing.T) {
 		t.Fatalf("bb22 last activity: got %v want %v", managed["bb22"], t1)
 	}
 }
+
+func TestManagedTabGoneRecordReleasesTabOnReplay(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(OpenConfig{StateDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendRPC(LogRecord{
+		Action: protocol.MethodTabNew,
+		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
+		Tab:    `a"b`,
+		OK:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendRPC(ManagedTabGoneRecord(`a"b`, time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.ReplayManagedTabActivity(); len(got) != 0 {
+		t.Fatalf("managed after gone record = %v", got)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(OpenConfig{StateDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if got := st.ReplayManagedTabActivity(); len(got) != 0 {
+		t.Fatalf("managed after replay = %v", got)
+	}
+}

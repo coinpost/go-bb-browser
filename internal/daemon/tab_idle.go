@@ -9,6 +9,7 @@ import (
 	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/browser"
 	"github.com/yiplee/go-bb-browser/internal/state"
+	"github.com/yiplee/go-bb-browser/internal/store"
 )
 
 var (
@@ -29,10 +30,25 @@ func (s *Server) touchTabActivity(tid target.ID) {
 	}
 }
 
-func (s *Server) forgetTabManaged(tid target.ID) {
-	if s.tabIdle != nil {
-		s.tabIdle.Forget(tid)
+func (s *Server) forgetTabManaged(tid target.ID) bool {
+	return s.tabIdle != nil && s.tabIdle.Forget(tid)
+}
+
+// releaseManagedTab stops idle tracking for a tab that is gone and, if it was
+// managed, records that in rpc.jsonl. Only the tab_close RPC writes such a line
+// on its own; every other removal has to, or the short id stays managed on disk.
+func (s *Server) releaseManagedTab(tid target.ID, short string) {
+	if s.forgetTabManaged(tid) {
+		s.logManagedTabGone(short)
 	}
+}
+
+func (s *Server) logManagedTabGone(short string) {
+	if s.store == nil || short == "" {
+		return
+	}
+	// Same queue as RPC audit lines, so it lands after the tab's tab_new record.
+	s.enqueueAudit(store.ManagedTabGoneRecord(short, time.Now().UTC()))
 }
 
 func (s *Server) syncTabsFromTargets(infos []*target.Info) []state.TabSnapshot {
@@ -48,7 +64,7 @@ func (s *Server) clearRemovedTarget(tid target.ID, short string) {
 	if s.obsStore != nil {
 		s.obsStore.ClearTarget(tid)
 	}
-	s.forgetTabManaged(tid)
+	s.releaseManagedTab(tid, short)
 	s.forgetTabLock(short)
 	if sess, ok := s.tabConn().(*browser.Session); ok {
 		sess.ForgetTarget(tid)
@@ -101,6 +117,10 @@ func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 	for shortID, lastAt := range loaded {
 		tid, ok := s.tabs.Lookup(shortID)
 		if !ok {
+			// The registry was just synced from a successful enumeration, so this
+			// tab is gone (typically across a Chrome/daemon restart). Release its
+			// short id on disk before an unrelated tab can inherit it.
+			s.logManagedTabGone(shortID)
 			continue
 		}
 		if _, ok := present[tid]; !ok {
@@ -141,6 +161,10 @@ func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab st
 	}
 	if err := closeTarget(ctx, conn, tid); err != nil {
 		return err
+	}
+	if auditMetaFrom(ctx) != nil {
+		// A tab_close RPC logs its own record; skip the synthetic one.
+		s.forgetTabManaged(tid)
 	}
 	// Target.closeTarget succeeded, so clear every target-scoped resource even if
 	// no later lifecycle event is delivered.
@@ -224,7 +248,7 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 		unlock()
 		if err != nil {
 			if errors.Is(err, errTabCloseUnknownID) {
-				s.forgetTabManaged(tid)
+				s.releaseManagedTab(tid, short)
 				continue
 			}
 			if s.logger != nil {
