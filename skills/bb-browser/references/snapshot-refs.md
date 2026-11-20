@@ -14,6 +14,7 @@
 ## 实现要点
 
 - `snapshot` 在页面内为节点设置属性 **`__bb_snap_ref`**（值为数字字符串）。
+- 每次 `snapshot` 都从 1 重新编号，并先清掉上一次留下的 `__bb_snap_ref`；旧快照里的 ref 在新快照之后不再有效。
 - Daemon 侧 **`click` / `fill`** 支持 **`ref`** 字段；CLI 传入 **`@N`** 会展开为选择器：`[__bb_snap_ref="N"]`。
 - 仍可使用原始 **`selector`**（CSS）而不走 snapshot。
 

@@ -101,6 +101,13 @@ function flatten(tree, lines, refs){
   for (var j=0;j<tree.kids.length;j++) flatten(tree.kids[j], lines, refs);
 }
 
+// Refs are renumbered from 1 on every snapshot. Drop the previous snapshot's
+// marks first: nodes this pass does not visit (out of scope, now hidden) would
+// otherwise keep a number that a new node also gets, and click/fill resolve a
+// ref to the first match in document order.
+var stale = document.querySelectorAll('[__bb_snap_ref]');
+for (var k = 0; k < stale.length; k++) stale[k].removeAttribute('__bb_snap_ref');
+
 var root = scopeSel ? document.querySelector(scopeSel) : document.body;
 if (!root) {
   return { title: document.title||'', url: location.href, text: '', refs: {} };
