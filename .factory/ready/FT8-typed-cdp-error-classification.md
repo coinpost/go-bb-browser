@@ -61,3 +61,19 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 运行偏差：coder 导出的环境表明其测试 HOME/GOCACHE 曾落到系统临时目录，而非指定 TMPDIR；manager 独立验证已严格把 HOME/缓存放在本 run TMPDIR，测试通过。未删除目录外文件；残留应由 owner 确认后清理，不在 build 越界删除。复用此前遗留的干净 FT8 工作树，无遗留改动需恢复。
 
 状态：new/ → review/，第 1 轮；本次仅 build，未 review、未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 03:44
+head: 34d596a4a1b89994b1c0535a0e464cbf0bbfeef6
+verdict: pass
+notes:
+- [P2] internal/daemon/browser_reconnect.go:46: isCDPSessionLost 在 ErrorKindOf 前检查 context.Canceled/DeadlineExceeded，因此显式 ErrorTransport 包装这两类错误时仍非 fatal，与统一分类优先级不一致。临时 overlay fake conn 复现：ErrorKindOf=Transport、fatalCh 为空、后续 eval 成功。建议直接采用 ErrorKindOf(err)==ErrorTransport 并补组合回归；当前真实 EOF/网络断开正例通过，此项非阻断。
+- [P3] internal/daemon/cdp_error_classification_test.go:207: 新增 RPC 回归只断言通用错误码，未锁定 error.message 和 error.data.hint；建议按方法检查 eval failed/snapshot failed 等消息以及 hint 包含原始异常文本，允许操作/target 前缀。当前实现保留异常描述，此项非阻断。
+
+Codex 只读审查 origin/main...HEAD，基线 main@d55fbc55162db73a43c01e1a6b782750437cfb5a；无 P0/P1，页面异常/协议错误中的全部传输关键词不触发 fatal，真正 io.EOF、关闭网络连接、broken pipe 仍 fatal。与 main 合并无冲突，无需修改或推送代码分支。
+
+测试：Codex 使用 Go 1.27.4 完整执行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过（8 个测试包、2 个无测试包）；额外临时 overlay 观测未改工作树；manager 确认 HEAD、工作树干净、diff --check 通过及远端分支 head 一致。未发现 review-code skill，按需求/计划直接审查。HOME/可写缓存/临时文件均在 review run 指定 TMPDIR 内；额外安装：无。
+
+未验证：真实非 headless Chrome/CDP 端到端、实际 WebSocket 断链、Docker、systemd；未启动浏览器或操作用户窗口。无 linked issue/PR，未发 GitHub 评论。
+
+状态：review/ → ready/，第 1 轮；请 owner 查看两项非阻断建议及未实测范围。本次仅 review，未合并 main、未发布。
