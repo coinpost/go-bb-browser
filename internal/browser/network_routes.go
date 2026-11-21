@@ -160,7 +160,7 @@ func (s *Session) NetworkRouteCount(tabID target.ID) int {
 func (s *Session) syncRoutes(ctx context.Context, rs *routeState, tabID target.ID) error {
 	tabCtx, err := s.tabChromeCtxContext(ctx, tabID)
 	if err != nil {
-		return err
+		return wrapCDPError("Fetch.enable", tabID, err)
 	}
 	rs.cdpMu.Lock()
 	defer rs.cdpMu.Unlock()
@@ -173,7 +173,7 @@ func (s *Session) syncRoutes(ctx context.Context, rs *routeState, tabID target.I
 		if w := rs.worker(tabID); w != nil {
 			w.stopListening()
 		}
-		return err
+		return wrapCDPError("Fetch.disable", tabID, err)
 	}
 
 	w := rs.ensureWorker(tabID, tabCtx, gen)
@@ -184,9 +184,9 @@ func (s *Session) syncRoutes(ctx context.Context, rs *routeState, tabID target.I
 	if len(patterns) == 0 {
 		return nil
 	}
-	return runCDPWithContext(tabCtx, ctx, chromedp.ActionFunc(func(c context.Context) error {
+	return wrapCDPError("Fetch.enable", tabID, runCDPWithContext(tabCtx, ctx, chromedp.ActionFunc(func(c context.Context) error {
 		return fetch.Enable().WithPatterns(patterns).Do(c)
-	}))
+	})))
 }
 
 func routePatterns(rules []NetworkRouteRule) []*fetch.RequestPattern {
