@@ -62,9 +62,12 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
 	listCtx, cancel := context.WithTimeout(ctx, timeout.Operation)
+	// runTargetSync is already registering lifecycle events: take the token
+	// before the request so this snapshot cannot remove what they register.
+	tok := s.beginTargetEnumeration()
 	targets, terr := sess.PageTargetsContext(listCtx)
 	cancel()
-	snaps := s.syncInitialTargets(sess, targets, terr)
+	snaps := s.syncInitialTargets(sess, tok, targets, terr)
 	// Perform the initial managed-tab recovery. If target enumeration failed,
 	// runTargetSync repeats this reconciliation after its successful retry.
 	s.reconcileIdleFromLog(snaps)
@@ -79,9 +82,9 @@ type targetDirtyMarker interface {
 	MarkTargetDirty()
 }
 
-func (s *Server) syncInitialTargets(marker targetDirtyMarker, targets []*target.Info, err error) []state.TabSnapshot {
+func (s *Server) syncInitialTargets(marker targetDirtyMarker, tok state.EnumerationToken, targets []*target.Info, err error) []state.TabSnapshot {
 	if err == nil {
-		return s.syncTabsFromTargets(targets)
+		return s.syncTabsFromTargets(tok, targets)
 	}
 	if s.logger != nil {
 		s.logger.Warn("list targets after browser connect", "err", err)
@@ -118,10 +121,13 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		}
 		if sess.ConsumeTargetDirty() {
 			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
+			// Token before the request: RPCs (tab_new) keep registering tabs
+			// while this resync is in flight.
+			tok := s.beginTargetEnumeration()
 			infos, err := sess.PageTargetsContext(probe)
 			cancel()
 			if err == nil {
-				snaps := s.syncTabsFromTargets(infos)
+				snaps := s.syncTabsFromTargets(tok, infos)
 				// Reconciliation is idempotent for tabs already tracked in memory and
 				// is required when the startup target enumeration failed.
 				s.reconcileIdleFromLog(snaps)
