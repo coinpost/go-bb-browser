@@ -1,6 +1,6 @@
 ---
 branch: factory/FT1-full-project-review-and-fix
-round: 3
+round: 4
 ---
 # 全项目 review 并修复发现的问题
 
@@ -169,3 +169,25 @@ notes:
 ## Guoyin · 2026-11-21 14:28
 再来一轮
 你不要用 cloud agent，直接把任务挪到 new 就可以了
+
+
+## factory · plan · 2026-11-21 15:48
+第4轮补充计划（owner 已要求再来一轮）。
+Behaviour：创建回包前已销毁 target 时返回 RPC 错误、不暴露可复用短 ID，保留完整身份审计；显式关闭在排队前绑定完整 ID、加锁后复核；已有页 attach 失败只 detach；browser executor 启用 discovery 并检查失败；初始握手有独立期限且受 daemon 取消，成功后会话独立。
+Scope：最新 review 五项 P1 及直接相关生命周期/连接回归，不扩展到其余 snapshot/CLI/store 问题。
+Decisions：复用中断构建的修改但逐项核实；连接采用仅 browser control（零页不创建、不附着用户页）；不修改依赖上游，避免隐式 CloseTarget。旧测试可替换但必须保留有价值的兼容覆盖。锁序和取消/清理必须可解释。
+Checking：本地假 CDP 按实际订阅 session 投递；barrier 覆盖创建销毁/短 ID 复用、并发关闭、attach 初始化失败无 close、握手取消/期限、连接成功后父 context 取消不破坏 session；gofmt/vet/race 全套和定向重复。真实 Chrome/UI 未验明确记录。
+
+## factory · 2026-11-21 15:48
+第4轮按 owner「再来一轮」授权修复，new/ → review/。未修改 max_rounds 配置；本轮仍需独立 review，若有 P1 则等 owner 决定。
+branch: factory/FT1-full-project-review-and-fix
+head: 27815e5964e03f94ef7fd73df6b23db494be7c4e
+本轮由本地 Claude Code 完成，未使用 cloud agent。恢复了中断构建的未提交修改（先 stash 留存备份，再应用继续）；清理了本 run 过期临时缓存，Go 模块只读目录经赋予当前用户写权限后清理，无 sudo。
+
+构建：一个主题提交 27815e5，修复最新 review 五项 P1：创建回包前销毁返回 RPC 错误、不分配短 ID，并以完整身份记录创建/释放；显式关闭排队前绑定完整 target，取得操作锁后复核映射；连接只建立 browser control、不附着已有页或零页时新建页，页面懒附着初始化失败仅 detach；browser executor 显式启用 discovery 并检查结果；初始握手受 daemon 取消且有独立30秒期限，成功后会话寿命独立。顺带使显式关闭通知在途创建跟踪器。README/AGENTS 同步。移除不再使用的 /json/list 探测、stale-target 回退及对应3项旧单测，新增替代连接和取消覆盖。
+
+验证：Claude Code 报告完整 gofmt/vet/race 通过；daemon 相关回归 -race -count=20 -cpu 1,2,8、browser 全包 -race -count=20 通过；五项修复共7种旧行为变异均被对应测试检出。manager 独立在隔离 HOME/TMPDIR 下关闭代理执行 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...，全部通过。核对 origin/main..HEAD 只含本条目提交，diff --check、禁止路径与工作树干净检查通过，然后推送。假 CDP 按实际订阅会话投递，真实 ListenAndServe + barrier 覆盖并发关闭与短 ID 接替。
+安装：无新增工具，无 manifest/lockfile 变更，复用已有 Go 1.27.4，仅离线恢复锁定模块。所有测试 HOME/cache/临时物位于本 run TMPDIR。
+
+兼容与 review 重点：零页连接不再创建 about:blank；移除了非 Chrome CDP 的旧回退，项目范围仍只支持 Chrome。已销毁创建在日志记 ok:true 表示实际创建过，但 RPC 返回错误，需复核恢复语义及清理锁序；手动调用 allocator 建立 browser-only 连接需复核 chromedp 上下文取消与 Browser 发布同步。部分握手测试有100–450ms等待，不全是纯 barrier。
+未检查：未启动真实 Chrome，真实 browser discovery/CDP/UI/零页连接、非Chrome CDP兼容、截图/网络拦截、systemd/Docker/跨平台均未实测。tab_new 成功返回后再销毁并复用短 ID 仍受协议本身限制。其余 review P2/P3（含store轮转、过期枚举、快照/CLI等）未修复；本轮不宣称全库无缺陷。无关联 issue/PR。
