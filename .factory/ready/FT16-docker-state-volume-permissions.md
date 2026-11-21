@@ -61,3 +61,18 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：本机无 Docker/podman/colima/nerdctl，未启动服务；镜像实际构建、GoReleaser/buildx、目录实际uid/gid、named volume属主继承、rpc.jsonl写入/重用、compose启动、不可达CDP错误分类及文档维修命令均未运行。COPY --chown 的真实目录结果仅按预期语义推断，review 应在有 Docker 环境补验。真实 Chrome/CDP、systemd 未测，未启动浏览器或操作用户窗口，无UI改动。
 
 状态：代码分支已推送；new/ → review/，第1/3轮。仅build，未执行独立review、未合并main、未发布。
+
+
+## factory · review · 2026-11-22 06:05
+head: 7383fecd8d388fbbca434a72dc8036de44850603
+verdict: pass
+notes:
+- [P2] README.md:149（同 deploy/docker-compose.example.yml:36）：bind mount 宿主机直接 chown 65532:65532 仅适用于 UID/GID 直接映射；启用 userns-remap 时容器 65532 对应其他宿主机 ID，应注明条件并使用映射后的宿主机 UID/GID。
+- [P3] README.md:145（同 deploy/docker-compose.example.yml:28）：Docker 初始化按卷是否为空而非是否已存在判断；旧镜像留下的空 root 卷默认挂载时仍可从新镜像初始化。应区分空卷/非空卷，只在实际权限仍错误时修复。
+- [P3] deploy/deploy_test.go:53：只断言最终阶段曾出现 USER nonroot:nonroot，末尾再加 USER root 仍通过；建议检查最后一条 USER 指令。
+
+Codex 独立只读审查 origin/main...HEAD 全部4个文件，无 P0/P1。分支与 origin/main 合并检查无冲突，未改文件/提交代码。构建时目录预置及 COPY --chown 逻辑、GoReleaser 两架构隔离上下文经代码审查未发现阻断；静态断言不代表引擎验收。
+
+测试：Codex 使用 Go1.27.4、TMPDIR 下隔离 HOME/缓存执行完整 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...，退出0；同一测试对 origin/main Dockerfile 验证预置属主断言失败，对 HEAD 3个部署静态检查通过。manager 确认 HEAD、工作树干净及 git diff --check 通过。安装：无新增工具或 manifest 变更。
+
+未验证：没有可用 Docker 引擎，未启动服务；GoReleaser/buildx 双架构镜像构建、新空 named volume 的真实 UID/GID、rpc.jsonl 写入及重建持久化、compose 启动和维修命令未实测。真实 Chrome/CDP、systemd 未测，无 UI 改动。owner 应重点在 Docker 环境补验并看上述非阻断文档/测试建议。review/ → ready/，未合并 main、未发布。
