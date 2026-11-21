@@ -1,0 +1,18 @@
+## go version: go version go1.27.4 darwin/arm64
+## HEAD: d55fbc55162db73a43c01e1a6b782750437cfb5a
+## gofmt -l .
+gofmt_exit_list_empty=yes
+## go vet ./...
+vet_exit=0
+## go test -race ./...
+ok  	github.com/yiplee/go-bb-browser/cmd/bb-browser	13.032s
+ok  	github.com/yiplee/go-bb-browser/cmd/bb-daemon	1.385s
+ok  	github.com/yiplee/go-bb-browser/internal/browser	3.491s
+ok  	github.com/yiplee/go-bb-browser/internal/daemon	2.276s
+ok  	github.com/yiplee/go-bb-browser/internal/site	1.406s
+ok  	github.com/yiplee/go-bb-browser/internal/state	1.319s
+ok  	github.com/yiplee/go-bb-browser/internal/store	1.433s
+?   	github.com/yiplee/go-bb-browser/internal/timeout	[no test files]
+ok  	github.com/yiplee/go-bb-browser/pkg/daemonclient	1.506s
+?   	github.com/yiplee/go-bb-browser/pkg/protocol	[no test files]
+test_exit=0

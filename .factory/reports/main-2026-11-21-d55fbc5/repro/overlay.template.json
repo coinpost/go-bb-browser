@@ -1,0 +1,10 @@
+{"Replace":{
+"internal/daemon/zz_audit_main_test.go":"repro/daemon_audit_test.go",
+"internal/store/zz_audit_main_test.go":"repro/store_audit_test.go",
+"internal/store/zz_audit_umask_test.go":"repro/store_audit_umask_test.go",
+"internal/state/zz_audit_main_test.go":"repro/state_audit_test.go",
+"internal/browser/zz_audit_main_test.go":"repro/browser_audit_test.go",
+"internal/site/zz_audit_main_test.go":"repro/site_audit_test.go",
+"cmd/bb-browser/zz_audit_main_test.go":"repro/cli_audit_test.go",
+"pkg/daemonclient/zz_audit_main_test.go":"repro/client_audit_test.go"
+}}

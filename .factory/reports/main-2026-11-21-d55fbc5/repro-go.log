@@ -1,0 +1,115 @@
+# 诊断复现（期望 FAIL = 缺陷证据）; HEAD d55fbc55162db73a43c01e1a6b782750437cfb5a; go version go1.27.4 darwin/arm64
+$ go test -race -count=1 -overlay TMP/overlay.json -run TestAudit_ -v ./internal/... ./cmd/bb-browser/ ./pkg/daemonclient/
+=== RUN   TestAudit_ObservationRingMustStayClearedAfterTabClose
+    zz_audit_main_test.go:58: BUG: 1 network event(s) for a closed target are back in the store after ClearTarget (INV-6); nothing clears them again
+--- FAIL: TestAudit_ObservationRingMustStayClearedAfterTabClose (0.10s)
+=== RUN   TestAudit_FailedNetworkRouteMustNotLeaveRuleRegistered
+    zz_audit_main_test.go:73: AppendNetworkRouteContext error = Target.attachToTarget target=TAB-ROUTE: context canceled
+    zz_audit_main_test.go:75: BUG: RPC failed but 1 rule(s) stay registered (later calls report it and a later successful sync silently activates it)
+--- FAIL: TestAudit_FailedNetworkRouteMustNotLeaveRuleRegistered (0.00s)
+FAIL
+FAIL	github.com/yiplee/go-bb-browser/internal/browser	0.224s
+=== RUN   TestAudit_PageExceptionTextMustNotKillDaemon
+=== RUN   TestAudit_PageExceptionTextMustNotKillDaemon/eval_websocket_state
+    zz_audit_main_test.go:167: kind=3 (ErrorTransport=3) isCDPSessionLost=true
+    zz_audit_main_test.go:170: BUG: page-level JS exception made the daemon declare CDP lost and exit: cdp session lost: exception "Uncaught" (0:0): InvalidStateError: Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.
+=== RUN   TestAudit_PageExceptionTextMustNotKillDaemon/eval_user_error_eof
+    zz_audit_main_test.go:167: kind=3 (ErrorTransport=3) isCDPSessionLost=true
+    zz_audit_main_test.go:170: BUG: page-level JS exception made the daemon declare CDP lost and exit: cdp session lost: exception "Uncaught" (0:0): Error: unexpected EOF while parsing feed
+=== RUN   TestAudit_PageExceptionTextMustNotKillDaemon/snapshot_bad_scope_selector
+    zz_audit_main_test.go:167: kind=3 (ErrorTransport=3) isCDPSessionLost=true
+    zz_audit_main_test.go:170: BUG: page-level JS exception made the daemon declare CDP lost and exit: cdp session lost: exception "Uncaught" (0:0): SyntaxError: Failed to execute 'querySelector' on 'Document': 'div[data-kind=websocket' is not a valid selector.
+--- FAIL: TestAudit_PageExceptionTextMustNotKillDaemon (0.00s)
+    --- FAIL: TestAudit_PageExceptionTextMustNotKillDaemon/eval_websocket_state (0.00s)
+    --- FAIL: TestAudit_PageExceptionTextMustNotKillDaemon/eval_user_error_eof (0.00s)
+    --- FAIL: TestAudit_PageExceptionTextMustNotKillDaemon/snapshot_bad_scope_selector (0.00s)
+=== RUN   TestAudit_StaleTargetListMustNotUnmanageNewTab
+    zz_audit_main_test.go:219: BUG: tab "4d5e" returned by tab_new was dropped from the registry by a stale target list
+    zz_audit_main_test.go:222: BUG: daemon-created tab "4d5e" lost its managed flag (will never be idle-closed in this process)
+--- FAIL: TestAudit_StaleTargetListMustNotUnmanageNewTab (0.00s)
+=== RUN   TestAudit_UnknownTabRequestsMustNotLeakLockEntries
+    zz_audit_main_test.go:246: BUG: 300 lock entries retained after 300 requests for unknown tab ids (want 0)
+--- FAIL: TestAudit_UnknownTabRequestsMustNotLeakLockEntries (0.05s)
+=== RUN   TestAudit_IdleClosedTabMustLeavePersistedManagedSet
+    zz_audit_main_test.go:271: BUG: idle-closed tab "1234" is still in the persisted managed set (never pruned; re-snapshotted on every rotation)
+    zz_audit_main_test.go:287: BUG: after restart a user-opened tab (short "1234") is tracked as daemon-managed because of a stale persisted entry
+    zz_audit_main_test.go:291: BUG(consequence): idle sweeper closed the user's tab CCCC0000000000000000000000001234
+--- FAIL: TestAudit_IdleClosedTabMustLeavePersistedManagedSet (0.00s)
+FAIL
+FAIL	github.com/yiplee/go-bb-browser/internal/daemon	0.175s
+=== RUN   TestAudit_AdapterWithRegexLiteralMustWrapWholeFunction
+    zz_audit_main_test.go:34: BUG: adapter body truncated at offset 224, before its final statement (offset 295):
+        (async function(__args){
+        /* @meta {"name":"demo","domain":"example.com","args":{"url":{"required":true}}} */
+        const __bb_run = async function(args) {
+          if (!/^https?:\/\//.test(args.url)) {
+            return { error: 'bad url' };
+          }; return await __bb_run(__args);
+          const r = await fetch(args.url);
+          return { ok: r.ok };
+        }
+        
+        })( {"url":"https://example.com"} )
+--- FAIL: TestAudit_AdapterWithRegexLiteralMustWrapWholeFunction (0.00s)
+FAIL
+FAIL	github.com/yiplee/go-bb-browser/internal/site	0.221s
+=== RUN   TestAudit_ShortIDsMustBeStableAcrossRestartOnSuffixCollision
+    zz_audit_main_test.go:25: run1: A="abcd" B="1abcd"; after restart: A="0abcd" B="abcd"
+    zz_audit_main_test.go:27: BUG: short ids changed across restart (A "abcd"→"0abcd", B "1abcd"→"abcd")
+    zz_audit_main_test.go:30: BUG: short id "abcd" (tab A before restart, e.g. in rpc.jsonl / held by clients) now resolves to 0000111111111111111111111111ABCD
+--- FAIL: TestAudit_ShortIDsMustBeStableAcrossRestartOnSuffixCollision (0.00s)
+FAIL
+FAIL	github.com/yiplee/go-bb-browser/internal/state	0.070s
+=== RUN   TestAudit_AppendAfterUnterminatedTailMustNotLoseRecords
+2026/11/22 02:05:39 WARN rpc log corrupt; abandoning remainder err="invalid character '{' after top-level value" offset=0
+    zz_audit_main_test.go:54: managed after restart = map[]; rpc.jsonl size after replay = 0 bytes
+    zz_audit_main_test.go:57: BUG: managed tab "aaaa" lost after restart (records glued onto an unterminated line, then truncated by replay)
+    zz_audit_main_test.go:57: BUG: managed tab "bbbb" lost after restart (records glued onto an unterminated line, then truncated by replay)
+--- FAIL: TestAudit_AppendAfterUnterminatedTailMustNotLoseRecords (0.00s)
+=== RUN   TestAudit_InMemoryModeMustNotRetainEveryRecord
+    zz_audit_main_test.go:75: BUG: in-memory store retains 5000 of 5000 records (unbounded growth; nothing reads memLogs)
+--- FAIL: TestAudit_InMemoryModeMustNotRetainEveryRecord (0.20s)
+=== RUN   TestAudit_RPCLogMustNotBeWorldReadable
+    zz_audit_main_test.go:101: rpc.jsonl mode=644 dir mode=755; log contains fill text and Authorization header
+    zz_audit_main_test.go:103: BUG: rpc.jsonl holding credentials is created with mode 644 (group/other readable)
+    zz_audit_main_test.go:106: BUG: state dir created with mode 755 (group/other accessible)
+--- FAIL: TestAudit_RPCLogMustNotBeWorldReadable (0.00s)
+FAIL
+FAIL	github.com/yiplee/go-bb-browser/internal/store	0.301s
+?   	github.com/yiplee/go-bb-browser/internal/timeout	[no test files]
+=== RUN   TestAudit_RunAcceptsDocumentedNamedArgs
+    zz_audit_main_test.go:74: BUG: documented form `run x.js hello --count 20` rejected: unknown flag: --count
+    zz_audit_main_test.go:74: BUG: documented form `run x.js hello --count=20` rejected: unknown flag: --count
+--- FAIL: TestAudit_RunAcceptsDocumentedNamedArgs (0.00s)
+=== RUN   TestAudit_RunAdapterErrorMustFailTheCommand
+[error] HTTP 401
+  Hint: please log in
+  (Log in to the site in Chrome for this profile, then retry.)
+    zz_audit_main_test.go:94: BUG: adapter returned {error:"HTTP 401"} but the command succeeded (main would exit 0)
+--- FAIL: TestAudit_RunAdapterErrorMustFailTheCommand (0.00s)
+=== RUN   TestAudit_ScreenshotJPEGDefaultNameMustNotBePNG
+    zz_audit_main_test.go:117: wrote screenshot-1795280739.png (jpeg magic=true)
+    zz_audit_main_test.go:119: BUG: JPEG screenshot saved under a .png name: screenshot-1795280739.png
+--- FAIL: TestAudit_ScreenshotJPEGDefaultNameMustNotBePNG (0.00s)
+FAIL
+FAIL	github.com/yiplee/go-bb-browser/cmd/bb-browser	0.134s
+=== RUN   TestAudit_SpreadWithInterleavedHealth
+    zz_audit_main_test.go:32: tab_new per backend = [0 20]
+    zz_audit_main_test.go:34: uneven spread: [0 20] want [10 10]
+--- FAIL: TestAudit_SpreadWithInterleavedHealth (0.01s)
+=== RUN   TestAudit_SpreadWithInterleavedHealth3
+    zz_audit_main_test.go:52: tab_new per backend = [0 0 30]
+    zz_audit_main_test.go:54: uneven spread: [0 0 30] want [10 10 10]
+--- FAIL: TestAudit_SpreadWithInterleavedHealth3 (0.02s)
+=== RUN   TestAudit_TabListHungBackend
+    zz_audit_main_test.go:86: TabList => {Tab: Seq:0 Tabs:[] Focus:} err=context deadline exceeded (B tab_list calls=0)
+    zz_audit_main_test.go:88: hung backend 0 made whole tab_list fail: err=context deadline exceeded tabs=[]
+--- FAIL: TestAudit_TabListHungBackend (0.50s)
+=== RUN   TestAudit_TabListDoesNotPruneStale
+    zz_audit_main_test.go:105: map after 5 lists each showing exactly one tab: map[0:t0:0 0:t1:0 0:t2:0 0:t3:0 0:t4:0]
+    zz_audit_main_test.go:107: tab 0:t0 no longer listed by its daemon but still bound (map size 5)
+--- FAIL: TestAudit_TabListDoesNotPruneStale (0.01s)
+FAIL
+FAIL	github.com/yiplee/go-bb-browser/pkg/daemonclient	0.649s
+FAIL
+exit=1

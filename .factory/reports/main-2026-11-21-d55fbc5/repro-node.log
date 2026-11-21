@@ -1,0 +1,24 @@
+$ node repro/snapshot_stale_refs.js internal/browser/snapshot.go
+FAIL scoped snapshot after full snapshot: latest snapshot says @1 = <Submit order>, selector [__bb_snap_ref="1"] resolves to #delete-account (want #submit)
+FAIL element hidden between snapshots: latest snapshot says @1 = <Pay now>, selector [__bb_snap_ref="1"] resolves to #cookie-accept (want #pay)
+exit=1
+
+$ node --check <原始 adapter 包成函数表达式>
+input adapter: valid JS
+$ node repro/adapter_wrapped_run.js <RunScript 输出>
+adapter result = undefined | fetch calls = 0
+FAIL: expected {"ok":true} from the adapter; wrapper never invoked it
+exit=1
+
+# RunScript 输出:
+(async function(__args){
+/* @meta {"name":"demo","domain":"example.com","args":{"url":{"required":true}}} */
+const __bb_run = async function(args) {
+  if (!/^https?:\/\//.test(args.url)) {
+    return { error: 'bad url' };
+  }; return await __bb_run(__args);
+  const r = await fetch(args.url);
+  return { ok: r.ok };
+}
+
+})( {"url":"https://example.com"} )

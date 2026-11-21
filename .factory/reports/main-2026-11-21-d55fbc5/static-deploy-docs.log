@@ -1,0 +1,75 @@
+$ bb-daemon --debugger-url 127.0.0.1:1 --listen 127.0.0.1:0 --state-dir <0555 目录>/sub   # 模拟 nonroot 写不了 root:root 0755 的卷
+server: rpc log store: create state dir "TMP/ro-state/sub": mkdir TMP/ro-state/sub: permission denied
+exit=1
+$ bb-daemon ... --state-dir <0555 目录>
+server: rpc log store: state dir "TMP/ro-state" is not writable
+exit=1
+
+$ cat Dockerfile
+FROM gcr.io/distroless/static:nonroot
+COPY bb-daemon /usr/local/bin/bb-daemon
+COPY bb-browser /usr/local/bin/bb-browser
+USER nonroot:nonroot
+EXPOSE 8787
+ENV BB_BROWSER_LISTEN=0.0.0.0:8787
+ENTRYPOINT ["/usr/local/bin/bb-daemon"]
+
+$ grep -n "STATE_DIR\|volumes\|bb-state" deploy/docker-compose.example.yml README.md
+deploy/docker-compose.example.yml:16:      BB_BROWSER_STATE_DIR: "/var/lib/bb-daemon"
+deploy/docker-compose.example.yml:24:    volumes:
+deploy/docker-compose.example.yml:25:      - bb-state:/var/lib/bb-daemon
+deploy/docker-compose.example.yml:29:volumes:
+deploy/docker-compose.example.yml:30:  bb-state:
+README.md:86:| `BB_BROWSER_STATE_DIR` | RPC log 目录，默认 `~/.local/state/bb-daemon`（`rpc.jsonl`）；`-` 为 in-memory；等价 `--state-dir` |
+README.md:128:      BB_BROWSER_STATE_DIR: "/var/lib/bb-daemon"
+README.md:136:    volumes:
+README.md:137:      - bb-state:/var/lib/bb-daemon
+README.md:139:volumes:
+README.md:140:  bb-state:
+README.md:143:镜像内默认用户为 `nonroot`（uid 65532）；bind mount 时需确保目录可写，或使用 named volume。
+
+$ grep -n "^\[" deploy/systemd/bb-daemon.service   # 只有 [Service]，无 [Unit]/[Install]
+1:[Service]
+$ grep -n "enable\|linger\|boot" deploy/systemd/README.md
+21:# 4) Reload, enable, start.
+23:systemctl --user enable --now bb-daemon.service
+33:## Run on boot (no login required)
+36:it running across reboots without logging in, enable lingering for your user:
+39:sudo loginctl enable-linger "$USER"
+93:  may enable it; forwarded requests still require a token. **Do not enable** with Tailscale **TCP forwarding**
+
+$ 超时相关
+skills/bb-browser-adapter/SKILL.md:18:- 单次 `run` 超时 **约 180 秒**（`cmd/bb-browser/main.go`）；长任务需要拆步或先改实现。
+skills/bb-browser-adapter/SKILL.md:230:- **超时 180s**：大页循环抓、翻页、滚动加载别在一次 `run` 里做完；分多条调用或回退到 `fetch` 直接打分页接口。
+skills/bb-browser-adapter/references/patterns.md:172:`bb-browser run` 单次超时 180s。想抓 10 页 × 50 条不要在一次 run 里全拿：
+skills/bb-browser-adapter/references/patterns.md:225:> 不要无限重试；180s 预算耗尽就回 `{ error }` 让上层决定是否再 run。
+5:// Operation bounds one daemon RPC's CDP work.
+6:const Operation = 60 * time.Second
+internal/daemon/v1.go:86:	ctx, cancel := context.WithTimeout(ctx, timeout.Operation)
+internal/browser/session.go:159:	opCtx, cancel := context.WithTimeout(tabCtx, timeout.Operation)
+internal/browser/session.go:440:	ctx, cancel := context.WithTimeout(context.Background(), timeout.Operation)
+internal/browser/session.go:463:	ctx, cancel := context.WithTimeout(context.Background(), timeout.Operation)
+internal/browser/session.go:678:	opCtx, cancel := context.WithTimeout(s.ctx, timeout.Operation)
+internal/browser/session.go:702:	opCtx, cancel := context.WithTimeout(s.ctx, timeout.Operation)
+99:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+115:			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+189:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+201:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+226:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+254:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+293:			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+324:			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+342:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+366:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+392:			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+484:			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+576:			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+635:	ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+666:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+683:			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+708:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+792:			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+868:			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+887:			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+917:			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+947:			ctx, cancel := context.WithTimeout(cmd.Context(), 180*time.Second)
