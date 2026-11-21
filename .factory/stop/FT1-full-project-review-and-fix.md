@@ -321,3 +321,6 @@ notes:
 未检查：未启动真实Chrome；真实UI/CDP投递概率、截图图像质量、网络拦截、systemd、Docker、跨平台、磁盘故障均未实测。无关联issue/PR，无需GitHub评论。
 
 第6轮为owner额外授权，round=6已超过max_rounds=3；有P1，留在review/等owner决定，不自动开始第7轮。若继续修复，需owner添加说明并移回new/。
+
+## factory · 2026-11-22 00:55
+owner 明确要求：「ft1 移到 stop，然后直接用 cc 给整个项目 main 分支完整review 一下出一个报告，然后把报告里面提到的 bug 分别建立工厂任务放到 new 里面去。」据此 review/ → stop/，停止 FT1 后续构建和审查，不合并、不删除其分支。另对 origin/main 固定提交进行 Claude Code 全项目只读审查，报告与独立 bug 任务另存，不把 FT1 分支上的实现或回归当成 main 已有代码。
