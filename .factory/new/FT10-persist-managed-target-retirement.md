@@ -60,3 +60,20 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 已知范围边界：FT11 的陈旧枚举与 tab_new 竞争仍可把新建 tab 判为消失，失去自动回收；原来已丢内存登记，本次也会退役持久成员。未在本分支修复，review 需关注同步登记/退役之间的生命周期竞争和写盘失败语义。
 
 状态：代码分支已推送；new/ → review/，第 1/3 轮。本次仅 build，未 review、未合并 main、未发布。
+
+## factory · review · 2026-11-22 04:08
+head: f708b1b2debcd711f8f172d0f90938a35f830267
+verdict: fix
+fix:
+- [P1] internal/daemon/tab_idle.go:160: reconcileIdleFromLog 以早先枚举结果核对稍后读取的 ManagedTabs；注册表同步结束后、读取受管集合前成功的 tab_new 仍存活于 Chrome/注册表，却被删除 idle 跟踪并持久化退役，重启也无法恢复。本变更扩大 FT11 竞争影响；相同时序探针基线通过、HEAD 失败。应在发起枚举前固定本轮可退役的完整 target 候选集合，仅对这些候选判定缺席，加入永久时序回归。
+notes:
+- [P2] internal/daemon/v1.go:485: targetCreated/targetDestroyed 均先于 tab_new 处理创建结果时，销毁因尚无 store 成员未能退役，迟到登记又持久化已销毁 target；应协调在途创建与销毁，使确认销毁优先于迟到登记。
+- [P2] internal/daemon/v1.go:245: 成功响应阶段重新解析短别名可将 A 的 goto 归到复用别名的 B；tab_focus 也可能因多余 params.tab 刷新错误成员。应在实际解析目标时保存完整身份，审计与 idle 共用，focus 使用返回目标。
+- [P2] internal/daemon/tab_idle.go:102: 重启回放后注册表尚未填充时，销毁事件因 RemoveTarget 未命中直接返回；应始终按完整 target 幂等退役，仅别名清理依赖注册表命中。
+- [P2] internal/daemon/tab_idle.go:196: 显式关闭得到 No target with given id found 后未退役已确认消失成员；共用路径应识别 ErrorTargetGone 并退役完整身份，可保留 RPC 原错误。
+- [P2] internal/store/store.go:374: 同步登记吞掉轮转失败；旧日志已移至 .1、创建新日志失败时 RegisterManagedTab 仍返回 nil，重开丢失存活身份。应先准备可恢复快照再替换，并将失败返回生命周期调用者。
+- [P3] internal/daemon/tab_idle.go:72: 生命周期写入 ErrClosed 仅 debug；应按约定 warn，或关闭 store 前等待生命周期写入结束。
+
+Codex 只读审查 origin/main...HEAD；配置完整 gofmt/vet/race 在 HEAD 与基线均通过（各8个测试包、2个无测试包），新增并发生命周期测试重复60次通过。临时 overlay 定向探针复现上述生命周期、审计与轮转问题；P1 已对照基线确认新增影响。git diff --check 通过，工作树干净、保护路径无差异。使用已有 mise Go 1.27.4，仅恢复固定模块，无新增安装。真实 Chrome/CDP、Docker、systemd 未验证；ErrClosed 日志级别为静态核对；未发现可用 review-code skill。
+
+第1/3轮发现P1，review/ → new/，下一 build 按 fix 列表修复；P2/P3为非阻塞审查记录。本次未修改代码、未合并 main、未发布。无 source 或 owner 签名关联 issue/PR，未发 GitHub 评论。
