@@ -3,9 +3,8 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,11 @@ import (
 	"github.com/yiplee/go-bb-browser/internal/state"
 	"github.com/yiplee/go-bb-browser/internal/timeout"
 )
+
+// ErrCreatedTargetGone is wrapped by CreatePageTargetContext when the target it
+// created was destroyed before Target.createTarget returned. The created
+// target's id is returned alongside the error.
+var ErrCreatedTargetGone = errors.New("target destroyed before createTarget returned")
 
 func errNilSession() error {
 	return fmt.Errorf("browser session is nil")
@@ -124,6 +128,11 @@ type Session struct {
 
 	targetEvents chan TargetEvent
 	targetDirty  atomic.Bool
+
+	// Targets destroyed while a Target.createTarget is in flight.
+	createMu          sync.Mutex
+	creating          int
+	destroyedInCreate map[target.ID]struct{}
 }
 
 func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
@@ -175,59 +184,6 @@ func remoteAllocatorURL(debuggerURL string) string {
 	return "http://" + s
 }
 
-// httpDebuggerBase maps ws/wss debugger URLs to http(s) for the DevTools HTTP API (/json/list).
-func httpDebuggerBase(debuggerURL string) string {
-	s := remoteAllocatorURL(debuggerURL)
-	switch {
-	case strings.HasPrefix(s, "ws://"):
-		return "http://" + strings.TrimPrefix(s, "ws://")
-	case strings.HasPrefix(s, "wss://"):
-		return "https://" + strings.TrimPrefix(s, "wss://")
-	default:
-		return s
-	}
-}
-
-// firstExistingPageTabID returns the first page-like target id from GET /json/list, or ("", nil)
-// if none exist (caller may let chromedp create a blank tab for INV-7).
-func firstExistingPageTabID(ctx context.Context, debuggerBase string) (target.ID, error) {
-	base := strings.TrimSpace(debuggerBase)
-	if base == "" {
-		return "", nil
-	}
-	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, strings.TrimRight(base, "/")+"/json/list", nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return "", fmt.Errorf("GET /json/list: HTTP %d", resp.StatusCode)
-	}
-	var entries []struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		return "", err
-	}
-	for _, e := range entries {
-		switch e.Type {
-		case "page", "tab":
-			if e.ID != "" {
-				return target.ID(e.ID), nil
-			}
-		}
-	}
-	return "", nil
-}
-
 // connectFailureHint adds short troubleshooting text for common attach failures.
 func connectFailureHint(err error) string {
 	if err == nil {
@@ -248,61 +204,114 @@ func connectFailureHint(err error) string {
 	}
 }
 
+// DefaultConnectTimeout bounds the connect handshake: resolving the browser
+// websocket, dialling it and enabling target discovery.
+const DefaultConnectTimeout = 30 * time.Second
+
 // Connect opens a CDP session to an already-running Chrome instance.
 // debuggerURL may be host:port, ws(s) URL, or http(s) URL (chromedp resolves to browser websocket).
 func Connect(parent context.Context, debuggerURL string) (*Session, error) {
+	return ConnectWithTimeout(parent, debuggerURL, DefaultConnectTimeout)
+}
+
+// ConnectWithTimeout is Connect with an explicit handshake deadline.
+//
+// The handshake ends when parent is cancelled or handshakeTimeout passes,
+// whichever is first; neither outlives it. Once ConnectWithTimeout has
+// returned a session, that session is independent of both: cancelling parent
+// (daemon SIGTERM) must not tear chromedp down.
+//
+// The browser-level context never attaches to a page. chromedp closes the
+// target of a context it cancels, and the only pages around at connect time are
+// the user's; with no target there is nothing a failed or cancelled handshake
+// could close. Pages are attached per tab, on first use (tabChromeCtxContext).
+func ConnectWithTimeout(parent context.Context, debuggerURL string, handshakeTimeout time.Duration) (*Session, error) {
 	if debuggerURL == "" {
 		return nil, fmt.Errorf("debugger URL is empty")
 	}
-	base := remoteAllocatorURL(debuggerURL)
-	attachID, err := firstExistingPageTabID(parent, httpDebuggerBase(debuggerURL))
-	if err != nil {
-		return nil, fmt.Errorf("devtools list targets: %w%s", err, connectFailureHint(err))
+	if handshakeTimeout <= 0 {
+		handshakeTimeout = DefaultConnectTimeout
 	}
-	// Do not tie the allocator to parent cancellation (e.g. daemon SIGTERM): cancelling that
-	// context makes chromedp.RemoteAllocator run Cancel → CloseTarget on open tabs. The
-	// debugging Chrome process should keep running; TCP drops when this process exits.
-	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.WithoutCancel(parent), base)
-
-	// First Run must use the long-lived chromedp ctx, not a child WithTimeout:
-	// RemoteAllocator starts a goroutine on Allocate that waits on Run's ctx.Done()
-	// then calls chromedp.Cancel — cancelling a timeout child after Connect returns
-	// would tear down the browser session (symptom: later CDP ops return "context canceled").
-	tryRun := func(targetID target.ID) (context.Context, context.CancelFunc, error) {
-		var c context.Context
-		var cancel context.CancelFunc
-		if targetID != "" {
-			// Attach to an existing page/tab; chromedp's default first Run otherwise
-			// creates a new about:blank target (Target.createTarget).
-			c, cancel = chromedp.NewContext(allocCtx, chromedp.WithTargetID(targetID))
-		} else {
-			c, cancel = chromedp.NewContext(allocCtx)
-		}
-		if err := chromedp.Run(c); err != nil {
-			cancel()
-			return nil, nil, err
-		}
-		return c, cancel, nil
-	}
-
-	ctx, ctxCancel, err := tryRun(attachID)
-	if err != nil && attachID != "" && isStaleTargetErr(err) {
-		// Some CDP servers (notably Obscura's /json/list) advertise a page-like
-		// target that doesn't actually exist in their session map. Fall back to
-		// letting chromedp create a fresh target via Target.createTarget so the
-		// daemon can still attach.
-		ctx, ctxCancel, err = tryRun("")
-	}
-	if err != nil {
-		allocCancel()
-		return nil, fmt.Errorf("cdp connect: %w%s", err, connectFailureHint(err))
-	}
+	// The contexts chromedp keeps are not derived from parent or the deadline:
+	// they live as long as the session.
+	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.WithoutCancel(parent), remoteAllocatorURL(debuggerURL))
+	ctx, ctxCancel := chromedp.NewContext(allocCtx)
 	cancel := func() {
 		ctxCancel()
 		allocCancel()
 	}
+
+	limit, stopLimit := context.WithTimeout(parent, handshakeTimeout)
+	defer stopLimit()
+	// Cancelling ctx is what interrupts every handshake step (HTTP lookup,
+	// websocket dial, CDP call) and closes the websocket. It sends nothing to
+	// Chrome: this context has no target.
+	//
+	// chromedp reads Context.Browser once ctx is cancelled, so the handshake
+	// may store it only while the abort has not started; abortMu orders the
+	// two.
+	var (
+		abortMu sync.Mutex
+		aborted bool
+	)
+	stopAbort := context.AfterFunc(limit, func() {
+		abortMu.Lock()
+		aborted = true
+		abortMu.Unlock()
+		cancel()
+	})
+	publish := func(b *chromedp.Browser) bool {
+		abortMu.Lock()
+		defer abortMu.Unlock()
+		if aborted {
+			return false
+		}
+		chromedp.FromContext(ctx).Browser = b
+		return true
+	}
+
+	s, err := handshake(ctx, cancel, publish)
+	if !stopAbort() {
+		// The abort has fired; whatever the handshake returned, the context
+		// under it is gone.
+		err = limit.Err()
+		if parent.Err() == nil {
+			err = fmt.Errorf("handshake did not finish within %s: %w", handshakeTimeout, err)
+		}
+		return nil, fmt.Errorf("cdp connect: %w%s", err, connectFailureHint(err))
+	}
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("cdp connect: %w%s", err, connectFailureHint(err))
+	}
+	return s, nil
+}
+
+// handshake allocates the browser connection on ctx and subscribes to target
+// lifecycle events on it. publish stores the allocated browser in the chromedp
+// context and reports false when the handshake was aborted first.
+func handshake(ctx context.Context, cancel context.CancelFunc, publish func(*chromedp.Browser) bool) (*Session, error) {
+	c := chromedp.FromContext(ctx)
+	// What chromedp.Run does first, minus attaching to (or creating) a page.
+	b, err := c.Allocator.Allocate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !publish(b) {
+		// The allocator closes the websocket of a cancelled context itself.
+		return nil, context.Canceled
+	}
+
 	s := newSession(ctx, cancel)
+	// Listen before enabling discovery: Chrome announces the existing targets
+	// as soon as it is enabled.
 	s.listenTargetEvents()
+	// Target events go to the CDP session that enabled discovery. The listener
+	// above is on the browser session, so discovery has to be enabled there;
+	// chromedp only enables it on the page sessions it attaches.
+	if err := target.SetDiscoverTargets(true).Do(cdp.WithExecutor(ctx, b)); err != nil {
+		return nil, fmt.Errorf("Target.setDiscoverTargets: %w", err)
+	}
 	return s, nil
 }
 
@@ -319,11 +328,48 @@ func (s *Session) listenTargetEvents() {
 			out.Info = e.TargetInfo
 		case *target.EventTargetDestroyed:
 			out.Destroyed = e.TargetID
+			s.noteDestroyedDuringCreate(e.TargetID)
 		default:
 			return
 		}
 		s.enqueueTargetEvent(out)
 	})
+}
+
+// noteDestroyedDuringCreate runs on chromedp's read loop, so a destruction that
+// precedes a Target.createTarget reply on the wire is recorded before
+// CreatePageTargetContext sees that reply.
+func (s *Session) noteDestroyedDuringCreate(id target.ID) {
+	s.createMu.Lock()
+	if s.creating > 0 {
+		if s.destroyedInCreate == nil {
+			s.destroyedInCreate = make(map[target.ID]struct{})
+		}
+		s.destroyedInCreate[id] = struct{}{}
+	}
+	s.createMu.Unlock()
+}
+
+func (s *Session) beginCreate() {
+	s.createMu.Lock()
+	s.creating++
+	s.createMu.Unlock()
+}
+
+// endCreate reports whether id, the target a create returned ("" if none), was
+// destroyed while creates were in flight.
+func (s *Session) endCreate(id target.ID) (destroyed bool) {
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+	s.creating--
+	if id != "" {
+		_, destroyed = s.destroyedInCreate[id]
+		delete(s.destroyedInCreate, id)
+	}
+	if s.creating == 0 {
+		s.destroyedInCreate = nil
+	}
+	return destroyed
 }
 
 func (s *Session) enqueueTargetEvent(event TargetEvent) {
@@ -348,28 +394,6 @@ func (s *Session) ConsumeTargetDirty() bool {
 func (s *Session) MarkTargetDirty() {
 	if s != nil {
 		s.targetDirty.Store(true)
-	}
-}
-
-// isStaleTargetErr matches CDP errors raised when attaching to a target id that the
-// remote DevTools host claims exists but its session bookkeeping cannot resolve.
-// Obscura reports "No page" / "No page for session" via its catch-all -32601 wrapper;
-// real Chrome reports variants like "No target with given id" / "Target closed".
-func isStaleTargetErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	m := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(m, "no page"),
-		strings.Contains(m, "no target"),
-		strings.Contains(m, "target not found"),
-		strings.Contains(m, "target closed"),
-		strings.Contains(m, "no session with given id"),
-		strings.Contains(m, "no such target"):
-		return true
-	default:
-		return false
 	}
 }
 
@@ -679,9 +703,16 @@ func (s *Session) CreatePageTargetContext(ctx context.Context, initialURL string
 	stop := context.AfterFunc(ctx, cancel)
 	defer cancel()
 	defer stop()
+	s.beginCreate()
 	id, err := params.Do(cdp.WithExecutor(opCtx, ex))
+	destroyed := s.endCreate(id)
 	if err != nil {
 		return "", wrapCDPError("Target.createTarget", "", err)
+	}
+	if destroyed {
+		// Chrome reported the new target destroyed before it answered. The id
+		// is returned with the error so the caller can account for the target.
+		return id, &CDPError{Kind: ErrorTargetGone, Op: "Target.createTarget", Target: id, Err: ErrCreatedTargetGone}
 	}
 	return id, nil
 }

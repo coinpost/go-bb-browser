@@ -36,6 +36,9 @@ type fakeConn struct {
 	// onCreate runs inside CreatePageTarget, before it returns: the window in
 	// which Chrome's events about the new target can already have been handled.
 	onCreate func(target.ID)
+	// createGone makes CreatePageTarget report, as browser.Session does, that
+	// the target it created was destroyed before the reply.
+	createGone bool
 	// closed lists the targets CloseTarget was asked to close.
 	closed []target.ID
 }
@@ -73,6 +76,9 @@ func (f *fakeConn) CreatePageTarget(initialURL string, _ bool) (target.ID, error
 	})
 	if f.onCreate != nil {
 		f.onCreate(id)
+	}
+	if f.createGone {
+		return id, &browser.CDPError{Kind: browser.ErrorTargetGone, Op: "Target.createTarget", Target: id, Err: browser.ErrCreatedTargetGone}
 	}
 	return id, nil
 }

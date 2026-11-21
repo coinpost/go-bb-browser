@@ -49,8 +49,11 @@ func isCDPSessionLost(err error) bool {
 // enumeration. tabMu is held only to publish the session: enumerating and
 // applying the result take the locks they need themselves (cleanup of a removed
 // target reads the session back through tabConn).
+//
+// The handshake stops when ctx is cancelled or its own deadline passes; the
+// session it returns depends on neither.
 func (s *Server) connectBrowser(ctx context.Context) error {
-	sess, err := browser.Connect(context.WithoutCancel(ctx), s.cfg.DebuggerURL)
+	sess, err := browser.ConnectWithTimeout(ctx, s.cfg.DebuggerURL, s.connectTimeout)
 	if err != nil {
 		return err
 	}

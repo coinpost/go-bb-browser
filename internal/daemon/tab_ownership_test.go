@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,19 +142,41 @@ func TestSweeperLeavesReleaseToLifecycleOwner(t *testing.T) {
 // Chrome can deliver targetCreated and targetDestroyed for a new tab before the
 // createTarget reply is handled. The reply must not register the dead target
 // again and keep it managed with nothing but a tab_new on disk.
+//
+// Nor may tab_new answer with a tab id: the id of a dead tab is free, and here
+// the user's page takes it before the response is written. A caller that then
+// closed "its" tab would close the user's page. The caller gets an error; the
+// log still says the target was created and released.
 func TestTargetDestroyedWhileCreateInFlight(t *testing.T) {
-	for name, events := range map[string]func(srv *Server, id target.ID){
-		"created then destroyed": func(srv *Server, id target.ID) {
+	type variant struct {
+		events  func(t *testing.T, srv *Server, fc *fakeConn, id target.ID)
+		wantLog string
+	}
+	for name, v := range map[string]variant{
+		"created then destroyed": {wantLog: "tab_new,tab_close", events: func(_ *testing.T, srv *Server, _ *fakeConn, id target.ID) {
 			srv.tabs.RegisterPageTarget(id) // Target.targetCreated
 			srv.removeTargetState(id)       // Target.targetDestroyed
-		},
-		"destroyed only": func(srv *Server, id target.ID) {
+		}},
+		"destroyed only": {wantLog: "tab_new,tab_close", events: func(_ *testing.T, srv *Server, _ *fakeConn, id target.ID) {
 			srv.removeTargetState(id)
-		},
-		"dropped by an enumeration": func(srv *Server, id target.ID) {
+		}},
+		"dropped by an enumeration": {wantLog: "tab_new,tab_close", events: func(_ *testing.T, srv *Server, _ *fakeConn, id target.ID) {
 			srv.tabs.RegisterPageTarget(id)
 			srv.syncTabsFromTargets(nil)
-		},
+		}},
+		// The session saw the destruction on the wire; the daemon's event loop
+		// has not handled anything yet.
+		"reported by the session": {wantLog: "tab_new,tab_close", events: func(_ *testing.T, _ *Server, fc *fakeConn, _ target.ID) {
+			fc.createGone = true
+		}},
+		// Closed by a tab_close RPC, with no destroyed event handled.
+		"closed by tab_close": {wantLog: "tab_close,tab_new,tab_close", events: func(t *testing.T, srv *Server, _ *fakeConn, id target.ID) {
+			short := srv.tabs.RegisterPageTarget(id)
+			rec := postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": short}, 7))
+			if !bytes.Contains(rec.Body.Bytes(), []byte(`"result"`)) {
+				t.Errorf("tab_close: %s", rec.Body.String())
+			}
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			stateDir := t.TempDir()
@@ -160,18 +184,42 @@ func TestTargetDestroyedWhileCreateInFlight(t *testing.T) {
 			srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
 			fc.onCreate = func(id target.ID) {
 				fc.infos = nil
-				events(srv, id)
+				v.events(t, srv, fc, id)
+				// The user's page opens and takes over the freed short id
+				// before tab_new has answered.
+				fc.infos = pageInfos(userTab)
+				if short := srv.tabs.RegisterPageTarget(userTab); short != "1234" {
+					t.Errorf("test setup: user tab short id = %q, want 1234", short)
+				}
 			}
 			rec := postRPC(t, srv, rpcReq(protocol.MethodTabNew, map[string]any{}, 1))
-			if !bytes.Contains(rec.Body.Bytes(), []byte(`"tab":"1234"`)) {
-				t.Fatalf("tab_new: %s", rec.Body.String())
+			var resp struct {
+				Result json.RawMessage `json:"result"`
+				Error  *struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Error == nil || len(resp.Result) != 0 {
+				t.Fatalf("tab_new for a destroyed target must fail, got %s", rec.Body.String())
+			}
+			if bytes.Contains(rec.Body.Bytes(), []byte("1234")) {
+				t.Fatalf("tab_new error exposes a tab id: %s", rec.Body.String())
 			}
 
-			if tid, ok := srv.tabs.Lookup("1234"); ok {
-				t.Fatalf("destroyed target registered again as %s", tid)
+			if tid, ok := srv.tabs.Lookup("1234"); !ok || tid != userTab {
+				t.Fatalf("short id 1234 = %q %v, want the user's page", tid, ok)
+			}
+			if _, ok := srv.tabs.ShortForTarget(ownTab); ok {
+				t.Fatal("destroyed target is registered")
 			}
 			if got := srv.tabIdle.Snapshot(); len(got) != 0 {
-				t.Fatalf("destroyed target is managed: %v", got)
+				t.Fatalf("managed after a create that left no tab: %v", got)
+			}
+			if slices.Contains(fc.closed, userTab) || !hasInfo(fc.infos, userTab) {
+				t.Fatalf("user page was closed: %v", fc.closed)
 			}
 			if n := len(srv.creates.gone) + len(srv.creates.inFlight); n != 0 {
 				t.Fatalf("create tracking not released: %+v", srv.creates)
@@ -180,8 +228,8 @@ func TestTargetDestroyedWhileCreateInFlight(t *testing.T) {
 				t.Fatal(err)
 			}
 			recs := readRPCLog(t, stateDir)
-			if got := logActions(recs); got != "tab_new,tab_close" {
-				t.Fatalf("rpc log = %s, want tab_new,tab_close", got)
+			if got := logActions(recs); got != v.wantLog {
+				t.Fatalf("rpc log = %s, want %s", got, v.wantLog)
 			}
 			for _, rec := range recs {
 				if rec.Target != string(ownTab) || !rec.OK {
@@ -193,6 +241,88 @@ func TestTargetDestroyedWhileCreateInFlight(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tabLockWaiters returns how many requests hold or wait for short's operation lock.
+func tabLockWaiters(srv *Server, short string) int {
+	srv.tabMuOps.Lock()
+	defer srv.tabMuOps.Unlock()
+	if ent := srv.tabCDPLocks[short]; ent != nil {
+		return ent.refs
+	}
+	return 0
+}
+
+// A tab_close names a short id, and waits for that id's operation lock. If it
+// only looks the id up once it has the lock, it closes whatever page holds the
+// id by then: after the tab it meant was closed by someone else, that is the
+// user's page that took the id over.
+func TestQueuedTabCloseDoesNotCloseShortIDSuccessor(t *testing.T) {
+	closeReq := rpcReq(protocol.MethodTabClose, map[string]any{"tab": "1234"}, 2)
+	setup := func(t *testing.T) (*Server, *fakeConn, string) {
+		stateDir := t.TempDir()
+		fc := &fakeConn{createID: ownTab}
+		srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
+		postRPC(t, srv, rpcReq(protocol.MethodTabNew, map[string]any{}, 1))
+		return srv, fc, stateDir
+	}
+	check := func(t *testing.T, srv *Server, fc *fakeConn, queued *httptest.ResponseRecorder, wantClosed []target.ID) {
+		t.Helper()
+		if !bytes.Contains(queued.Body.Bytes(), []byte(`"unknown tab id"`)) {
+			t.Errorf("queued tab_close = %s, want a stale tab id error", queued.Body.String())
+		}
+		if !slices.Equal(fc.closed, wantClosed) {
+			t.Errorf("CloseTarget called for %v, want %v", fc.closed, wantClosed)
+		}
+		if !hasInfo(fc.infos, userTab) {
+			t.Error("user page was closed")
+		}
+	}
+
+	// Two tab_close RPCs for the same tab: the first closes it, the user's page
+	// appears, the second gets the lock.
+	t.Run("two closes of the same tab", func(t *testing.T) {
+		srv, fc, _ := setup(t)
+		queued := make(chan *httptest.ResponseRecorder, 1)
+		var once sync.Once
+		fc.onClose = func(target.ID) {
+			once.Do(func() {
+				go func() { queued <- postRPC(t, srv, closeReq) }()
+				waitFor(t, "second tab_close to queue for the tab lock", func() bool { return tabLockWaiters(srv, "1234") == 2 })
+				// Opened by the user while the first close is in flight; once
+				// that close is done, the next enumeration gives it 1234.
+				fc.infos = append(fc.infos, pageInfos(userTab)...)
+			})
+		}
+		first := postRPC(t, srv, closeReq)
+		if !bytes.Contains(first.Body.Bytes(), []byte(`"result"`)) {
+			t.Fatalf("first tab_close: %s", first.Body.String())
+		}
+		check(t, srv, fc, <-queued, []target.ID{ownTab})
+	})
+
+	// The tab is destroyed and its short id reused while a tab_close waits.
+	t.Run("tab replaced while queued", func(t *testing.T) {
+		srv, fc, _ := setup(t)
+		unlock, ok := srv.lockTab(context.Background(), "1234") // some operation on the tab
+		if !ok {
+			t.Fatal("test setup: tab lock")
+		}
+		queued := make(chan *httptest.ResponseRecorder, 1)
+		go func() { queued <- postRPC(t, srv, closeReq) }()
+		waitFor(t, "tab_close to queue for the tab lock", func() bool { return tabLockWaiters(srv, "1234") == 2 })
+
+		srv.removeTargetState(ownTab) // Target.targetDestroyed
+		fc.infos = pageInfos(userTab)
+		if short := srv.tabs.RegisterPageTarget(userTab); short != "1234" { // Target.targetCreated
+			t.Fatalf("test setup: user tab short id = %q, want 1234", short)
+		}
+		unlock()
+		check(t, srv, fc, <-queued, nil)
+		if tid, ok := srv.tabs.Lookup("1234"); !ok || tid != userTab {
+			t.Fatalf("user tab lost its registration: %q %v", tid, ok)
+		}
+	})
 }
 
 // Removals are remembered only for creates in flight when they happened.

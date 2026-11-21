@@ -37,6 +37,12 @@ type liveDaemon struct {
 
 func startLiveDaemon(t *testing.T, cdp *fakeCDP, stateDir string, mutate func(*Config)) *liveDaemon {
 	t.Helper()
+	return startLiveDaemonServer(t, cdp, stateDir, mutate, nil)
+}
+
+// startLiveDaemonServer also lets the test adjust the Server before it runs.
+func startLiveDaemonServer(t *testing.T, cdp *fakeCDP, stateDir string, mutate func(*Config), prepare func(*Server)) *liveDaemon {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +68,9 @@ func startLiveDaemon(t *testing.T, cdp *fakeCDP, stateDir string, mutate func(*C
 		t.Fatal(err)
 	}
 	srv.idleSweepInterval = 10 * time.Millisecond
+	if prepare != nil {
+		prepare(srv)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &liveDaemon{t: t, srv: srv, url: "http://" + addr, cancel: cancel, done: make(chan error, 1)}
 	go func() { d.done <- srv.ListenAndServe(ctx) }()
@@ -102,6 +111,20 @@ func (d *liveDaemon) waitListening() {
 
 func (d *liveDaemon) rpc(method string, params any, out any) {
 	d.t.Helper()
+	result, rpcErr := d.call(method, params)
+	if len(rpcErr) != 0 {
+		d.t.Fatalf("%s: error %s", method, rpcErr)
+	}
+	if out != nil {
+		if err := json.Unmarshal(result, out); err != nil {
+			d.t.Fatal(err)
+		}
+	}
+}
+
+// call sends one RPC and returns its result or its JSON-RPC error object.
+func (d *liveDaemon) call(method string, params any) (result, rpcErr json.RawMessage) {
+	d.t.Helper()
 	res, err := http.Post(d.url+"/v1", "application/json", bytes.NewBufferString(rpcReq(method, params, 1)))
 	if err != nil {
 		d.t.Fatal(err)
@@ -112,13 +135,20 @@ func (d *liveDaemon) rpc(method string, params any, out any) {
 		Result json.RawMessage `json:"result"`
 		Error  json.RawMessage `json:"error"`
 	}
-	if err := json.Unmarshal(body, &env); err != nil || len(env.Error) != 0 {
+	if err := json.Unmarshal(body, &env); err != nil {
 		d.t.Fatalf("%s: %s (%v)", method, body, err)
 	}
-	if out != nil {
-		if err := json.Unmarshal(env.Result, out); err != nil {
-			d.t.Fatal(err)
-		}
+	return env.Result, env.Error
+}
+
+// exited waits up to limit for ListenAndServe to return.
+func (d *liveDaemon) exited(limit time.Duration) (err error, ok bool) {
+	select {
+	case err := <-d.done:
+		d.done <- err
+		return err, true
+	case <-time.After(limit):
+		return nil, false
 	}
 }
 
@@ -353,5 +383,59 @@ func TestListenFailureStopsBackgroundGoroutines(t *testing.T) {
 	case <-joined:
 	case <-time.After(time.Second):
 		t.Fatal("background goroutines still running after ListenAndServe returned")
+	}
+}
+
+// Two tab_close RPCs name the same daemon tab. While the first is in flight the
+// second queues for the tab's operation lock, and the user opens a page whose
+// target id gives it the same short id. The second close must report a stale id.
+// When it resolved the short id only after getting the lock, it enumerated the
+// browser, found the user's page under that id, and closed it.
+func TestConcurrentTabCloseOverCDPLeavesShortIDSuccessorOpen(t *testing.T) {
+	cdp := newFakeCDP(t, cdpExisting)
+	cdp.nextCreate = []target.ID{cdpManaged}
+	d := startLiveDaemon(t, cdp, t.TempDir(), nil)
+	d.waitListening()
+	var created protocol.TabNewResult
+	d.rpc(protocol.MethodTabNew, map[string]any{"silent": true}, &created)
+	if created.Tab != "1234" {
+		t.Fatalf("tab_new = %+v, want tab 1234", created)
+	}
+
+	type reply struct{ result, rpcErr json.RawMessage }
+	second := make(chan reply, 1)
+	var once sync.Once
+	cdp.mu.Lock()
+	cdp.onCloseTarget = func(target.ID) {
+		once.Do(func() {
+			go func() {
+				result, rpcErr := d.call(protocol.MethodTabClose, map[string]any{"tab": "1234"})
+				second <- reply{result, rpcErr}
+			}()
+			waitFor(t, "second tab_close to queue for the tab lock", func() bool { return tabLockWaiters(d.srv, "1234") == 2 })
+			// The user's page exists in Chrome before the first close is
+			// answered; its targetCreated event has not been delivered.
+			cdp.mu.Lock()
+			cdp.targets = append(cdp.targets, cdpUser)
+			cdp.mu.Unlock()
+		})
+	}
+	cdp.mu.Unlock()
+
+	if result, rpcErr := d.call(protocol.MethodTabClose, map[string]any{"tab": "1234"}); len(rpcErr) != 0 {
+		t.Fatalf("first tab_close: %s", rpcErr)
+	} else if len(result) == 0 {
+		t.Fatal("first tab_close returned no result")
+	}
+	got := <-second
+	if !bytes.Contains(got.rpcErr, []byte("unknown tab id")) {
+		t.Fatalf("queued tab_close = result %s error %s, want a stale tab id error", got.result, got.rpcErr)
+	}
+	d.stop()
+	if closed := cdp.closedTargets(); !slices.Equal(closed, []target.ID{cdpManaged}) {
+		t.Fatalf("Target.closeTarget sent for %v, want only %s", closed, cdpManaged)
+	}
+	if !cdp.hasTarget(cdpUser) {
+		t.Fatal("user page was closed")
 	}
 }

@@ -39,13 +39,56 @@ type fakeCDP struct {
 	onCloseTarget func(target.ID)
 	// closeReplied receives each target once its closeTarget reply is sent.
 	closeReplied chan target.ID
+
+	// discover holds the CDP sessions that enabled target discovery ("" is the
+	// browser session). Like Chrome, target events go to those sessions only.
+	discover map[string]bool
+	// calls lists every command received, in order.
+	calls []fakeCall
+	// onCommand runs before a command is handled and may block its reply.
+	onCommand func(method, sessionID string)
+	// onVersion runs before GET /json/version is answered.
+	onVersion func()
+	// onCreateTarget runs after the new target's targetCreated event and before
+	// the Target.createTarget reply.
+	onCreateTarget func(target.ID)
+	// failFrameTree makes Page.getFrameTree fail: chromedp's page attach then
+	// fails after Target.attachToTarget succeeded.
+	failFrameTree bool
+	// failBrowserDiscover makes Target.setDiscoverTargets fail on the browser
+	// session: the connect handshake then fails at its last step.
+	failBrowserDiscover bool
+}
+
+type fakeCall struct {
+	Method    string
+	SessionID string
+}
+
+// called returns how many times method was received, on any session.
+func (f *fakeCDP) called(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c.Method == method {
+			n++
+		}
+	}
+	return n
 }
 
 func newFakeCDP(t *testing.T, targets ...target.ID) *fakeCDP {
 	t.Helper()
-	f := &fakeCDP{t: t, targets: targets, closeReplied: make(chan target.ID, 16)}
+	f := &fakeCDP{t: t, targets: targets, closeReplied: make(chan target.ID, 16), discover: make(map[string]bool)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/json/version", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		hook := f.onVersion
+		f.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"Browser":              "FakeChrome/1.0",
 			"webSocketDebuggerUrl": "ws://" + r.Host + "/devtools/browser/fake",
@@ -105,7 +148,14 @@ func (f *fakeCDP) serveWS(w http.ResponseWriter, r *http.Request) {
 		// Commands are answered concurrently, as Chrome does: a hook may hold
 		// one reply back while others go out.
 		go func() {
-			result, errMsg, after := f.handle(msg.Method, msg.Params)
+			f.mu.Lock()
+			f.calls = append(f.calls, fakeCall{Method: msg.Method, SessionID: msg.SessionID})
+			hook := f.onCommand
+			f.mu.Unlock()
+			if hook != nil {
+				hook(msg.Method, msg.SessionID)
+			}
+			result, errMsg, after := f.handle(msg.Method, msg.SessionID, msg.Params)
 			reply := map[string]any{"id": msg.ID}
 			if msg.SessionID != "" {
 				reply["sessionId"] = msg.SessionID
@@ -133,14 +183,46 @@ func (f *fakeCDP) send(conn net.Conn, v any) {
 	_ = wsutil.WriteServerMessage(conn, ws.OpText, data)
 }
 
-// emit sends a browser-level event on every connection.
+// emit sends a target event to every CDP session that enabled discovery, and
+// to no other: a browser-level listener hears nothing unless discovery was
+// enabled on the browser session itself.
 func (f *fakeCDP) emit(method string, params any) {
+	f.mu.Lock()
+	sessions := make([]string, 0, len(f.discover))
+	for id := range f.discover {
+		sessions = append(sessions, id)
+	}
+	f.mu.Unlock()
+	for _, id := range sessions {
+		f.emitTo(id, method, params)
+	}
+}
+
+func (f *fakeCDP) emitTo(sessionID, method string, params any) {
 	f.mu.Lock()
 	conns := append([]net.Conn(nil), f.conns...)
 	f.mu.Unlock()
-	for _, c := range conns {
-		f.send(c, map[string]any{"method": method, "params": params})
+	msg := map[string]any{"method": method, "params": params}
+	if sessionID != "" {
+		msg["sessionId"] = sessionID
 	}
+	for _, c := range conns {
+		f.send(c, msg)
+	}
+}
+
+// destroyTarget removes a page as if it was closed in Chrome.
+func (f *fakeCDP) destroyTarget(id target.ID) {
+	f.mu.Lock()
+	kept := f.targets[:0]
+	for _, cur := range f.targets {
+		if cur != id {
+			kept = append(kept, cur)
+		}
+	}
+	f.targets = kept
+	f.mu.Unlock()
+	f.emit("Target.targetDestroyed", map[string]any{"targetId": string(id)})
 }
 
 func fakeTargetInfo(id target.ID) map[string]any {
@@ -176,8 +258,32 @@ func (f *fakeCDP) hasTarget(id target.ID) bool {
 }
 
 // handle answers one command. after, if set, runs once the reply is sent.
-func (f *fakeCDP) handle(method string, params json.RawMessage) (result any, errMsg string, after func()) {
+func (f *fakeCDP) handle(method, sessionID string, params json.RawMessage) (result any, errMsg string, after func()) {
 	switch method {
+	case "Target.setDiscoverTargets":
+		f.mu.Lock()
+		if f.failBrowserDiscover && sessionID == "" {
+			f.mu.Unlock()
+			return nil, "setDiscoverTargets failed (injected)", nil
+		}
+		f.discover[sessionID] = true
+		existing := append([]target.ID(nil), f.targets...)
+		f.mu.Unlock()
+		// Chrome announces the targets that already exist to the new subscriber.
+		return map[string]any{}, "", func() {
+			for _, id := range existing {
+				f.emitTo(sessionID, "Target.targetCreated", map[string]any{"targetInfo": fakeTargetInfo(id)})
+			}
+		}
+	case "Target.detachFromTarget":
+		var p struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(params, &p)
+		f.mu.Lock()
+		delete(f.discover, p.SessionID)
+		f.mu.Unlock()
+		return map[string]any{}, "", nil
 	case "Target.attachToTarget":
 		var p struct {
 			TargetID string `json:"targetId"`
@@ -187,6 +293,12 @@ func (f *fakeCDP) handle(method string, params json.RawMessage) (result any, err
 	case "Runtime.evaluate":
 		return map[string]any{"result": map[string]any{"type": "object", "className": "Window"}}, "", nil
 	case "Page.getFrameTree":
+		f.mu.Lock()
+		fail := f.failFrameTree
+		f.mu.Unlock()
+		if fail {
+			return nil, "getFrameTree failed (injected)", nil
+		}
 		return map[string]any{"frameTree": map[string]any{"frame": map[string]any{
 			"id": "frame", "loaderId": "loader", "url": "about:blank",
 			"securityOrigin": "null", "mimeType": "text/html",
@@ -229,8 +341,12 @@ func (f *fakeCDP) handle(method string, params json.RawMessage) (result any, err
 			id = target.ID(fmt.Sprintf("CREATED%08d", len(f.targets)+len(f.closed)))
 		}
 		f.targets = append(f.targets, id)
+		hook := f.onCreateTarget
 		f.mu.Unlock()
 		f.emit("Target.targetCreated", map[string]any{"targetInfo": fakeTargetInfo(id)})
+		if hook != nil {
+			hook(id)
+		}
 		return map[string]any{"targetId": string(id)}, "", nil
 	case "Target.closeTarget":
 		var p struct {

@@ -490,7 +490,10 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 	initial := strings.TrimSpace(p.URL)
 	create := s.beginCreate()
 	tid, err := createPageTarget(ctx, conn, initial, p.Silent)
-	if err != nil {
+	// The session can already know the new target is destroyed: Chrome reported
+	// it before answering createTarget. The id still comes back, for the log.
+	goneAtReply := err != nil && tid != "" && errors.Is(err, browser.ErrCreatedTargetGone)
+	if err != nil && !goneAtReply {
 		s.endCreate(create)
 		s.logger.Error("tab_new create target failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
@@ -510,32 +513,66 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 	// tab_close could precede it and leave the tab managed on disk.
 	s.lifeMu.Lock()
 	// Its destruction can even have been handled already, before createTarget
-	// returned. Then there is no tab to manage: the request still succeeded, so
-	// it gets its tab_new record, immediately followed by the release.
-	gone := s.endCreateLocked(create, tid)
+	// returned.
+	gone := s.endCreateLocked(create, tid) || goneAtReply
+	if gone {
+		s.lifeMu.Unlock()
+		s.tabNewTargetGone(ctx, w, id, tid, seq)
+		return
+	}
 	short := s.tabs.RegisterPageTarget(tid)
 	if meta := auditMetaFrom(ctx); meta != nil {
 		meta.target = tid
 	}
-	if gone {
-		s.tabs.RemoveTarget(tid)
-	} else {
-		s.markTabManaged(tid)
-		if !p.Silent {
-			s.tabs.Select(short)
-		}
+	s.markTabManaged(tid)
+	if !p.Silent {
+		s.tabs.Select(short)
 	}
 	resp, err := protocol.MarshalResponse(id, protocol.TabNewResult{Tab: short, Seq: seq})
 	if err == nil {
 		s.scheduleAudit(ctx, resp)
-		if gone {
-			s.logManagedTabGone(tid, short)
-		}
 	}
 	s.lifeMu.Unlock()
-	if gone {
-		s.clearTargetResources(tid, short)
+	s.writeJSONRPCRaw(w, resp, err)
+}
+
+// tabNewTargetGone finishes a tab_new whose target is known to be destroyed
+// already. What is logged and what the caller is told differ on purpose.
+//
+// The log gets the truth about the browser: a target was created (tab_new, by
+// full target id) and is gone (the release), so nothing is left managed on
+// disk. The caller gets an error and no tab id. The target never gets a short
+// id: one handed out for a dead target would be free for the next page that
+// opens, and a caller closing "its" tab would then close that page.
+func (s *Server) tabNewTargetGone(ctx context.Context, w http.ResponseWriter, id json.RawMessage, tid target.ID, seq uint64) {
+	s.lifeMu.Lock()
+	if meta := auditMetaFrom(ctx); meta != nil && s.store != nil {
+		s.enqueueAudit(store.LogRecord{
+			Action:   meta.action,
+			Body:     meta.body,
+			Target:   string(tid),
+			SenderIP: meta.senderIP,
+			Seq:      seq,
+			OK:       true,
+			Time:     meta.at,
+		})
 	}
+	s.logManagedTabGone(tid, "")
+	s.lifeMu.Unlock()
+	// Whatever an earlier event registered for the target is dropped with it.
+	s.removeTargetState(tid)
+	if sess, ok := s.tabConn().(*browser.Session); ok {
+		sess.ForgetTarget(tid)
+	}
+	if s.logger != nil {
+		s.logger.Warn("tab_new target was destroyed before it could be returned", "target", string(tid))
+	}
+	resp, err := protocol.MarshalErrorResponse(id, protocol.CodeServerError, "tab closed before tab_new completed", &protocol.ErrData{
+		Error:  "target gone",
+		Hint:   "the new tab was closed before tab_new returned; no tab id was assigned",
+		Method: protocol.MethodTabNew,
+	})
+	// Not audited: the request's record is the creation written above.
 	s.writeJSONRPCRaw(w, resp, err)
 }
 

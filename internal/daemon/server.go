@@ -90,6 +90,10 @@ type Server struct {
 	auditDone     chan struct{}
 	auditWG       sync.WaitGroup
 
+	// connectTimeout bounds the initial CDP handshake. Zero uses
+	// browser.DefaultConnectTimeout.
+	connectTimeout time.Duration
+
 	// shutdownTimeout bounds http.Server.Shutdown. Zero uses the default.
 	// A timed-out shutdown gets shutdownDrain more (zero: timeout.Operation) to
 	// drain handlers before connections are closed.
@@ -274,6 +278,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	if !s.SkipBrowserAttach && s.tabHook == nil {
 		if err := s.connectBrowser(runCtx); err != nil {
+			if ctx.Err() != nil {
+				// Asked to stop while still connecting: same as a stop later on.
+				return nil
+			}
 			return fmt.Errorf("cdp attach: %w", err)
 		}
 	}
