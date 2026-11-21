@@ -242,3 +242,23 @@ head: 82ece1bbe61e71d18609cf6b2c78f18c28cc283a
 安装：无新增工具，无 manifest/lockfile 变更；复用 Go 1.27.4，只恢复锁定模块。所有测试 HOME/cache/临时文件位于本 run TMPDIR。全平台 go mod download 缺本机未缓存的 mousetrap，但本机配置完整测试离线通过，不宣称跨平台已验。
 兼容：未注册短 ID 不再隐式枚举；新开的用户页事件未到达时会暂时 unknown tab id，需 tab_list。未知 ID 的判定先于锁超时。操作进行中 target 仍可能销毁，此时 CDP 按完整 ID 失败而不重定向接替页。
 未检查：未启动真实 Chrome，真实 CDP/UI、截图、网络拦截、systemd/Docker/跨平台未实测。clear 成功后换映射仅由共用记账路径覆盖，无单独可插桩调用。其余 review P2/P3（列表/焦点快照不一致、过期枚举复活、生命周期队列溢出、关停/创建收尾、store轮转、snapshot/CLI、重复释放记录）未修复。本轮不宣称全库无缺陷；无关联 issue/PR。
+
+
+## factory · review · 2026-11-21 23:12
+head: 82ece1bbe61e71d18609cf6b2c78f18c28cc283a
+verdict: fix
+fix:
+- [P1] internal/daemon/v1.go:476: tab_select 枚举回包后、应用前原页销毁且用户页接替短 ID，旧枚举复活原页为另一短 ID；SelectTarget 实际选中91234，响应仍返回1234，后续关闭返回值会关闭用户页（真实HTTP+回环fake CDP，10/10）。在同一注册表临界区复核请求短 ID 仍绑定原完整 ID 后再选择，变化则报unknown；拒绝旧枚举复活已删除target。
+- [P1] internal/daemon/v1.go:361: tab_focus 探测期间原页销毁、用户页已接替1234，探测不完整且无缓存焦点时仍从旧快照返回1234，调用方按返回值关闭会关闭用户页（10/10，接替发生在响应前）。返回前按完整 ID 校验候选与当前短 ID 仍匹配，响应/元数据/审计来自同一有效候选，无有效候选则错误或重新枚举。
+notes:
+- [P2] internal/daemon/tab_idle.go:183: target释放清空观测环后，已取走事件的writer仍可Push重建旧完整ID的环（5/5），导致旧数据/内存滞留；停止并等待writer或原子校验注册代次。未观察到接替页读取旧事件。
+- [P2] internal/store/store.go:218: 合法JSON尾行缺换行时首次恢复成功，后续成功追加与尾行拼接，下次启动截断并丢失归属（HEAD10/10，基线同样复现）；接受完整尾行后补分隔符并检查错误。
+- [P2] internal/store/store.go:171: 启动覆盖并删除状态目录既有.write-test普通文件（HEAD10/10，基线同样复现）；用CreateTemp独占创建探测文件，或直接检查打开日志结果。
+
+前轮两项P1原始路径已修复：重复关闭未知短ID不再枚举，排队eval等17个带锁入口排队前绑定、锁内复核完整ID。三个clear另加成功后换映射调度点各10次，接替页buffer/idle不变且审计只记原页。以上两项P1是响应身份错误导致实际误关用户页的独立证据，不是将既有P2无证据升级。其他既有notes（队列溢出、过期枚举、列表/焦点、关停与创建、轮转、snapshot/CLI、重复释放）沿用原记录及等级。
+
+验证：本地Codex独立审查origin/main...HEAD共13个提交、41个文件（本轮13文件）；配置gofmt检查、go vet ./...、go test -race ./...在HEAD与导出的origin/main均离线通过。17入口相关定向race重复20次，daemon生命周期/FIFO/恢复/连接/关停定向及browser/state/store全包重复10次通过。真实HTTP、回环fake CDP、只读overlay/barrier复现上述问题；异常诊断PASS表示成功复现。manager核对配置日志、两项P1复现输出及相关实现，HEAD未变、工作树干净、禁止路径未改，无代码提交。
+安装：复用已有Go1.27.4和Node，仅恢复锁定模块，无新增工具或依赖清单修改。HOME/cache/overlay/临时文件位于本run TMPDIR；复现源码、报告与日志保留于本review run的evidence/FT1-82ece1b/。
+未检查：未启动真实Chrome；真实UI/CDP时序、截图、网络拦截、systemd、Docker、跨平台、磁盘写满未实测。无关联issue/PR，无需GitHub评论。
+
+第5轮为owner额外授权，round=5已超过max_rounds=3；仍有2项P1，留在review/等owner决定，不自动开始第6轮。继续修复需owner添加说明并移回new/。
