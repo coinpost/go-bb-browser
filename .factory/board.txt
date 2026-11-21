@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
 Nothing at your gates | 21 with the agent | 0 done
-Drawn Nov 22, 01:27 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 22, 01:34 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     2h  生命周期事件溢出重同步与优雅关停次序
@@ -10,48 +10,49 @@ BACKLOG (5)                                 never built
     FT5     2h  快照ref作用域与脱离节点清理
     FT6     2h  run帮助布尔参数与选项终止符兼容
 
-NEW (20)                                    avg stay 15m
-    FT10   15m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+NEW (21)                                    avg stay 15m
+    FT10   22m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
-    FT11   15m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
+    FT11   22m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
                 建的受管 tab 从注册表和空闲跟踪中删除
-    FT12   15m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
+    FT12   22m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
                 能命中上一次快照遗留的其它元素
-    FT13   15m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13   22m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon
-    FT14   15m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
-    FT15   15m  [P2] systemd unit 没有 [Install] 段，文档里的 `systemctl --user
+    FT14   22m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
+    FT15   22m  [P2] systemd unit 没有 [Install] 段，文档里的 `systemctl --user
                 enable` 与开机自启不生效
-    FT16   15m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
+    FT16   22m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
                 写，daemon 启动即退出
-    FT17   15m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
+    FT17   22m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
-    FT18   15m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
+    FT18   22m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
                 该行及其后的全部记录截断丢弃
-    FT19   15m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
+    FT19   22m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
-    FT20   15m  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
+    FT20   22m  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
                 其他用户可读取 fill 文本与 fetch 头中的凭据
-    FT21   15m  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
+    FT21   22m  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
                 向另一个 tab
-    FT22   15m  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
-    FT23   15m  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
+    FT22   22m  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
+    FT23   22m  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
                 adapter 被截断成永不执行的脚本
-    FT24   15m  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
+    FT24   22m  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
                 screenshot-<ts>.png
-    FT25   15m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+    FT25   22m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败
-    FT26   15m  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
+    FT26   22m  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中
-    FT27   15m  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
+    FT27   22m  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
-    FT8    15m  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
+    FT8    22m  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
                 断开并整体退出
-    FT9    15m  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
+    FT9    22m  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
                 flag 拒绝，文档化的命名参数形式全部不可用
-
-REVIEW (1)
     FT7     1m  target释放与观测writer退役同步
+
+REVIEW (0)                                  avg stay 7m
+    Nothing here
 
 READY (0)
     Nothing here
