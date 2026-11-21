@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-Nothing at your gates | 1 with the agent | 0 done | 4 sent back
-Drawn Nov 21, 22:51 | https://github.com/coinpost/go-bb-browser
+1 at your gates | 0 with the agent | 0 done | 4 sent back
+Drawn Nov 21, 23:12 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (0)                                 never built
     Nothing here
@@ -9,8 +9,9 @@ BACKLOG (0)                                 never built
 NEW (0)                                     avg stay 37m
     Nothing here
 
-REVIEW (1)                                  avg stay 5h
-    FT1     1m  全项目 review 并修复发现的问题 (round 5)
+REVIEW (1) [!]                              avg stay 5h
+  * FT1     1m  全项目 review 并修复发现的问题 (round 5)
+                > Decide: fix or take it
 
 READY (0)
     Nothing here
