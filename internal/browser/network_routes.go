@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 
@@ -62,29 +63,26 @@ func (s *Session) routes() *routeState {
 	return s.routeState
 }
 
+// routeFetchApply sends a tab's Fetch interception config: Fetch.enable with the
+// patterns, or Fetch.disable when there are none. Tests replace it.
+var routeFetchApply = func(tabCtx, requestCtx context.Context, patterns []*fetch.RequestPattern) error {
+	return runCDPWithContext(tabCtx, requestCtx, chromedp.ActionFunc(func(c context.Context) error {
+		if len(patterns) == 0 {
+			return fetch.Disable().Do(c)
+		}
+		return fetch.Enable().WithPatterns(patterns).Do(c)
+	}))
+}
+
 // SetNetworkRoutes replaces all Fetch interception rules for a tab and syncs CDP.
 func (s *Session) SetNetworkRoutes(tabID target.ID, rules []NetworkRouteRule) error {
 	return s.SetNetworkRoutesContext(context.Background(), tabID, rules)
 }
 
 func (s *Session) SetNetworkRoutesContext(ctx context.Context, tabID target.ID, rules []NetworkRouteRule) error {
-	if s == nil {
-		return errNilSession()
-	}
-	rs := s.routes()
-	if rs == nil {
-		return fmt.Errorf("browser session route state is not initialized")
-	}
-	rs.mu.Lock()
-	if len(rules) == 0 {
-		delete(rs.rules, tabID)
-	} else {
-		cp := make([]NetworkRouteRule, len(rules))
-		copy(cp, rules)
-		rs.rules[tabID] = cp
-	}
-	rs.mu.Unlock()
-	return s.syncRoutes(ctx, rs, tabID)
+	return s.updateRoutes(ctx, tabID, func([]NetworkRouteRule) []NetworkRouteRule {
+		return append([]NetworkRouteRule(nil), rules...)
+	})
 }
 
 // AppendNetworkRoute adds one rule for a tab (existing rules preserved).
@@ -93,17 +91,9 @@ func (s *Session) AppendNetworkRoute(tabID target.ID, rule NetworkRouteRule) err
 }
 
 func (s *Session) AppendNetworkRouteContext(ctx context.Context, tabID target.ID, rule NetworkRouteRule) error {
-	if s == nil {
-		return errNilSession()
-	}
-	rs := s.routes()
-	if rs == nil {
-		return fmt.Errorf("browser session route state is not initialized")
-	}
-	rs.mu.Lock()
-	rs.rules[tabID] = append(rs.rules[tabID], rule)
-	rs.mu.Unlock()
-	return s.syncRoutes(ctx, rs, tabID)
+	return s.updateRoutes(ctx, tabID, func(cur []NetworkRouteRule) []NetworkRouteRule {
+		return append(cur, rule)
+	})
 }
 
 // RemoveNetworkRoutes removes rules whose URLPattern matches pattern; empty pattern clears all rules for the tab.
@@ -112,33 +102,13 @@ func (s *Session) RemoveNetworkRoutes(tabID target.ID, urlPattern string) error 
 }
 
 func (s *Session) RemoveNetworkRoutesContext(ctx context.Context, tabID target.ID, urlPattern string) error {
-	if s == nil {
-		return errNilSession()
-	}
-	rs := s.routes()
-	if rs == nil {
-		return fmt.Errorf("browser session route state is not initialized")
-	}
-	rs.mu.Lock()
 	pat := strings.TrimSpace(urlPattern)
-	if pat == "" {
-		delete(rs.rules, tabID)
-	} else {
-		cur := rs.rules[tabID]
-		var out []NetworkRouteRule
-		for _, r := range cur {
-			if r.URLPattern != pat {
-				out = append(out, r)
-			}
+	return s.updateRoutes(ctx, tabID, func(cur []NetworkRouteRule) []NetworkRouteRule {
+		if pat == "" {
+			return nil
 		}
-		if len(out) == 0 {
-			delete(rs.rules, tabID)
-		} else {
-			rs.rules[tabID] = out
-		}
-	}
-	rs.mu.Unlock()
-	return s.syncRoutes(ctx, rs, tabID)
+		return slices.DeleteFunc(cur, func(r NetworkRouteRule) bool { return r.URLPattern == pat })
+	})
 }
 
 // NetworkRouteCount returns how many interception rules are active for a tab.
@@ -157,7 +127,26 @@ func (s *Session) NetworkRouteCount(tabID target.ID) int {
 	return len(rs.rules[tabID])
 }
 
-func (s *Session) syncRoutes(ctx context.Context, rs *routeState, tabID target.ID) error {
+// updateRoutes applies one rule change as a transaction: the candidate rules
+// are sent to the browser first and stored only once that sync succeeded, so a
+// failed call leaves the rules (and the listener serving them) as they were.
+// cdpMu serializes whole updates, so concurrent callers build on each other's
+// committed result; rs.mu is never held across CDP.
+//
+// A sync that times out or loses its connection may still have been applied by
+// the browser. The local table then keeps the last confirmed rules; the next
+// successful update sends the full pattern list and reconciles the browser.
+func (s *Session) updateRoutes(ctx context.Context, tabID target.ID, mutate func(cur []NetworkRouteRule) []NetworkRouteRule) error {
+	if s == nil {
+		return errNilSession()
+	}
+	rs := s.routes()
+	if rs == nil {
+		return fmt.Errorf("browser session route state is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	tabCtx, err := s.tabChromeCtxContext(ctx, tabID)
 	if err != nil {
 		return wrapCDPError("Fetch.enable", tabID, err)
@@ -165,28 +154,87 @@ func (s *Session) syncRoutes(ctx context.Context, rs *routeState, tabID target.I
 	rs.cdpMu.Lock()
 	defer rs.cdpMu.Unlock()
 
-	rules, gen := rs.snapshot(tabID)
-	if len(rules) == 0 {
-		err := runCDPWithContext(tabCtx, ctx, chromedp.ActionFunc(func(c context.Context) error {
-			return fetch.Disable().Do(c)
-		}))
-		if w := rs.worker(tabID); w != nil {
-			w.stopListening()
+	cur, gen := rs.snapshot(tabID)
+	next := mutate(cur) // cur is a private copy
+	if len(next) == 0 {
+		if err := ctx.Err(); err != nil {
+			return wrapCDPError("Fetch.disable", tabID, err)
 		}
-		return wrapCDPError("Fetch.disable", tabID, err)
+		// Paused requests still need the listener until the browser confirms
+		// that interception is off.
+		if err := routeFetchApply(tabCtx, ctx, nil); err != nil {
+			return wrapCDPError("Fetch.disable", tabID, err)
+		}
+		if rs.commit(tabID, gen, nil) {
+			if w := rs.worker(tabID); w != nil {
+				w.stopListening()
+			}
+		}
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return wrapCDPError("Fetch.enable", tabID, err)
 	}
 
+	// The listener must be in place before Fetch.enable; until commit it keeps
+	// answering paused requests from the previously confirmed rules.
 	w := rs.ensureWorker(tabID, tabCtx, gen)
 	if w == nil || !w.startListening(tabCtx, rs, tabID, gen) {
-		return nil
+		return routeTargetGone(tabID)
 	}
-	patterns := routePatterns(rules)
-	if len(patterns) == 0 {
-		return nil
+	if patterns := routePatterns(next); len(patterns) > 0 {
+		if err := routeFetchApply(tabCtx, ctx, patterns); err != nil {
+			if len(cur) == 0 {
+				rs.abandonFirstEnable(tabCtx, tabID, w)
+			}
+			return wrapCDPError("Fetch.enable", tabID, err)
+		}
 	}
-	return wrapCDPError("Fetch.enable", tabID, runCDPWithContext(tabCtx, ctx, chromedp.ActionFunc(func(c context.Context) error {
-		return fetch.Enable().WithPatterns(patterns).Do(c)
-	})))
+	if !rs.commit(tabID, gen, next) {
+		return routeTargetGone(tabID)
+	}
+	return nil
+}
+
+func routeTargetGone(tabID target.ID) error {
+	return &CDPError{Kind: ErrorTargetGone, Op: "Fetch.enable", Target: tabID, Err: fmt.Errorf("target removed while updating routes")}
+}
+
+// commit stores rules unless the target was cleared since gen was read, so an
+// in-flight update cannot bring a removed target's rules back.
+func (rs *routeState) commit(tabID target.ID, gen uint64, rules []NetworkRouteRule) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.gen[tabID] != gen {
+		return false
+	}
+	if len(rules) == 0 {
+		delete(rs.rules, tabID)
+	} else {
+		rs.rules[tabID] = rules
+	}
+	return true
+}
+
+// abandonFirstEnable releases the worker and listener of a tab whose first
+// Fetch.enable failed. The failed call may still have reached the browser, so
+// interception is switched off first; if that cannot be confirmed either, the
+// listener stays (with no rules it continues every paused request) until a
+// later update or target cleanup.
+func (rs *routeState) abandonFirstEnable(tabCtx context.Context, tabID target.ID, w *routeWorker) {
+	if routeFetchApply(tabCtx, context.Background(), nil) != nil {
+		return
+	}
+	rs.mu.Lock()
+	owned := rs.workers[tabID] == w
+	if owned {
+		delete(rs.workers, tabID)
+	}
+	rs.mu.Unlock()
+	w.stopListening()
+	if owned {
+		w.cancel()
+	}
 }
 
 func routePatterns(rules []NetworkRouteRule) []*fetch.RequestPattern {
@@ -226,7 +274,7 @@ func (rs *routeState) worker(tabID target.ID) *routeWorker {
 
 func (rs *routeState) ensureWorker(tabID target.ID, tabCtx context.Context, gen uint64) *routeWorker {
 	rs.mu.Lock()
-	if rs.gen[tabID] != gen || len(rs.rules[tabID]) == 0 {
+	if rs.gen[tabID] != gen {
 		rs.mu.Unlock()
 		return nil
 	}
