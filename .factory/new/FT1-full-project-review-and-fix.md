@@ -165,3 +165,7 @@ notes:
 未检查：未启动真实 Chrome；真实 UI/CDP、截图、网络拦截、systemd、Docker、跨平台、磁盘写满未实测。无关联 issue/PR，无需 GitHub 评论。
 
 第3/3轮仍有5项P1，已达 max_rounds，留在 review/ 等 owner 决定；如需继续修复，请添加说明并移回 new/。本轮不自动开始第4轮。
+
+## Guoyin · 2026-11-21 14:28
+再来一轮
+你不要用 cloud agent，直接把任务挪到 new 就可以了
