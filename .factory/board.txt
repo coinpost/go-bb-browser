@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-1 at your gates | 20 with the agent | 0 done
-Drawn Nov 22, 04:13 | https://github.com/coinpost/go-bb-browser
+2 at your gates | 19 with the agent | 0 done
+Drawn Nov 22, 04:17 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     4h  生命周期事件溢出重同步与优雅关停次序
@@ -44,16 +44,18 @@ NEW (19)                                    avg stay 2h
     FT9     3h  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
                 flag 拒绝，文档化的命名参数形式全部不可用
     FT7     2h  target释放与观测writer退役同步
-    FT10    5m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+    FT10    9m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
 
-REVIEW (1)                                  avg stay 6m
-    FT11    1m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
-                建的受管 tab 从注册表和空闲跟踪中删除
+REVIEW (0)                                  avg stay 6m
+    Nothing here
 
-READY (1) [!]
-  * FT8    28m  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
+READY (2) [!]
+  * FT8    32m  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
                 断开并整体退出
+                > Check, then ship
+  * FT11    1m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
+                建的受管 tab 从注册表和空闲跟踪中删除
                 > Check, then ship
 
 DONE (0)
