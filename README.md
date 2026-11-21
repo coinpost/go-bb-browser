@@ -236,6 +236,7 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 
 - **作用**：页面树快照 JSON-RPC（含 `@ref` → 选择器映射）。
 - **选项**：`-i` / `--interactive`、`-c` / `--compact`、`-d` / `--depth`、`-s` / `--scope`（CSS 根范围）。
+- **ref 生命周期**：每次 `snapshot` 使此前所有 `@ref` 失效（旧 ref 报错而不是指向别的元素）；编号为纯数字，同一文档内递增不复用，导航 / 刷新后从 `@1` 重新开始。
 
 ---
 
