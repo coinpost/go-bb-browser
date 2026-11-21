@@ -18,11 +18,14 @@ Adapter 为 **JavaScript 文件**，可内含 `/* @meta { ... } */` JSON 元数�
 
 ```bash
 bb-browser run SCRIPT.js [位置参数...] [--flag value ...]
-bb-browser run SCRIPT.js --query "x"              # --name=value
+bb-browser run SCRIPT.js --query "x"              # 等价于 --query=x
 bb-browser run ./adapters/foo.js a b --json       # 原始 JSON-RPC 包络
+bb-browser run SCRIPT.js --tab ab12 -- a --tab x  # -- 之后的 --tab 传给脚本
 ```
 
-全局选项：`--tab <短 id>` 强制指定标签页；省略时行为见「自动 Tab」。
+全局选项：`--tab <短 id>` 强制指定标签页；省略时行为见「自动 Tab」。`--url`、`--api-token`、`--json`、`--tab`、`--help` 是保留名，可写在 `run` 前后或与脚本参数穿插；第一个 `--` 之后的 `--name` 全部归脚本。
+
+命名参数的值原样作为字符串传入（`--name=` 为空串，`--name=a=b` 值为 `a=b`，同名取最后一次，`-5` 是普通值）；`--name` 缺值或下一个 token 以 `--` 开头时报 `flag --name needs a value`。
 
 ## 自动 Tab
 

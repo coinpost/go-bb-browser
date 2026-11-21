@@ -330,7 +330,29 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 ### `run SCRIPT.js [args…]`
 
 - **作用**：读取适配器 JS 文件，组装参数后 `eval` 在页面执行（见 `internal/site`、`skills/bb-browser/references/script-system.md`）。
-- **首参**：磁盘上的 `.js` 路径；其余为 CLI 参数（含 `--name value`）。
+- **首参**：磁盘上的 `.js` 路径（第一个位置参数）；其余为传给脚本的参数。
+- **位置参数**：按出现次序映射到 `@meta.args` 的键，并总是写入 `arg1`、`arg2`…
+- **命名参数**：`--name value` 或 `--name=value` → `args.name`，值原样作为字符串传入。
+
+```bash
+bb-browser run ./x.js hello --count 20        # args = { query: "hello", arg1: "hello", count: "20" }
+bb-browser run ./x.js hello --count=20 --json # 同上，并输出原始 JSON-RPC
+bb-browser run ./x.js --tab ab12 -- hello --tab x   # 全局 tab=ab12；脚本得到 args.tab = "x"
+```
+
+参数规则（`run` 自行解析参数，不交给 Cobra，因此未知的 `--name` 不会被拒绝）：
+
+| 写法 | 结果 |
+|------|------|
+| `--url` / `--api-token` / `--json` / `--tab` / `--help`（`-h`） | 保留名，始终是全局选项；可写在 `run` 之前、之后或与脚本参数穿插，支持 `--json=false`、`--tab=ID` |
+| `--`（第一个） | 分隔符：其后的 `--name` 全部归脚本，包括上述保留名；本身不传给脚本 |
+| `--name=`、`--name ""` | 空字符串 |
+| `--name=a=b` | 只在第一个 `=` 处切分，值为 `a=b` |
+| 同名多次 | 保留最后一次的值 |
+| `-5`、`--offset -3` | 单横线开头的 token 是普通值（位置参数或命名参数的值） |
+| `--name` 后无值，或下一个 token 以 `--` 开头 | 报错 `flag --name needs a value`；值以 `--` 开头时请写 `--name=--x` |
+
+不支持无值布尔开关和以 `--` 开头的位置参数。缺少脚本路径、命名参数缺值、全局选项取值非法（如 `--json=maybe`）都会在向 daemon 发请求之前报错。
 
 ---
 

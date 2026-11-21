@@ -121,8 +121,10 @@ CLI 将命令行合成一个对象传给 adapter 最外层函数（见 `internal
 
 1. **位置参数**：第 i 个位置参数映射到 `@meta.args` 的**第 i 个键**（JSON 源顺序），**同时总是**写入 `argN`（`arg1`, `arg2`, …）。
 2. **命名参数**：`--key value` 或 `--key=value` → `args.key = "value"`（**值永远是字符串**，脚本内需 `parseInt` / `JSON.parse`）。
-3. **不支持** 纯 `--flag`（无值）布尔开关；缺值会报 `flag --foo needs a value`。想做布尔，请写 `--foo true` 并在脚本里 `args.foo === 'true'`。
+3. **不支持** 纯 `--flag`（无值）布尔开关；缺值（或下一个 token 以 `--` 开头）会报 `flag --foo needs a value`。想做布尔，请写 `--foo true` 并在脚本里 `args.foo === 'true'`。
+   值原样传入：`--foo=` 为空字符串，`--foo=a=b` 的值是 `a=b`，同名多次取最后一次，`-5` 这类单横线 token 是普通值；值以 `--` 开头时写 `--foo=--x`。
 4. `--tab <id>` 显式指定时，**忽略** `@meta.domain` 的自动选 tab / 新开 tab 逻辑。
+5. `--url` / `--api-token` / `--json` / `--tab` / `--help` 是 CLI 全局选项（保留名），写在 `run` 前后或穿插都不会进 `args`。adapter 需要同名参数时放到 `--` 之后：`bb-browser run ./x.js --tab ab12 -- hello --tab x` → `args.tab === "x"`。
 
 示例（对应上面的 `example/search`）：
 

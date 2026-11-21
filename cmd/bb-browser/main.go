@@ -941,43 +941,33 @@ func newRunCmd() *cobra.Command {
 		Long: strings.TrimSpace(`
 First argument is a path to a .js file. Remaining tokens are passed to the script:
 positional arguments map to @meta "args" keys in JSON source order, then arg1, arg2, …;
-use --name value or --name=value for named flags (see references/script-system.md).`),
-		Args: cobra.MinimumNArgs(1),
+use --name value or --name=value for named flags (see references/script-system.md).
+
+Global flags (--url, --api-token, --json, --tab, --help) keep their meaning anywhere before
+a bare "--"; after "--" every --name belongs to the script, including those names.
+Values are passed verbatim as strings: --name= is an empty string, --name=a=b is "a=b",
+a repeated name keeps the last value, single-dash tokens such as -5 are plain values.
+"--name value" needs a value that does not start with "--" (use --name=--x), otherwise
+the command fails with "flag --name needs a value".`),
+		// Adapter flags are arbitrary, so Cobra must not parse (and reject) them:
+		// parseRunCommand handles the global flags and keeps every other token.
+		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			parsed, help, err := parseRunCommand(cmd, args)
+			if err != nil {
+				return err
+			}
+			if help {
+				return cmd.Help()
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 180*time.Second)
 			defer cancel()
-			scriptPath := strings.TrimSpace(args[0])
-			raw, meta, err := site.ReadAdapterFile(scriptPath)
+			raw, meta, err := site.ReadAdapterFile(strings.TrimSpace(parsed.script))
 			if err != nil {
 				return err
 			}
 
-			positional := []string{}
-			named := map[string]string{}
-			rest := args[1:]
-			for i := 0; i < len(rest); i++ {
-				a := rest[i]
-				if strings.HasPrefix(a, "--") {
-					part := strings.TrimPrefix(a, "--")
-					idx := strings.IndexByte(part, '=')
-					if idx >= 0 {
-						named[strings.TrimSpace(part[:idx])] = strings.TrimSpace(part[idx+1:])
-						continue
-					}
-					key := strings.TrimSpace(part)
-					if key == "" {
-						continue
-					}
-					if i+1 < len(rest) && !strings.HasPrefix(rest[i+1], "--") {
-						named[key] = rest[i+1]
-						i++
-						continue
-					}
-					return fmt.Errorf("flag --%s needs a value", key)
-				}
-				positional = append(positional, a)
-			}
-			argsJSON, err := site.ArgsObject(positional, named, site.ArgKeysFromAdapterSource(raw))
+			argsJSON, err := site.ArgsObject(parsed.positional, parsed.named, site.ArgKeysFromAdapterSource(raw))
 			if err != nil {
 				return err
 			}
