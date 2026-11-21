@@ -76,3 +76,10 @@ Codex 独立只读审查 origin/main...HEAD 全部4个文件，无 P0/P1。分�
 测试：Codex 使用 Go1.27.4、TMPDIR 下隔离 HOME/缓存执行完整 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...，退出0；同一测试对 origin/main Dockerfile 验证预置属主断言失败，对 HEAD 3个部署静态检查通过。manager 确认 HEAD、工作树干净及 git diff --check 通过。安装：无新增工具或 manifest 变更。
 
 未验证：没有可用 Docker 引擎，未启动服务；GoReleaser/buildx 双架构镜像构建、新空 named volume 的真实 UID/GID、rpc.jsonl 写入及重建持久化、compose 启动和维修命令未实测。真实 Chrome/CDP、systemd 未测，无 UI 改动。owner 应重点在 Docker 环境补验并看上述非阻断文档/测试建议。review/ → ready/，未合并 main、未发布。
+
+
+## factory · 2026-11-22 06:11
+
+owner 要求：ship ft16。已将已审查 head 7383fecd8d388fbbca434a72dc8036de44850603 合入 main 并推送，merge: 9fa35626d7db7d51afd56cdc3ff33f8f5a0acfa9。无合并冲突，累计 main 完整 gofmt、go vet ./...、go test -race ./... 通过，工作树干净。首次离线模块缓存不全，恢复 go.mod/go.sum 已锁定依赖后重跑通过；无新增工具或依赖变更。仅 ship FT16。
+
+按 ship=[merge,push] 未打 tag、未发布、未部署；无关联 issue/PR 需关闭，未删除代码分支。原 review 的非阻断 P2/P3 及 Docker/GoReleaser/真实卷写入未实测边界保留。ready/ → done/。
