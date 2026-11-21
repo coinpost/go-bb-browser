@@ -75,3 +75,20 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 状态：分支已推送，new/ → review/，第 1 轮；本次仅 build，未 review、未合并 main。
 
 运行提示：Claude Code 五小时额度已到上限，本次调用正常完成；工具返回时距离重置约 2 小时 04 分。
+
+
+## factory · review · 2026-11-22 01:34
+head: 4288fc7b6de83061bc0d43fee2744a6658e32acb
+verdict: fix
+fix:
+- [P1] internal/browser/session.go:438: 真实 EnsureObservation attach 初始化期间收到 targetDestroyed，ForgetTarget 直接取消 child，chromedp attachTarget 写 Context.Target 与取消协程读它发生 data race。基线也复现，但属于本项明确要求的初始化/释放竞争验收。让初始化方在有界 attach 完成后移交清理所有权，退役先禁止写入，再在不持 observer 表锁的情况下等待安全取消；新增真实 attach 路径永久 -race 回归。
+- [P1] internal/browser/session.go:434: 首个 ForgetTarget 删表后尚在等待在途 Record，第二个调用查到空项便返回，越过退役屏障。第二次返回后 ClearTarget 并重注册同 ID，再放行旧 Record，新 ring 收到旧事件 seq=73。保留可等待的退役条目/完成信号，使重复释放等待同一屏障，不能只把删表视为退役完成。
+- [P1] internal/daemon/tab_idle.go:62: 旧 ForgetTarget 等待 CDP detach 回包时，同 ID 可重新登记并复用旧桶，查询读到旧事件 seq=17；放行 detach 后旧 ClearTarget 又清掉新生命周期桶，新 writer Push 返回 false。该诊断基线通过。让同 ID 的新注册等待旧生命周期退役及清桶全部完成，或统一以生命周期标识校验注册、写入、清理；增加真实 Session+daemon barrier 回归。
+- [P1] internal/daemon/tab_idle.go:68: targetDestroyed 先于 closeTarget 回包时，事件处理先删除 registry 并阻塞于退役；tab_close RPC 再次 removeTargetState 因条目已无而返回成功，但此时仍有 1 个桶和旧 network 事件，违反关闭完成后缓冲清空契约。该诊断基线通过。RPC 必须等待已开始的同 target 清理完成后再回成功，不得以 registry 条目不存在代替清理完成。
+notes:
+- [P2] internal/daemon/rpc_observation.go:116: 首次 attach 失败返回错误后，新增注册桶未回滚，TargetCount=1 且迟到 PushNetwork=true；基线无残留桶。区分本次新建注册与既有有效观测，仅回滚失败且未被接管的注册，不破坏既有域数据。
+- [P2] internal/browser/session.go:399: Close 清空 observer 表但无 closed 状态；在途 attach 在关闭后仍报成功，旧 Session 引用还能新 attach；初始化失败时因失去表项而跳过 child 清理，context 仍存活。基线也复现。应在锁下标记关闭，拒绝新 attach，初始化方检查关闭并保留安全清理所有权。
+- Codex 只读审查，无改代码/提交/安装。完整配置检查 gofmt、go vet ./...、go test -race ./... 通过；manager 独立再次执行同命令通过（部分包命中 Go cache），Go 1.27.4，8 个包通过、2 个无测试包；diff --check 通过，工作树干净。完整测试通过不覆盖以上新诊断失败。
+- 临时 overlay 共 7 个诊断用例复现上述 6 项缺陷，包括真实 Session+daemon 本地回环 CDP 协议桩。证据保留于 review run 的 evidence/FT7-4288fc7/：results.log、reused-id.log、close-attach.log、基线对照日志、browser_test.go、daemon_test.go、baseline-tests/、manager-test.log；overlay.json 仅保留当时映射，重新运行需将映射重定向到保留的测试文件。诊断不是已提交的永久回归。
+- 未验证真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、systemd；未操作用户窗口；无新增未 pin 工具或依赖。无链接 issue/PR，未发 GitHub 评论。
+- 第 1/3 轮发现 P1，review/ → new/，下一轮在原分支修复上述 fix 列表；P2 留作审查备注。未合并 main，未发布。
