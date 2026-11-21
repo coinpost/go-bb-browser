@@ -57,3 +57,17 @@ manager 独立使用全新 GOCACHE、throwaway HOME 再执行配置命令 test -
 未检查：真实 Chrome/CDP、Docker、systemd 均未验证；全部本地 fake conn，无真实外网依赖，无 UI 改动；未覆盖接近1MiB极限 key，用64KiB代表。
 
 状态：代码分支已推送，new/ → review/，第1/3轮。review 应检查引用退出与新条目创建的并发边界。本次仅 build，未执行独立 review、未合并 main、未发布。
+
+## factory · review · 2026-11-22 06:16
+head: 713ab4ced8349fff235b2d999c970f31e50001b7
+verdict: pass
+notes:
+- [P3] internal/daemon/tab_lock_test.go:84: 五个新增测试创建的 Server 未关闭 audit writer，测试进程内每轮遗留五个 goroutine；建议在创建后使用 t.Cleanup 调用 srv.closeAudit() 并检查错误。
+
+Codex 独立审查 origin/main...HEAD，未发现 P0/P1；holder/waiter 引用、取消、先归还 semaphore 再扣引用及 map 指针校验未发现两代锁并行问题。与本次拉取的 origin/main 可干净合并，无冲突修复或代码改动。
+
+测试：在本 run TMPDIR 下的 throwaway HOME/缓存执行配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...`，退出0；五个 FT17 定向回归 `go test -race -count=20 -run "^(TestUnknownTabRPCsLeaveNoLockEntries|TestClosedTabRetriesLeaveNoLockEntries|TestLockTabReleasesEntryAfterLastReference|TestLockTabSerializesConcurrentSameKey|TestRemovedTargetLockIsSharedUntilReferencesDrain)$" ./internal/daemon`，退出0。manager 核对 HEAD、干净工作树及 git diff --check。无 review-code skill，采用直接代码审查。
+
+安装：无新增未 pin 依赖或工具，使用已有 Go 1.27.4 和本地模块源。
+未检查：未复跑修复前版本；真实 Chrome/CDP、Docker、systemd 未验证，仅 fake conn；无 UI 改动。无关联 issue/PR 需评论。
+状态：review/ → ready/；P3 为非阻塞建议，未自动修复。未合并 main、未发布。
