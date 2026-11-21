@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-6 at your gates | 15 with the agent | 0 done
-Drawn Nov 22, 05:52 | https://github.com/coinpost/go-bb-browser
+7 at your gates | 14 with the agent | 0 done
+Drawn Nov 22, 06:05 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     6h  生命周期事件溢出重同步与优雅关停次序
@@ -33,16 +33,14 @@ NEW (13)                                    avg stay 3h
     FT7     4h  target释放与观测writer退役同步
     FT10    1h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
-    FT13   35m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13   48m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon
 
-REVIEW (2)                                  avg stay 14m
-    FT16   11m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
-                写，daemon 启动即退出
-    FT17    1m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
+REVIEW (1)                                  avg stay 15m
+    FT17   13m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
 
-READY (6) [!]
+READY (7) [!]
   * FT8     2h  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
                 断开并整体退出
                 > Check, then ship
@@ -52,13 +50,16 @@ READY (6) [!]
   * FT9     1h  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
                 flag 拒绝，文档化的命名参数形式全部不可用
                 > Check, then ship
-  * FT12   44m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
+  * FT12   57m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
                 能命中上一次快照遗留的其它元素
                 > Check, then ship
-  * FT14   22m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
+  * FT14   35m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
                 > Check, then ship
-  * FT15    8m  [P2] systemd unit 没有 [Install] 段，文档里的 `systemctl --user
+  * FT15   21m  [P2] systemd unit 没有 [Install] 段，文档里的 `systemctl --user
                 enable` 与开机自启不生效
+                > Check, then ship
+  * FT16    1m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
+                写，daemon 启动即退出
                 > Check, then ship
 
 DONE (0)
