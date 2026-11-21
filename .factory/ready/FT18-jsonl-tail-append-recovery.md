@@ -63,3 +63,16 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 边界：已粘连记录不抢救，只保留其后的独立合法记录；坏行保留到轮转，重启重复告警。快照短写时未完整落盘的 tab 恢复丢失、轮转失败吞错与写盘失败前 managed 已更新均为既有行为/FT4范围，本项未修复；仅保证继续写入不粘连。
 
 状态：代码分支已推送；new/ → review/，第1/3轮。仅 build，未执行独立 review、未合并 main、未发布。
+
+## factory · review · 2026-11-22 06:30
+head: a311559db7af14ecca3bb952207b29c6a9c6cd7e
+verdict: pass
+notes:
+- [P3] internal/store/store.go:183: 未终止末行把字段解码失败等同于 JSON 不完整并截断；完整 JSON 中如 seq:1e1 无法解码为 uint64，108 字节日志被截为 0（诊断复现）。当前写入器不会生成此表示。建议区分语法不完整与字段解码错误，后者告警保留并维护追加行边界。
+- [P3] README.md:114: 文档称每次短写/失败后均补换行，但零字节失败且已在行边界、或短写恰停在换行时无需补写；建议连同 AGENTS.md:29 精确表述为仅末字节非换行时补写。
+
+Codex 独立只读审查 origin/main@9fa35626d7db7d51afd56cdc3ff33f8f5a0acfa9...HEAD，无 P0/P1；分支与当前 main 可干净合并，无需改代码。配置完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过（8 个测试包、2 个无测试包）；`go test -race -count=30 ./internal/store` 与 diff --check 通过，工作树干净。
+
+安装：无。使用已有 Go 1.27.4 与 pinned 模块；测试 HOME/缓存/临时诊断均位于本 review run TMPDIR，结束清理。短写/失败使用故障注入，未实测真实磁盘满、断电、Chrome/CDP、Docker 或 systemd；无 UI 变更。
+
+状态：review/ → ready/，第 1/3 轮；以上 P3 供 owner 留意。未合并 main、未发布。无 source 或 owner 显式链接的 issue/PR，故无 GitHub 评论对象。
