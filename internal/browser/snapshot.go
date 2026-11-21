@@ -10,6 +10,21 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+// snapshotStub is the in-page snapshot script. Ref lifecycle:
+//
+//   - The scope root is resolved first, so selector_scope may be a ref selector
+//     of the previous snapshot; an invalid selector throws before anything is
+//     touched and the previous snapshot stays usable.
+//   - Every snapshot that returns a result (even an empty one) then invalidates
+//     all earlier refs: it unmarks the nodes the previous snapshot marked
+//     (reachable even while detached, so reinserting them restores nothing) and
+//     any other marked node found in the document.
+//   - Ref numbers are plain integers that are never reused within a document:
+//     the counter lives on the document object and so restarts at 1 only with a
+//     new document (navigation / reload), where the old marks are gone too.
+//
+// Bookkeeping is one non-enumerable document property holding the counter and
+// the nodes of the latest snapshot only.
 const snapshotStub = `
 (function(opts){
 opts = opts || {};
@@ -49,7 +64,33 @@ function attrs(el){
   return '[' + bits.join(' ') + ']';
 }
 
-function snapshotEl(el, depth, counter){
+var attrName = '__bb_snap_ref';
+var stateProp = '__bbSnapState';
+
+function refState(){
+  var st = document[stateProp];
+  if (!st || typeof st.next !== 'number' || !(st.next >= 1) || !st.marked || typeof st.marked.length !== 'number') {
+    st = { next: 1, marked: [] };
+    Object.defineProperty(document, stateProp, { value: st, configurable: true, writable: true, enumerable: false });
+  }
+  return st;
+}
+
+function invalidateRefs(st){
+  function unmark(el){
+    if (!el || !el.getAttribute || !el.hasAttribute(attrName)) return;
+    var v = Number(el.getAttribute(attrName));
+    if (Math.floor(v) === v && v >= st.next && v < 9007199254740991) st.next = v + 1;
+    el.removeAttribute(attrName);
+  }
+  var prev = st.marked;
+  st.marked = [];
+  for (var i = 0; i < prev.length; i++) unmark(prev[i]);
+  var stale = document.querySelectorAll('[' + attrName + ']');
+  for (var j = 0; j < stale.length; j++) unmark(stale[j]);
+}
+
+function snapshotEl(el, depth, st){
   if (!el || !el.tagName) return null;
   var tag = el.tagName.toLowerCase();
   if (tag === 'script' || tag === 'style' || tag === 'noscript') return null;
@@ -59,7 +100,7 @@ function snapshotEl(el, depth, counter){
   var childSnaps = [];
   var ch = el.children || [];
   for (var i = 0; i < ch.length; i++) {
-    var cs = snapshotEl(ch[i], depth + 1, counter);
+    var cs = snapshotEl(ch[i], depth + 1, st);
     if (cs) childSnaps.push(cs);
   }
 
@@ -76,10 +117,9 @@ function snapshotEl(el, depth, counter){
 
   var entry = null;
   if (!(pruneEmpty && childSnaps.length===0 && !ia && !label)) {
-    counter.n++;
-    var id = counter.n;
-    var attrName = '__bb_snap_ref';
+    var id = st.next++;
     el.setAttribute(attrName, String(id));
+    st.marked.push(el);
     entry = {
       id: id,
       lineDepth: depth,
@@ -103,11 +143,12 @@ function flatten(tree, lines, refs){
 }
 
 var root = scopeSel ? document.querySelector(scopeSel) : document.body;
+var st = refState();
+invalidateRefs(st);
 if (!root) {
   return { title: document.title||'', url: location.href, text: '', refs: {} };
 }
-var counter = { n: 0 };
-var tree = snapshotEl(root, 0, counter);
+var tree = snapshotEl(root, 0, st);
 var lines = [];
 var refs = {};
 flatten(tree, lines, refs);
@@ -160,6 +201,7 @@ func snapshotExpr(opts SnapshotOpts) (string, error) {
 }
 
 // Snapshot captures a compact tree snapshot and assigns __bb_snap_ref attributes for selectors.
+// Refs of earlier snapshots of the same document stop resolving; see snapshotStub.
 func (s *Session) Snapshot(tabID target.ID, opts SnapshotOpts) (title, url, text string, refs map[string]string, err error) {
 	return s.SnapshotContext(context.Background(), tabID, opts)
 }
