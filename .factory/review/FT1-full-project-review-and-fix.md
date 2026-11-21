@@ -1,6 +1,6 @@
 ---
 branch: factory/FT1-full-project-review-and-fix
-round: 5
+round: 6
 ---
 # 全项目 review 并修复发现的问题
 
@@ -285,3 +285,18 @@ Checking：把第5轮两条真实HTTP+fake CDP/barrier复现转换成仓库永�
 Review边界：审查仍核对origin/main...HEAD的累计变更及其回归风险，但FT1验收目标以本补充范围和既有已修P1不回归为准；独立P2/P3不再反复回填FT1作为本轮修复任务。重点验证共同约束，而不只重跑上一轮两个复现。
 
 独立未完成项已拆为backlog FT2～FT7，尚未授权构建，原记录保留不改。
+
+
+## factory · 2026-11-21 23:55
+第6轮由本地 Claude Code 构建完成，new/ → review/。沿用 owner 额外授权及既有第6轮补充计划，不改 max_rounds=3；若本轮 review 仍有 P0/P1，留待 owner 决定，不自动授权第7轮。
+branch: factory/FT1-full-project-review-and-fix
+head: ace8a79711b157055dd7d2b42ae5ed58aaeff4aa
+
+一个主题提交 ace8a79：枚举采用 BeginEnumeration/Sync/End 在途令牌；枚举期间新增保留、删除不被旧回包复活，删除版本在最老相关枚举结束后清理，无在途枚举不记录墓碑。启动、resync、RPC 共用 applyEnumeration，错误/取消 defer 释放令牌。tab_select 用 SelectAlias 在同一注册表临界区复核请求别名仍指向绑定完整 ID 后提交；tab_focus 在探测后 CommitFocus 重新校验候选，响应/元数据/审计使用同一完整身份；无有效候选返回 tabs changed 错误。tab_list 的 tabs/tab/focus 来自同一快照；tab_new 改按完整 ID 选择。README/AGENTS 同步。
+
+验证：Claude Code 配置 gofmt/vet/go test -race -count=1 ./... 通过；新身份回归 -race -count=30 -cpu 1,2,8、前轮17入口/生命周期/审计恢复/连接/关停定向 -race -count=20、state 全包 -race -count=30 通过。真实 HTTP + 本地回环 fake CDP 覆盖两项 P1，断言正确错误/有效身份及接替用户页不被选择、操作或关闭。9种定向变异（两个旧P1、删除版本缺口、列表快照、令牌释放/墓碑清理等）全部被回归检出；M1/M3初版变异未编译不算证据，修正后重跑检出。manager 独立在隔离 HOME/TMPDIR、本地模块缓存、GOPROXY=off 环境执行完整配置测试通过，核对 origin/main..HEAD 14个累计提交范围、diff --check、禁止路径及干净工作树后推送。证据保留在本 build run 的 evidence/FT1-ace8a79/，含 manager-config.log。
+
+安装/依赖：无新增工具，无 manifest/lockfile 变更；复用已有 Go 1.27.4，仅离线恢复锁定模块。测试 HOME/cache/变异副本全部在本 run TMPDIR 内。初次 gh auth status 在非 git 目录无法推断 App 安装，切换 factory clone 后验证成功，未阻塞构建。
+
+边界及 review 重点：不持锁跨 CDP；短 ID 在最后 CDP 调用后的注册表提交时刻有效，提交之后仍可再次复用，不能承诺响应送达后永久有效；未送达 daemon 的事件不可见。有缓存焦点但不在本次枚举元数据时，返回该有效完整 ID，title/url 为空。需独立复核令牌所有权/结束顺序、删除与重新注册、CommitFocus 候选与响应审计一致性；本轮不宣称全库无缺陷。迟到 targetCreated/生命周期队列溢出等 FT2～FT7 独立 P2/P3 未处理。
+未检查：未启动真实 Chrome，真实 UI/CDP/可见性探测/截图/网络拦截、systemd/Docker/跨平台未实测。真实HTTP focus回归依赖销毁事件在单页500ms探测超时内处理，并非纯barrier；90次重复未见抖动。无关联 issue/PR。
