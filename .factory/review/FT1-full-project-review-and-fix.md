@@ -1,6 +1,6 @@
 ---
 branch: factory/FT1-full-project-review-and-fix
-round: 4
+round: 5
 ---
 # 全项目 review 并修复发现的问题
 
@@ -223,3 +223,22 @@ notes:
 
 ## Guoyin · 2026-11-21 22:29
 继续下一轮
+
+
+## factory · plan · 2026-11-21 22:51
+第5轮补充计划（owner「继续下一轮」额外授权；不修改 max_rounds）。
+Behaviour：指定短 tab id 的入口排队前只从已有注册表绑定完整 target ID；无映射直接 unknown tab id，不枚举。取得操作锁后复核同一绑定；CDP、buffer/lease、成功活跃审计始终使用该完整身份，不操作接替短 ID 的用户页。空/非法参数、取消/锁超时保持协议。
+Scope：最新两项 P1 及直接相关审计重新解析短 ID 的 P2；覆盖页面操作、关闭、选择、观测读/清除、路由，不扩展到 store/snapshot JS/CLI 或纯重构。
+Decisions：未知/过期别名 fail closed，调用方可先 tab_list 再重试；用小 helper 明确绑定、锁所有权和失败路径，不跨 CDP 持 lifecycle/registry 锁。tab_select 枚举前绑定并按完整 ID 选中；tab_focus 按其枚举的完整 ID 记账。
+Checking：barrier/本地假 CDP/真实 HTTP 覆盖入口无映射后用户页出现、排队时复用、成功后映射切换、正常路径和取消；各入口不向新页发送业务请求、不改 buffer/续期。完整 gofmt/vet/race 与定向重复，旧行为及变异必须被新测试检出。
+
+## factory · 2026-11-21 22:51
+第5轮由本地 Claude Code 完成，new/ → review/；owner 额外授权，不改 max_rounds=3，本轮仍需独立 review。
+branch: factory/FT1-full-project-review-and-fix
+head: 82ece1bbe61e71d18609cf6b2c78f18c28cc283a
+新增一个主题提交 82ece1b：bindTab 排队前绑定、锁内复核、删除 resolveTab 未命中枚举；17 个带锁入口（goto/reload/close/screenshot/eval/click/fill/fetch/snapshot/route/unroute、三类观测读与三类 clear）均使用完整 ID。tab_select 枚举前绑定、SelectTarget 选中；tab_focus 的选中/审计使用枚举目标。成功后审计和 idle 续期使用执行时绑定身份，不再重查短 ID。README/AGENTS 同步；三个依赖隐式枚举的旧测试改为显式注册。
+
+验证：Claude Code 完整 gofmt/vet/go test -race -count=1 ./... 通过；daemon 全包 -race -count=20、state 全包 -race -count=30、关键回归 -race -count=20 -cpu 1,2,8 通过。新增表驱动测试覆盖17入口未知ID/排队复用/取消/正常路径，另有成功后换映射及 tab_select 回归；两条真实HTTP+回环假CDP覆盖最新review P1。旧源码运行新测试出现6个顶层失败，5种变异均被检出。manager 独立在隔离 HOME/TMPDIR 和本地模块缓存环境运行完整 gofmt/vet/go test -race -count=1 ./...，全部通过；核对提交范围、diff --check、禁止路径未改及干净工作树后推送。相关测试日志已保留于本 build run 的 evidence/FT1-82ece1b/。
+安装：无新增工具，无 manifest/lockfile 变更；复用 Go 1.27.4，只恢复锁定模块。所有测试 HOME/cache/临时文件位于本 run TMPDIR。全平台 go mod download 缺本机未缓存的 mousetrap，但本机配置完整测试离线通过，不宣称跨平台已验。
+兼容：未注册短 ID 不再隐式枚举；新开的用户页事件未到达时会暂时 unknown tab id，需 tab_list。未知 ID 的判定先于锁超时。操作进行中 target 仍可能销毁，此时 CDP 按完整 ID 失败而不重定向接替页。
+未检查：未启动真实 Chrome，真实 CDP/UI、截图、网络拦截、systemd/Docker/跨平台未实测。clear 成功后换映射仅由共用记账路径覆盖，无单独可插桩调用。其余 review P2/P3（列表/焦点快照不一致、过期枚举复活、生命周期队列溢出、关停/创建收尾、store轮转、snapshot/CLI、重复释放记录）未修复。本轮不宣称全库无缺陷；无关联 issue/PR。
