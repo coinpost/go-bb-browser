@@ -63,3 +63,22 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 Claude Code 额度接近用尽：5 小时窗口已用 99%，返回时约 1 小时 28 分后重置；本次未重试。
 
 new/ → review/，round: 1。
+
+## factory · review · 2026-11-22 07:18
+head: f0bcb35d06c3e7ba68993e9fc1a7cfe14ca33f14
+verdict: fix
+fix:
+- [P1] internal/daemon/v1.go:1288: 排队中的 tab_close 可改关另一 target：abcd 首次解析到 A 并等待 A 的锁，此时登记碰撞 B、外部关闭 A，获锁后 resolveTab 将请求 retarget 到 B 并关闭它。首次解析成功应固定完整 target ID；获锁后别名失效/换主必须拒绝，不可改绑。
+- [P1] internal/daemon/v1.go:1276: 已知歧义别名仍触发 enumerateTabs；若 GetTargets 暂漏刚登记的碰撞 B，tab_close(abcd) 会从歧义恢复为唯一并关闭 A，同时清掉 B 的受管状态。查询须区分唯一/歧义/未知，歧义直接硬错误，仅未知允许枚举。
+- [P1] internal/daemon/v1.go:346: tab_focus 在前台探测期间发生别名升级时，用新别名匹配旧快照失败并回退到无关 C；实测 focus=0abcd、tab=0001、标题为 C，审计和 idle 续期归错 target。按完整 target 身份匹配一致快照，再生成别名、元数据及审计身份；tab_list 的焦点字段同样须保持快照一致。
+- [P1] pkg/daemonclient/pool.go:295: Pool 用碰撞升级后的长别名关闭 A、B 只撤销本次别名，旧绑定 0:abcd 仍保留；外部新建同后缀 C 后，旧绑定可成功关闭从未观察过的 C。须按稳定 target 身份关联/撤销同目标的全部别名；补覆盖刷新列表、长别名关闭、外部复用短别名的回归。
+notes:
+- [P2] internal/daemon/v1.go:943: snapshot、network_route、network_unroute、console_clear、errors_clear、network_clear 的歧义错误缺少 ambiguous 提示；统一错误构造并补全方法表测试。
+- [P2] internal/daemon/v1.go:1292: 首次查询未命中、枚举找到目标后，等待目标锁超时只返回 false，被调用方误报参数错误；应传播超时并沿用 request timed out。
+- [P3] internal/state/tab_registry.go:269: 退化 target 同时为 "zz" 与 "zz " 时，发出的 "id=zz " 经 TrimSpace 解析回前者；应可逆编码原始 ID，保证返回别名能 round-trip。
+
+Codex 独立审查 origin/main...HEAD；配置完整 gofmt/vet/race 测试通过（退出码 0），diff --check 通过，工作树干净。四项 P1 用本地替身与 race overlay 探针复现，经理独立重跑同一探针确认。探针是记录错误行为的诊断，PASS 仅表示复现脚本完成，绝非正确性通过；未修改或提交被审分支。固定集合的顺序无关、完整身份回放/轮转和缺失身份旧日志跳过已检查。
+
+安装：无，使用已有 mise Go 1.27.4。测试使用隔离 HOME、缓存和 run 内 TMPDIR，不依赖真实外网。未启动真实 Chrome，未运行 Docker、systemd 或 UI 验证；并发时序由本地替身验证。未发现关联 source 或 owner 显式链接，无 GitHub 评论目标。
+
+round: 1 < max_rounds: 3，review/ → new/；下一轮修复上述 fix 列表并增加永久回归。
