@@ -77,3 +77,13 @@ Codex 只读审查 origin/main...HEAD，基线 main@d55fbc55162db73a43c01e1a6b78
 未验证：真实非 headless Chrome/CDP 端到端、实际 WebSocket 断链、Docker、systemd；未启动浏览器或操作用户窗口。无 linked issue/PR，未发 GitHub 评论。
 
 状态：review/ → ready/，第 1 轮；请 owner 查看两项非阻断建议及未实测范围。本次仅 review，未合并 main、未发布。
+
+
+## factory · 2026-11-22 06:08
+owner 授权：“先把 ready 的 ship 掉”。本次固定合并 FT8、FT9、FT11、FT12、FT14、FT15；review head 与所合并远端分支一致。
+
+已合并并推送 main；本项 merge commit：2927998，本批 main 最终提交：8836949。配置 ship=["merge", "push"]，未打 tag、未触发版本发布、未部署。无 linked issue/PR 需关闭，分支按配置保留。
+
+逐项合并后执行完整 gofmt/vet/race 测试，最终累计 main 配置测试再次通过（部分缓存）；git diff --check 通过，保护路径未改，工作树干净。FT12 的 go.mod 冲突及 FT14 的 README/run_test.go 冲突由 CC 仅解决整合冲突，保留双方依赖、文档与全部回归；FT9 与 FT14 测试拆文件并共存通过。无新增未 pin 工具或依赖。
+
+review 中已有 P2/P3 未在本次 ship 修复，继续保留原记录。真实 Chrome/CDP、Docker、systemd 运行时未验证。ready/ → done/。

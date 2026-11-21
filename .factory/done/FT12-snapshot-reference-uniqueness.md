@@ -84,3 +84,13 @@ Codex 独立审查 origin/main...HEAD；无 P0/P1，按工厂规则 review/ → 
 安装：本次无新增未 pin 工具或依赖；未找到 review-code skill。测试 HOME、缓存与临时文件使用本次隔离 TMPDIR。
 
 未检查：真实非 headless Chrome/CDP 的跨 Runtime.evaluate、并发请求时序、实际 click/fill、BFCache、Docker、systemd 均未实测；未启动 Chrome、未操作用户窗口。无 linked issue/PR，故无 GitHub 评论。未合并 main、未发布。
+
+
+## factory · 2026-11-22 06:08
+owner 授权：“先把 ready 的 ship 掉”。本次固定合并 FT8、FT9、FT11、FT12、FT14、FT15；review head 与所合并远端分支一致。
+
+已合并并推送 main；本项 merge commit：f1b74a7，本批 main 最终提交：8836949。配置 ship=["merge", "push"]，未打 tag、未触发版本发布、未部署。无 linked issue/PR 需关闭，分支按配置保留。
+
+逐项合并后执行完整 gofmt/vet/race 测试，最终累计 main 配置测试再次通过（部分缓存）；git diff --check 通过，保护路径未改，工作树干净。FT12 的 go.mod 冲突及 FT14 的 README/run_test.go 冲突由 CC 仅解决整合冲突，保留双方依赖、文档与全部回归；FT9 与 FT14 测试拆文件并共存通过。无新增未 pin 工具或依赖。
+
+review 中已有 P2/P3 未在本次 ship 修复，继续保留原记录。真实 Chrome/CDP、Docker、systemd 运行时未验证。ready/ → done/。
