@@ -46,3 +46,13 @@ Checking：先验证正确行为回归在旧实现失败，再修复；10 万次
 验证：coder 和 manager 均运行完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...`，全部通过；提交仅涉及本项，never 路径未变。无新增安装；使用已有 Go 1.27.4（go.mod 最低要求 1.26），仅恢复 go.sum 固定依赖。
 
 未验证：真实 Chrome、Docker、systemd、真实 daemon 长时间 RSS；无 UI 改动。堆阈值仅本机 Go 版本验证，其他平台仍需留意测试稳定性。
+
+## factory · review · 2026-11-22 06:44
+head: fc1cb3e1e7e32bad0a17d981483c19187984b239
+verdict: pass
+notes:
+- Codex 对 origin/main...HEAD 完成只读审查，无 P0/P1/P2/P3 发现。内存模式删除历史保留，参数校验、时间补全、managed 生命周期和 seq 保持；磁盘日志路径未改变。
+- 完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过；10 万条固定 managed 数量堆测量相对首批最多增长 2,288 字节，低于 2 MiB；旧实现对照第 4 万条增长 7,776,768 字节，按预期触发回归断言。
+- 使用已有 Go 1.27.4（darwin/arm64）和固定依赖，无新增安装。未找到 review-code skill，直接按请求、计划及配置审查。审查前后 HEAD 不变且工作树干净，manager 复核 diff --check 通过；当前 main 可无冲突合并。
+- 未验证真实 daemon 长期 RSS、其他平台堆阈值稳定性、真实 Chrome/CDP、Docker、systemd；无 UI 改动，未启动浏览器或操作用户窗口。测试 HOME、缓存和对照文件均隔离在本 review 的 TMPDIR，无真实外网依赖。
+- review/ → ready/，等待 ship；未合并 main，未发布。无关联 GitHub issue/PR 需要评论。
