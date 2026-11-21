@@ -191,3 +191,32 @@ head: 27815e5964e03f94ef7fd73df6b23db494be7c4e
 
 兼容与 review 重点：零页连接不再创建 about:blank；移除了非 Chrome CDP 的旧回退，项目范围仍只支持 Chrome。已销毁创建在日志记 ok:true 表示实际创建过，但 RPC 返回错误，需复核恢复语义及清理锁序；手动调用 allocator 建立 browser-only 连接需复核 chromedp 上下文取消与 Browser 发布同步。部分握手测试有100–450ms等待，不全是纯 barrier。
 未检查：未启动真实 Chrome，真实 browser discovery/CDP/UI/零页连接、非Chrome CDP兼容、截图/网络拦截、systemd/Docker/跨平台均未实测。tab_new 成功返回后再销毁并复用短 ID 仍受协议本身限制。其余 review P2/P3（含store轮转、过期枚举、快照/CLI等）未修复；本轮不宣称全库无缺陷。无关联 issue/PR。
+
+
+## factory · review · 2026-11-21 16:14
+head: 27815e5964e03f94ef7fd73df6b23db494be7c4e
+verdict: fix
+fix:
+- [P1] internal/daemon/tab_idle.go:280: 显式关闭入口调用 resolveTab，查无映射时会重新枚举并绑定请求到达后才打开的用户页；已复现原页关闭后重复关闭1234，入口浏览器/注册表均为空，枚举期间新用户页复用1234，RPC成功关闭用户页（10/10）。入口只从已有注册映射绑定完整ID，无绑定立即返回unknown tab id；取得操作锁后复核，不得把失效请求重新指向未来页面。
+- [P1] internal/daemon/v1.go:818: eval先排短ID操作锁、后解析完整ID；排队期间原页关闭、用户页接替，业务表达式实际在用户页执行（真实HTTP+fake CDP，5/5）。eval及同顺序的goto/click/fill/fetch/观测入口应排队前绑定完整ID，锁内复核，执行与审计始终共用该身份。
+notes:
+- [P2] internal/daemon/server.go:253: 优雅关停时target同步先于在途HTTP请求退出，期间销毁事件漏记，磁盘仍保留已关闭页；RPC排空后收齐生命周期事件再停同步。下次完整ID枚举可纠正。
+- [P2] internal/daemon/v1.go:268: 操作成功后再按短ID查target写活跃审计，会给接替页记账并续期；保存实际执行完整ID。
+- [P2] internal/daemon/v1.go:492: 强制关停创建已执行但回包在途时，留下未管理页面且审计ok=false；给已发命令有界收尾并按确认完整ID记账。
+- [P2] internal/daemon/browser_reconnect.go:133: 队列溢出重同步后旧created事件可重新注册已消失页；建立事件/枚举次序边界。
+- [P2] internal/state/tab_registry.go:108: 删除未计入epoch，旧枚举重新注册已关闭target；记录删除版本并过滤过期快照。
+- [P2] internal/daemon/v1.go:318: tab_list仍可返回tabs=[]、focus=1234；从同一注册表快照生成列表和焦点。
+- [P2] internal/store/store.go:331: 轮转改名后、快照发布前中断导致恢复集合为空；先写完整临时快照再原子发布并保留上一代。
+- [P2] internal/store/store.go:322: 轮转重开失败后追加报成功，后续即使恢复权限仍持续log file not open；保留旧句柄至切换成功、传播错误并支持重试。
+- [P2] internal/browser/snapshot.go:109: 清理旧ref早于scope解析，使用上次ref作为范围返回空；先保存根节点。
+- [P2] internal/browser/snapshot.go:108: 脱离文档旧标记未清除，插回后ref重复；直接清理上一轮节点或区分快照轮次。
+- [P2] cmd/bb-browser/main.go:1036: run adapter.js --help=true仍执行eval；统一布尔帮助选项并确保零RPC。
+- [P3] cmd/bb-browser/main.go:956: run -- --foo.js仍拒绝存在的脚本；保留--消歧信息。
+- [P3] internal/daemon/v1.go:560: 显式关闭先于创建回包时一次关闭记tab_close,tab_new,tab_close；恢复集合正确，但应协调迟到创建记账避免重复成功释放。
+
+验证：本地Codex独立审查origin/main...HEAD共12个提交、37个文件。第4轮五项P1原始复现均通过；新增两项P1为具体交错证实的错误操作用户页，不是将既有P2简单升级。基线源码已存在未命中重新枚举和操作锁后解析ID的行为，仍属本条目全项目review范围。
+配置gofmt/vet/go test -race ./...离线全部通过；daemon定向race重复20次、browser/state/store全包各重复20次通过。只读overlay+barrier、真实daemon HTTP与回环fake CDP复现两项P1及notes；诊断测试PASS表示异常已复现。allocator发布前后取消、初始化失败detach后重试、browser discovery失败、握手取消、FIFO/容量/handler join专项通过。manager核对配置日志、两项P1复现输出和相关实现。HEAD不变、工作树干净，未改代码或提交。
+安装：复用已有Go1.27.4，无新增工具或依赖清单修改，仅恢复锁定模块。临时HOME/cache/overlay均在本run TMPDIR；证据源码与日志保留于本review run的evidence/FT1-27815e5/。
+未检查：未启动真实Chrome；真实UI/CDP投递时序、截图、网络拦截、systemd、Docker、跨平台、磁盘写满未实测。无关联issue/PR，无需GitHub评论。
+
+第4轮为owner额外授权，round=4已达/超过max_rounds=3；仍有2项P1，留在review/等owner决定，不自动开始第5轮。继续修复需owner添加说明并移回new/。
