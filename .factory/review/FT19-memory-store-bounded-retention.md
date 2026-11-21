@@ -1,3 +1,7 @@
+---
+branch: factory/FT19-memory-store-bounded-retention
+round: 1
+---
 # [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，内存无界增长
 
 ## factory · 2026-11-22 01:11
@@ -22,3 +26,23 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 证据：repro-go.log（TestAudit_InMemoryModeMustNotRetainEveryRecord FAIL）；repro/store_audit_test.go。均位于报告同目录。
 
 执行配置完整 gofmt/vet/race 测试；把对应正确行为断言转换为永久回归，修复前失败、修复后通过。不可把预期诊断 FAIL 当作现有测试失败，也不可把诊断 PASS 当作安全通过。真实 Chrome / Docker / systemd 未验部分必须如实记录。不得使用 headless Chrome；需要真实 Chrome 时仅使用隔离的非 headless 测试实例，不操作用户窗口。
+
+## factory · plan · 2026-11-22 06:21
+Behaviour：内存模式继续校验 action/body、补全时间、维护 managed 活跃/关闭与 seq，不保留 RPC 历史及 body；首次打开 replay 返回空副本，错误输入不改 managed。磁盘追加、轮转与恢复保持不变。
+
+Scope：修改 store 实现、永久回归测试及最小文档说明；不修改 daemon 配置、RPC API、磁盘权限或其他审查项。
+
+Decisions：直接删除无读者的 memLogs，不新增环形缓冲或配置。保留现有压缩与 JSON 校验顺序，不做额外 fast path；堆测量固定 managed tab 数，区分瞬时分配与历史保留。
+
+Checking：先验证正确行为回归在旧实现失败，再修复；10 万次调用分批 GC 测量堆增长，覆盖 managed 创建/更新/关闭、返回副本隔离和错误输入。运行完整 gofmt、vet、race 门禁。
+
+## factory · 2026-11-22 06:21
+已构建并推送 fc1cb3e（基于 main@9fa3562），new/ → review/，第 1 轮。
+
+实现：删除 memLogs 字段及追加，内存模式丢弃历史，仅保持 managed 当前状态。保留原校验顺序与错误语义；更新 AGENTS.md 的内存模式说明。
+
+永久回归：10 万条 network RPC、固定两个 managed tab，每 2 万条双 GC 后测量存活堆，相对首批增长上限 2 MiB。修复前普通模式三次及 race 一次均失败，首个检查点增长约 7.8 MB；修复后连续五次及 race 均通过。另覆盖 managed 生命周期、副本隔离、零时间补全，以及内存/磁盘两种模式非法输入不改变 managed。
+
+验证：coder 和 manager 均运行完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...`，全部通过；提交仅涉及本项，never 路径未变。无新增安装；使用已有 Go 1.27.4（go.mod 最低要求 1.26），仅恢复 go.sum 固定依赖。
+
+未验证：真实 Chrome、Docker、systemd、真实 daemon 长时间 RSS；无 UI 改动。堆阈值仅本机 Go 版本验证，其他平台仍需留意测试稳定性。
