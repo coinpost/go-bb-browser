@@ -35,6 +35,7 @@ func TestV1NetworkSinceAndCursor(t *testing.T) {
 		{TargetID: "ABCDEF123456", Type: "page"},
 	}}
 	tid := target.ID("ABCDEF123456")
+	registerHookTabs(t, srv)
 	seq1, err := srv.store.NextSeq()
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +105,7 @@ func TestObsQueryIgnoresPreEnqueueCursor(t *testing.T) {
 		fakeConn: fakeConn{infos: []*target.Info{{TargetID: tid, Type: "page"}}},
 		stats:    browser.ObservationStats{Cursor: 5000, Dropped: 4},
 	}
+	registerHookTabs(t, srv)
 	srv.obsStore.PushNetwork(tid, 100, json.RawMessage(`{"k":1}`))
 
 	body := bytes.NewBufferString(rpcReq(protocol.MethodNetwork, map[string]any{

@@ -63,6 +63,21 @@ type fakeCDP struct {
 type fakeCall struct {
 	Method    string
 	SessionID string
+	Params    json.RawMessage
+}
+
+// callsAbout returns the commands that address target id: sent on its page
+// session, or naming it in their parameters.
+func (f *fakeCDP) callsAbout(id target.ID) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.calls {
+		if c.SessionID == "session-"+string(id) || strings.Contains(string(c.Params), string(id)) {
+			out = append(out, c.Method)
+		}
+	}
+	return out
 }
 
 // called returns how many times method was received, on any session.
@@ -149,7 +164,7 @@ func (f *fakeCDP) serveWS(w http.ResponseWriter, r *http.Request) {
 		// one reply back while others go out.
 		go func() {
 			f.mu.Lock()
-			f.calls = append(f.calls, fakeCall{Method: msg.Method, SessionID: msg.SessionID})
+			f.calls = append(f.calls, fakeCall{Method: msg.Method, SessionID: msg.SessionID, Params: msg.Params})
 			hook := f.onCommand
 			f.mu.Unlock()
 			if hook != nil {

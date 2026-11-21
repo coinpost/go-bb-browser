@@ -701,6 +701,7 @@ func TestClickRefIsEscapedInSelector(t *testing.T) {
 	conn := &clickRecorder{fakeConn: &fakeConn{infos: []*target.Info{{TargetID: "AAAA00001234", Type: "page"}}}}
 	srv := newIdleTestServer(conn.fakeConn, 0)
 	srv.tabHook = conn
+	registerHookTabs(t, srv)
 	postRPC(t, srv, rpcReq(protocol.MethodClick, map[string]any{"tab": "1234", "ref": `x\"],body,[y="`}, 1))
 	if want := `[__bb_snap_ref="x\\\"],body,[y=\""]`; conn.selector != want {
 		t.Fatalf("selector = %s, want %s", conn.selector, want)

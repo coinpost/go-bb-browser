@@ -106,3 +106,23 @@ func TestSyncPageTargetsSinceKeepsTargetsRegisteredAfterEpoch(t *testing.T) {
 		t.Fatalf("registry not empty: %#v", removed)
 	}
 }
+
+// SelectTarget selects by identity: a target that is gone is not selectable,
+// even when another target now holds the short id it had.
+func TestSelectTargetDoesNotFollowShortIDReuse(t *testing.T) {
+	r := NewTabRegistry()
+	const first, second = target.ID("BBBB99991234"), target.ID("AAAA00001234")
+	if short := r.RegisterPageTarget(first); short != "1234" {
+		t.Fatalf("short = %q", short)
+	}
+	if short, ok := r.SelectTarget(first); !ok || short != "1234" || r.Selected() != "1234" {
+		t.Fatalf("SelectTarget = %q %v, selected %q", short, ok, r.Selected())
+	}
+	r.RemoveTarget(first)
+	if short := r.RegisterPageTarget(second); short != "1234" {
+		t.Fatalf("short = %q", short)
+	}
+	if _, ok := r.SelectTarget(first); ok || r.Selected() != "" {
+		t.Fatalf("removed target selected; selected = %q", r.Selected())
+	}
+}

@@ -67,17 +67,11 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	unlock, ok := s.lockTab(ctx, tab)
+	tid, unlock, ok := s.bindTabRPC(ctx, w, id, tab, &protocol.ErrData{Error: "unknown tab id", Hint: "invalid or stale tab short id", Method: method})
 	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeServerError, "request timed out", tabLockTimeoutData())
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: "invalid or stale tab short id", Method: method})
-		return
-	}
 	if sess, ok := conn.(*browser.Session); ok && s.obsSink != nil {
 		if err := sess.EnsureObservation(ctx, tid, kind, s.obsSink, s.logger); err != nil {
 			s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to enable observation", &protocol.ErrData{Error: "failed to enable observation", Hint: s.cdpHint(err)})

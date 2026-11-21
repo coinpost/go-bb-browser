@@ -15,9 +15,9 @@ import (
 )
 
 var (
-	errTabCloseNoConn    = errors.New("browser session not ready")
-	errTabCloseUnknownID = errors.New("unknown tab id")
-	errTabLockTimeout    = fmt.Errorf("tab lock timeout: %w", context.DeadlineExceeded)
+	errTabCloseNoConn = errors.New("browser session not ready")
+	errUnknownTabID   = errors.New("unknown tab id")
+	errTabLockTimeout = fmt.Errorf("tab lock timeout: %w", context.DeadlineExceeded)
 )
 
 func (s *Server) markTabManaged(tid target.ID) {
@@ -268,27 +268,17 @@ func (s *Server) recoverIdleFromLogLocked() {
 }
 
 // closeTabByShort closes the tab that holds the short id tab when the request
-// arrives. The full target id is bound before the request queues for the
-// operation lock: while it waits, another close can remove that tab and a
-// different page can take over the short id. Once it has the lock, the short id
-// must still name the same target, or the request fails as stale.
+// arrives, and no other: see bindTab.
 func (s *Server) closeTabByShort(ctx context.Context, tab string) error {
 	conn := s.tabConn()
 	if conn == nil {
 		return errTabCloseNoConn
 	}
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		return errTabCloseUnknownID
-	}
-	unlock, ok := s.lockTab(ctx, tab)
-	if !ok {
-		return errTabLockTimeout
+	tid, unlock, err := s.bindTab(ctx, tab)
+	if err != nil {
+		return err
 	}
 	defer unlock()
-	if cur, ok := s.tabs.Lookup(tab); !ok || cur != tid {
-		return errTabCloseUnknownID
-	}
 	return s.closeTargetLocked(ctx, conn, tid)
 }
 

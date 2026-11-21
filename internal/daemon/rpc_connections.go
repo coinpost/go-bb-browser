@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 
 	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/browser"
@@ -178,6 +180,56 @@ func removeNetworkRoutes(ctx context.Context, conn routeConn, id target.ID, patt
 		return c.RemoveNetworkRoutesContext(ctx, id, pattern)
 	}
 	return conn.RemoveNetworkRoutes(id, pattern)
+}
+
+// bindTab resolves a short tab id for one request and takes the tab's operation
+// lock. A short id is an alias that is reused: once its tab is gone, the next
+// page whose target id ends the same way gets it. So the request is tied to a
+// full target id at the moment it arrives, and to nothing else afterwards:
+//
+//   - The target comes from the registry as it is now. An unknown short id fails
+//     at once. The browser is not asked again: an enumeration could only
+//     register a page under this short id that the caller cannot have meant
+//     (tab_new, tab_list and tab_focus return registered ids, and target events
+//     keep the registry current).
+//   - While the request queues for the lock the tab can be closed and its short
+//     id taken over. With the lock held the short id must still name the bound
+//     target, or the request fails as unknown; it is never redirected.
+//
+// The caller runs every CDP call, buffer access and lease on the returned
+// target id, and the audit record and idle renewal use it too (see
+// touchSuccessfulRPC). The lock does not keep the tab alive: an operation on a
+// target that goes away meanwhile fails in CDP, by full id.
+func (s *Server) bindTab(ctx context.Context, tab string) (target.ID, func(), error) {
+	tid, ok := s.tabs.Lookup(tab)
+	if !ok {
+		return "", nil, errUnknownTabID
+	}
+	unlock, ok := s.lockTab(ctx, tab)
+	if !ok {
+		return "", nil, errTabLockTimeout
+	}
+	if cur, ok := s.tabs.Lookup(tab); !ok || cur != tid {
+		unlock()
+		return "", nil, errUnknownTabID
+	}
+	bindAuditTarget(ctx, tid)
+	return tid, unlock, nil
+}
+
+// bindTabRPC is bindTab for a handler. On failure it has written the error
+// response; unknown is the handler's error data for an unknown tab id.
+func (s *Server) bindTabRPC(ctx context.Context, w http.ResponseWriter, id json.RawMessage, tab string, unknown *protocol.ErrData) (target.ID, func(), bool) {
+	tid, unlock, err := s.bindTab(ctx, tab)
+	switch {
+	case err == nil:
+		return tid, unlock, true
+	case errors.Is(err, errTabLockTimeout):
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "request timed out", tabLockTimeoutData())
+	default:
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", unknown)
+	}
+	return "", nil, false
 }
 
 // lockTab serializes CDP operations per short tab id. Entries are reference-counted

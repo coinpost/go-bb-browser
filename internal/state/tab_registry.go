@@ -284,6 +284,20 @@ func (r *TabRegistry) Select(shortID string) bool {
 	return true
 }
 
+// SelectTarget marks the tab of target id as focused and returns its short id,
+// or false if the target is not registered. Unlike Select it cannot pick a
+// different tab that has taken over a short id.
+func (r *TabRegistry) SelectTarget(id target.ID) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	short, ok := r.targetToShort[id]
+	if !ok {
+		return "", false
+	}
+	r.selected = short
+	return short, true
+}
+
 // Selected returns the current focus short id, or "".
 func (r *TabRegistry) Selected() string {
 	r.mu.RLock()
