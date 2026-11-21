@@ -16,6 +16,19 @@ type TabRegistry struct {
 	targetToShort map[target.ID]string
 	shortToTarget map[string]target.ID
 	selected      string // short id; empty if none
+
+	// gen is a monotonic registration generation. targetGen records the
+	// generation at which each target was last registered (or explicitly
+	// re-registered), so a full enumeration requested earlier cannot remove it.
+	gen       uint64
+	targetGen map[target.ID]uint64
+}
+
+// EnumerationToken marks the moment a full target enumeration was requested.
+// The zero value is the oldest possible token: applying a snapshot with it
+// registers targets but never removes one.
+type EnumerationToken struct {
+	gen uint64
 }
 
 type RemovedTab struct {
@@ -27,7 +40,18 @@ func NewTabRegistry() *TabRegistry {
 	return &TabRegistry{
 		targetToShort: make(map[target.ID]string),
 		shortToTarget: make(map[string]target.ID),
+		targetGen:     make(map[target.ID]uint64),
 	}
+}
+
+// BeginEnumeration must be called BEFORE the browser is asked for its target
+// list. The returned token makes ApplyEnumeration ignore the absence of any
+// target registered after this point: such a target may have been created
+// after the browser took the snapshot, so the snapshot says nothing about it.
+func (r *TabRegistry) BeginEnumeration() EnumerationToken {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return EnumerationToken{gen: r.gen}
 }
 
 // SyncPageTargets updates registration from the current set of page-type targets.
@@ -39,9 +63,27 @@ func (r *TabRegistry) SyncPageTargets(infos []*target.Info) []TabSnapshot {
 
 // SyncPageTargetsDetailed also reports removals so callers can clear every
 // target-scoped resource through one lifecycle path (INV-6).
+//
+// infos is treated as current as of this call, so every registered target
+// missing from it is removed. Use BeginEnumeration + ApplyEnumeration whenever
+// the list comes from a browser round trip that other registrations can overlap.
 func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.applyLocked(EnumerationToken{gen: r.gen}, infos)
+}
+
+// ApplyEnumeration aligns the registry with a snapshot requested at tok.
+// Targets missing from infos are removed (and reported) only if they were last
+// registered at or before tok; targets registered later are kept untouched.
+// The returned snapshots describe exactly the page targets in infos.
+func (r *TabRegistry) ApplyEnumeration(tok EnumerationToken, infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.applyLocked(tok, infos)
+}
+
+func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
 
 	present := make(map[target.ID]struct{}, len(infos))
 	for _, info := range infos {
@@ -53,10 +95,17 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 
 	var removed []RemovedTab
 	for id, short := range r.targetToShort {
-		if _, ok := present[id]; !ok {
-			removed = append(removed, RemovedTab{TargetID: id, ShortID: short})
-			r.removeLocked(id)
+		if _, ok := present[id]; ok {
+			continue
 		}
+		if r.targetGen[id] > tok.gen {
+			// Registered after the enumeration was requested: the snapshot may
+			// simply predate this target. A later enumeration or its lifecycle
+			// event removes it if it is really gone.
+			continue
+		}
+		removed = append(removed, RemovedTab{TargetID: id, ShortID: short})
+		r.removeLocked(id)
 	}
 
 	ids := make([]target.ID, 0, len(present))
@@ -98,10 +147,15 @@ func (r *TabRegistry) RemoveTarget(id target.ID) (string, bool) {
 
 // RegisterPageTarget assigns a short id for a CDP target id without syncing from the browser.
 // Use after Target.createTarget when GetTargets may not yet list the new tab.
+// It always advances the target's generation, also when the target is already
+// registered, so enumerations already in flight cannot remove it.
 func (r *TabRegistry) RegisterPageTarget(id target.ID) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.assignShortLocked(id)
+	short := r.assignShortLocked(id)
+	r.gen++
+	r.targetGen[id] = r.gen
+	return short
 }
 
 func tabTitle(infos []*target.Info, id target.ID) string {
@@ -150,6 +204,7 @@ func (r *TabRegistry) removeLocked(id target.ID) {
 	}
 	delete(r.targetToShort, id)
 	delete(r.shortToTarget, short)
+	delete(r.targetGen, id)
 	if r.selected == short {
 		r.selected = ""
 	}
@@ -183,9 +238,12 @@ func (r *TabRegistry) assignShortLocked(id target.ID) string {
 	return full
 }
 
+// registerLocked records a NEW registration and stamps it with a fresh generation.
 func (r *TabRegistry) registerLocked(id target.ID, short string) {
 	r.targetToShort[id] = short
 	r.shortToTarget[short] = id
+	r.gen++
+	r.targetGen[id] = r.gen
 }
 
 func hexRunes(s string) []rune {
