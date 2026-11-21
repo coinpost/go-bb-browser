@@ -69,6 +69,7 @@ func TestExternalTargetRemovalClearsAllDaemonState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv.obsStore.RegisterTarget(tid)
 	srv.obsStore.PushNetwork(tid, seq, json.RawMessage(`{"url":"https://example.com"}`))
 	unlock, ok := srv.lockTab(context.Background(), short)
 	if !ok {
@@ -153,6 +154,7 @@ func TestTabIdleCloseTargetErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			data := json.RawMessage(`{"message":"recorded before cleanup"}`)
+			srv.obsStore.RegisterTarget(tid)
 			srv.obsStore.PushNetwork(tid, seq, data)
 			srv.obsStore.PushConsole(tid, seq, data)
 			srv.obsStore.PushError(tid, seq, data)

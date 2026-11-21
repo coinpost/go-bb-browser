@@ -45,13 +45,21 @@ func (s *Server) syncTabsFromTargets(infos []*target.Info) []state.TabSnapshot {
 }
 
 func (s *Server) clearRemovedTarget(tid target.ID, short string) {
-	if s.obsStore != nil {
-		s.obsStore.ClearTarget(tid)
-	}
 	s.forgetTabManaged(tid)
 	s.forgetTabLock(short)
-	if sess, ok := s.tabConn().(*browser.Session); ok {
-		sess.ForgetTarget(tid)
+	s.retireTargetObservation(tid)
+}
+
+// retireTargetObservation stops the producer before dropping its buffers:
+// ForgetTarget returns only once the target's observer writer can no longer
+// record, and ClearTarget then unregisters the target so any other late event
+// is rejected rather than rebuilding the rings (INV-6).
+func (s *Server) retireTargetObservation(tid target.ID) {
+	if conn, ok := s.tabConn().(targetForgetConn); ok {
+		conn.ForgetTarget(tid)
+	}
+	if s.obsStore != nil {
+		s.obsStore.ClearTarget(tid)
 	}
 }
 

@@ -57,6 +57,13 @@ type tabObserver struct {
 	ready   chan struct{}
 	initErr error
 
+	// stop ends the writer without cancelling ctx, which would close a live tab.
+	stop chan struct{}
+	// recordMu serializes every Record call with retirement: retire returns only
+	// after an in-flight Record has finished, and none can start afterwards.
+	recordMu sync.Mutex
+	retired  atomic.Bool
+
 	domainsDisabled bool
 
 	mu             sync.Mutex
@@ -88,6 +95,7 @@ func (s *Session) EnsureObservation(ctx context.Context, tid target.ID, kind Obs
 		obs = &tabObserver{
 			tid: tid, ctx: tabCtx, cleanup: cleanup, rec: rec, logger: lg,
 			queue: make(chan queuedObservation, observationQueueCapacity), ready: make(chan struct{}),
+			stop: make(chan struct{}),
 		}
 		s.observers[tid] = obs
 		go s.initializeObserver(obs)
@@ -132,6 +140,8 @@ func (s *Session) initializeObserver(o *tabObserver) {
 		}
 		return
 	}
+	// A target released during initialization has already retired this observer;
+	// the writer then exits at once without recording.
 	go o.runWriter()
 	close(o.ready)
 }
@@ -243,6 +253,9 @@ func (o *tabObserver) listen(ev any) {
 	default:
 		return
 	}
+	if o.retired.Load() {
+		return
+	}
 	seq, ok := o.rec.NextSeq()
 	if !ok {
 		return
@@ -264,26 +277,68 @@ func storeAtomicMax(dst *atomic.Uint64, value uint64) {
 	}
 }
 
+// retire permanently stops this observer from recording. It waits for a Record
+// call that is already in flight, so once it returns the caller may clear the
+// target's buffers knowing this observer can never write to them again. Events
+// still queued are discarded. It is idempotent and safe before the writer starts.
+func (o *tabObserver) retire() {
+	o.recordMu.Lock()
+	defer o.recordMu.Unlock()
+	if o.retired.Swap(true) {
+		return
+	}
+	if o.stop != nil {
+		close(o.stop)
+	}
+}
+
+func (o *tabObserver) stopped() bool {
+	select {
+	case <-o.stop:
+		return true
+	case <-o.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func (o *tabObserver) runWriter() {
 	for {
+		// A ready queue must not win over a stop request.
+		if o.stopped() {
+			return
+		}
 		select {
+		case <-o.stop:
+			return
 		case <-o.ctx.Done():
 			return
 		case item := <-o.queue:
-			data, err := json.Marshal(item.payload)
-			if err != nil {
-				o.dropped[item.kind].Add(1)
-				continue
-			}
-			switch item.kind {
-			case ObservationNetwork:
-				o.rec.RecordNetwork(o.tid, item.seq, data)
-			case ObservationConsole:
-				o.rec.RecordConsole(o.tid, item.seq, data)
-			case ObservationErrors:
-				o.rec.RecordError(o.tid, item.seq, data)
-			}
+			o.record(item)
 		}
+	}
+}
+
+// record persists one dequeued event unless the observer has been retired.
+func (o *tabObserver) record(item queuedObservation) {
+	data, err := json.Marshal(item.payload)
+	if err != nil {
+		o.dropped[item.kind].Add(1)
+		return
+	}
+	o.recordMu.Lock()
+	defer o.recordMu.Unlock()
+	if o.retired.Load() {
+		return
+	}
+	switch item.kind {
+	case ObservationNetwork:
+		o.rec.RecordNetwork(o.tid, item.seq, data)
+	case ObservationConsole:
+		o.rec.RecordConsole(o.tid, item.seq, data)
+	case ObservationErrors:
+		o.rec.RecordError(o.tid, item.seq, data)
 	}
 }
 

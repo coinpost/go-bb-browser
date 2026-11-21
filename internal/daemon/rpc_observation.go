@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -78,11 +79,13 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: "invalid or stale tab short id", Method: method})
 		return
 	}
-	if sess, ok := conn.(*browser.Session); ok && s.obsSink != nil {
-		if err := sess.EnsureObservation(ctx, tid, kind, s.obsSink, s.logger); err != nil {
-			s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to enable observation", &protocol.ErrData{Error: "failed to enable observation", Hint: s.cdpHint(err)})
+	if err := s.enableObservation(ctx, conn, tid, kind); err != nil {
+		if errors.Is(err, errObservationTargetGone) {
+			s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: "invalid or stale tab short id", Method: method})
 			return
 		}
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to enable observation", &protocol.ErrData{Error: "failed to enable observation", Hint: s.cdpHint(err)})
+		return
 	}
 	since := obsSince(p.Since)
 	events, cursor, dropped := q(tid, since)
@@ -95,4 +98,30 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.ObsQueryResult{Tab: tab, Seq: seq, Cursor: cursor, Events: events, Dropped: dropped})
+}
+
+var errObservationTargetGone = errors.New("target released while enabling observation")
+
+// enableObservation starts the target's observation lifecycle: it registers the
+// buffers explicitly (events for unregistered targets are rejected) and then
+// attaches the observer.
+//
+// Target removal does not take the keyed tab lock, so it can run concurrently.
+// Removal drops the registry entry before retiring observation, and this
+// function registers before checking the registry; whichever side runs second
+// therefore still sees the other's state and retires it, leaving no buffers or
+// observer behind for a released target.
+func (s *Server) enableObservation(ctx context.Context, conn tabConn, tid target.ID, kind browser.ObservationKind) error {
+	if s.obsStore != nil {
+		s.obsStore.RegisterTarget(tid)
+	}
+	var err error
+	if sess, ok := conn.(*browser.Session); ok && s.obsSink != nil {
+		err = sess.EnsureObservation(ctx, tid, kind, s.obsSink, s.logger)
+	}
+	if _, present := s.tabs.ShortForTarget(tid); !present {
+		s.retireTargetObservation(tid)
+		return errObservationTargetGone
+	}
+	return err
 }

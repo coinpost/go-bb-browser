@@ -392,6 +392,9 @@ func (s *Session) Close() {
 	s.obsMu.Lock()
 	for _, obs := range s.observers {
 		obs.cleanup.stop()
+		// Stop the writer too: an observer of a closed session must not keep
+		// writing into buffers that a later session may own.
+		obs.retire()
 	}
 	s.observers = nil
 	s.obsMu.Unlock()
@@ -409,6 +412,7 @@ func (s *Session) Close() {
 }
 
 // ForgetTarget drops daemon-owned resources after Chrome has already removed a target.
+// When it returns, the target's observer has stopped recording for good.
 // Cancelling a live chromedp child closes its tab, so this must only be called from an
 // authoritative target-removal path.
 func (s *Session) ForgetTarget(id target.ID) {
@@ -429,8 +433,13 @@ func (s *Session) ForgetTarget(id target.ID) {
 	obs := s.observers[id]
 	delete(s.observers, id)
 	s.obsMu.Unlock()
-	if obs != nil && obs.cleanup != nil {
-		obs.cleanup.cancel()
+	if obs != nil {
+		if obs.cleanup != nil {
+			obs.cleanup.cancel()
+		}
+		// Wait out an in-flight Record so the caller can clear the target's
+		// observation buffers without the old writer recreating them.
+		obs.retire()
 	}
 	s.ClearRoutesForTarget(id)
 }

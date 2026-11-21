@@ -43,6 +43,7 @@ func TestV1NetworkSinceAndCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv.obsStore.RegisterTarget(tid)
 	srv.obsStore.PushNetwork(tid, seq1, json.RawMessage(`{"k":1}`))
 	srv.obsStore.PushNetwork(tid, seq2, json.RawMessage(`{"k":2}`))
 
@@ -104,6 +105,7 @@ func TestObsQueryIgnoresPreEnqueueCursor(t *testing.T) {
 		fakeConn: fakeConn{infos: []*target.Info{{TargetID: tid, Type: "page"}}},
 		stats:    browser.ObservationStats{Cursor: 5000, Dropped: 4},
 	}
+	srv.obsStore.RegisterTarget(tid)
 	srv.obsStore.PushNetwork(tid, 100, json.RawMessage(`{"k":1}`))
 
 	body := bytes.NewBufferString(rpcReq(protocol.MethodNetwork, map[string]any{
