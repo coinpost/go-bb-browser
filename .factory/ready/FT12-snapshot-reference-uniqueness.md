@@ -65,3 +65,22 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：真实非 headless Chrome/CDP、真实 DOM 布局和 innerText、跨 Runtime.evaluate 的 document 属性、bfcache、旧 ref 实际 click 超时行为、Docker、systemd、部署和 UI 均未实测；未启动 headless Chrome，未操作用户窗口。fake DOM 仅支持脚本所需 DOM API 与有限选择器。snapshot 之后页面自行 cloneNode 复制标记、iframe/shadow DOM 不在覆盖内。review 请重点检查这些边界及文档内/跨文档生命周期。
 
 状态：代码分支已推送，new/ → review/，第 1 轮；本次仅 build，未 review、未合并 main。
+
+
+## factory · review · 2026-11-22 05:08
+head: f76baa44505b3305daf0e1b7f6836cf426e2fe13
+verdict: pass
+notes:
+- [P2] internal/browser/snapshot.go:73: 旧版 daemon 升级后，仍打开的文档中已脱离节点的旧 ref 无法参与首次计数器初始化；新节点可能复用旧 ref，旧节点重插后还可能重复。需明确升级引用边界，例如要求升级后刷新已有页面并记录于生命周期文档。
+- [P2] internal/browser/snapshot.go:81: 页面包含 <form><input name="hasAttribute"></form> 时表单命名控件遮蔽方法，第二次 snapshot 清理会抛 TypeError，而基线连续两次正常。应通过 Element.prototype 调用属性方法并补充回归。
+- [P2] internal/browser/snapshot.go:88: A 文档标记的节点移到同源 B 文档并由 B 重新快照后，A 的下次清理仍会删除 B 的有效 ref。应追踪标记所属文档，避免跨文档误清理。
+- [P2] internal/browser/snapshot.go:120: 预存 __bb_snap_ref="9007199254740990" 可将计数器推进到安全整数上限，再分配出现重复 @9007199254740992。应采用精确递增计数或在编号耗尽时明确报错。
+- [P3] README.md:239: 此处及 skills/bb-browser/SKILL.md:89 的“每次 snapshot”应限定为成功返回结果；非法 scope 选择器在清理前报错，保留旧引用。
+
+Codex 独立审查 origin/main...HEAD；无 P0/P1，按工厂规则 review/ → ready/。当前分支与 origin/main 可干净合并，未修改代码、未创建代码提交。上述 P2/P3 为后续关注，不代表已经修复。
+
+检查：完整配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全部通过，8 个包有测试、2 个无测试；git diff --check 通过，工作树干净。永久离线回归覆盖 full→scope、隐藏、interactiveOnly、pruneEmpty、maxDepth、旧 ref selector scope、脱离重插、空结果、非法 selector 以及 click/fill 选择器一致性。Coder 报告用生产脚本在离线、无窗口 WebKit DOM 复现上述 P2；不将其等同于 Chrome/CDP 验证。
+
+安装：本次无新增未 pin 工具或依赖；未找到 review-code skill。测试 HOME、缓存与临时文件使用本次隔离 TMPDIR。
+
+未检查：真实非 headless Chrome/CDP 的跨 Runtime.evaluate、并发请求时序、实际 click/fill、BFCache、Docker、systemd 均未实测；未启动 Chrome、未操作用户窗口。无 linked issue/PR，故无 GitHub 评论。未合并 main、未发布。
