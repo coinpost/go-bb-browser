@@ -24,12 +24,16 @@ services:
     volumes:
       # The image ships /var/lib/bb-daemon owned by nonroot (uid/gid 65532).
       # Docker copies that ownership into a *fresh, empty* named volume on first
-      # use, so this works out of the box. It is NOT applied to a volume that
-      # already has content or was first created by an older image (root-owned),
-      # to bind mounts, or with `volume.nocopy: true`. In those cases the daemon
-      # exits with "state dir ... is not writable": fix ownership in place, e.g.
-      #   docker run --rm -v bb-state:/state busybox chown -R 65532:65532 /state
-      # (bind mount: chown -R 65532:65532 <host-dir>). Back up first if needed;
+      # use. It is NOT applied to bind mounts, with `volume.nocopy: true`, or to
+      # a volume that already exists; such a volume (e.g. one first created by
+      # an older image, root-owned) MAY need its ownership corrected. If the
+      # daemon exits with "state dir ... is not writable", fix it in place.
+      # Compose prefixes the volume name with the project (<project>_bb-state):
+      # find the real name with `docker volume ls` / `docker volume inspect`,
+      # then:
+      #   docker run --rm -v <actual-volume-name>:/state busybox chown -R 65532:65532 /state
+      # (a plain `bb-state` there would create and chown a new, unrelated volume).
+      # Bind mount: chown -R 65532:65532 <host-dir>. Back up first if needed;
       # do not delete the volume just to get past the error.
       - bb-state:/var/lib/bb-daemon
     # The supplied distroless image has no shell/curl. Configure the hosting
