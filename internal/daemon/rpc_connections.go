@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/browser"
@@ -180,37 +181,94 @@ func removeNetworkRoutes(ctx context.Context, conn routeConn, id target.ID, patt
 	return conn.RemoveNetworkRoutes(id, pattern)
 }
 
-// lockTab serializes CDP operations per short tab id. The key comes straight
-// from the client and is locked before the tab is resolved, so an entry lives
-// only while a holder or waiter references it: the last reference to leave
-// deletes it, whether or not the tab ever existed. Every reference is taken
-// from the map under tabMuOps, so callers that overlap in time always share
-// one entry and a new entry can only appear once the previous one has drained.
+// lockTab serializes CDP operations per tab. It takes two locks, in this order:
+//
+//  1. The alias exactly as the client sent it. The key comes straight from the
+//     client and is locked before the tab is resolved, so an entry lives only
+//     while a holder or waiter references it: the last reference to leave
+//     deletes it, whether or not the tab ever existed. Every reference is taken
+//     from the map under tabMuOps, so callers that overlap in time always share
+//     one entry and a new entry can only appear once the previous one has
+//     drained.
+//  2. The target the alias resolves to, if any. One tab answers to several
+//     aliases (every unambiguous hex suffix, and a different short id while a
+//     collision lasts), so the alias lock alone would let two spellings of the
+//     same tab run concurrently.
+//
+// For RPC requests the hold is remembered in the request's auditMeta, and
+// resolveTab moves the target lock if the alias resolves differently by then.
 func (s *Server) lockTab(ctx context.Context, short string) (func(), bool) {
-	if short == "" {
-		return func() {}, true
-	}
-	s.tabMuOps.Lock()
-	if s.tabCDPLocks == nil {
-		s.tabCDPLocks = make(map[string]*tabLockEntry)
-	}
-	ent, ok := s.tabCDPLocks[short]
+	hold, ok := s.holdTab(ctx, short)
 	if !ok {
-		ent = &tabLockEntry{sem: make(chan struct{}, 1)}
-		ent.sem <- struct{}{}
-		s.tabCDPLocks[short] = ent
-	}
-	ent.refs++
-	s.tabMuOps.Unlock()
-	select {
-	case <-ent.sem:
-		return func() {
-			ent.sem <- struct{}{}
-			s.releaseTabLockRef(short, ent)
-		}, true
-	case <-ctx.Done():
-		s.releaseTabLockRef(short, ent)
 		return func() {}, false
+	}
+	if meta := auditMetaFrom(ctx); meta != nil {
+		meta.tabHold = hold
+	}
+	return hold.release, true
+}
+
+// tabLockHold is the set of operation locks one caller holds for one tab.
+// At most one target lock is held at a time, always after the alias lock, so
+// holds cannot deadlock each other.
+type tabLockHold struct {
+	s        *Server
+	short    string
+	aliasEnt *tabLockEntry // nil for the empty alias, which locks nothing
+
+	target    target.ID // target whose lock is held; "" if none
+	targetEnt *tabLockEntry
+}
+
+func (s *Server) holdTab(ctx context.Context, short string) (*tabLockHold, bool) {
+	h := &tabLockHold{s: s, short: short}
+	if short == "" {
+		return h, true
+	}
+	ent, ok := acquireKeyedLock(ctx, &s.tabMuOps, &s.tabCDPLocks, short)
+	if !ok {
+		return nil, false
+	}
+	h.aliasEnt = ent
+	if tid, ok := s.tabs.Lookup(short); ok && !h.retarget(ctx, tid) {
+		h.release()
+		return nil, false
+	}
+	return h, true
+}
+
+// retarget makes the hold cover tid, dropping the lock of any other target
+// first. It reports false if ctx ended while waiting; the hold then covers no
+// target.
+func (h *tabLockHold) retarget(ctx context.Context, tid target.ID) bool {
+	if h.target == tid {
+		return true
+	}
+	h.releaseTarget()
+	if tid == "" {
+		return true
+	}
+	ent, ok := acquireKeyedLock(ctx, &h.s.tabMuOps, &h.s.targetCDPLocks, tid)
+	if !ok {
+		return false
+	}
+	h.target, h.targetEnt = tid, ent
+	return true
+}
+
+func (h *tabLockHold) releaseTarget() {
+	if h.targetEnt == nil {
+		return
+	}
+	releaseKeyedLock(&h.s.tabMuOps, h.s.targetCDPLocks, h.target, h.targetEnt, true)
+	h.target, h.targetEnt = "", nil
+}
+
+func (h *tabLockHold) release() {
+	h.releaseTarget()
+	if h.aliasEnt != nil {
+		releaseKeyedLock(&h.s.tabMuOps, h.s.tabCDPLocks, h.short, h.aliasEnt, true)
+		h.aliasEnt = nil
 	}
 }
 
@@ -219,11 +277,40 @@ type tabLockEntry struct {
 	refs int
 }
 
-func (s *Server) releaseTabLockRef(short string, ent *tabLockEntry) {
-	s.tabMuOps.Lock()
-	defer s.tabMuOps.Unlock()
+// acquireKeyedLock takes the lock for key in *locks (guarded by mu), creating
+// the entry on first reference. A caller that gives up drops its reference.
+func acquireKeyedLock[K comparable](ctx context.Context, mu *sync.Mutex, locks *map[K]*tabLockEntry, key K) (*tabLockEntry, bool) {
+	mu.Lock()
+	if *locks == nil {
+		*locks = make(map[K]*tabLockEntry)
+	}
+	ent, ok := (*locks)[key]
+	if !ok {
+		ent = &tabLockEntry{sem: make(chan struct{}, 1)}
+		ent.sem <- struct{}{}
+		(*locks)[key] = ent
+	}
+	ent.refs++
+	mu.Unlock()
+	select {
+	case <-ent.sem:
+		return ent, true
+	case <-ctx.Done():
+		releaseKeyedLock(mu, *locks, key, ent, false)
+		return nil, false
+	}
+}
+
+// releaseKeyedLock drops one reference to ent, handing the lock back first if
+// the caller held it. The last reference to leave deletes the entry.
+func releaseKeyedLock[K comparable](mu *sync.Mutex, locks map[K]*tabLockEntry, key K, ent *tabLockEntry, held bool) {
+	if held {
+		ent.sem <- struct{}{}
+	}
+	mu.Lock()
+	defer mu.Unlock()
 	ent.refs--
-	if ent.refs == 0 && s.tabCDPLocks[short] == ent {
-		delete(s.tabCDPLocks, short)
+	if ent.refs == 0 && locks[key] == ent {
+		delete(locks, key)
 	}
 }

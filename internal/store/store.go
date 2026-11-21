@@ -52,17 +52,24 @@ type Store struct {
 	logBytes    int64
 	maxLogBytes int64
 	seq         atomic.Uint64
-	managed     map[string]time.Time
+	managed     map[string]managedTab // keyed by full CDP target id
 	memLogs     []LogRecord
 	logger      *slog.Logger
 	inMemory    bool
 }
 
 // LogRecord is one append-only RPC log line.
+//
+// Tab is the short id the request used or the response returned. It is an
+// alias: which target it names depends on the tabs alive at that moment, so it
+// is kept for audit only. Target is the full CDP target id the daemon had
+// resolved when it handled the request, and is the only identity that managed
+// tab recovery trusts.
 type LogRecord struct {
 	Action   string          `json:"action"`
 	Body     json.RawMessage `json:"body"`
 	Tab      string          `json:"tab,omitempty"`
+	Target   string          `json:"target,omitempty"`
 	SenderIP string          `json:"sender_ip"`
 	Seq      uint64          `json:"seq,omitempty"`
 	OK       bool            `json:"ok"`
@@ -91,7 +98,7 @@ func Open(cfg OpenConfig) (*Store, error) {
 	s := &Store{
 		logger:      logger,
 		inMemory:    useMemory,
-		managed:     make(map[string]time.Time),
+		managed:     make(map[string]managedTab),
 		maxLogBytes: maxLogBytes,
 	}
 	s.seq.Store(uint64(time.Now().UnixNano()))
@@ -114,7 +121,7 @@ func Open(cfg OpenConfig) (*Store, error) {
 		return nil, fmt.Errorf("open rpc log %q: %w", logPath, err)
 	}
 
-	managed := make(map[string]time.Time)
+	managed := make(map[string]managedTab)
 	if err := replayLog(f, logger, func(rec LogRecord) error {
 		applyManagedUpdate(managed, rec)
 		return nil
@@ -252,7 +259,7 @@ func (s *Store) AppendRPC(rec LogRecord) error {
 	defer s.mu.Unlock()
 
 	if s.managed == nil {
-		s.managed = make(map[string]time.Time)
+		s.managed = make(map[string]managedTab)
 	}
 	applyManagedUpdate(s.managed, rec)
 
@@ -307,25 +314,29 @@ func (s *Store) rotateLocked() error {
 }
 
 // writeManagedSnapshotLocked writes one synthetic tab_new record per managed tab
-// (sorted for determinism) to the current log. Caller holds s.mu.
+// (sorted for determinism) to the current log. Each record carries the full
+// target id, so recovery from the rotated log verifies identity exactly as it
+// does from the original records. Caller holds s.mu.
 func (s *Store) writeManagedSnapshotLocked() error {
 	if len(s.managed) == 0 {
 		return nil
 	}
-	shorts := make([]string, 0, len(s.managed))
-	for short := range s.managed {
-		shorts = append(shorts, short)
+	targets := make([]string, 0, len(s.managed))
+	for tid := range s.managed {
+		targets = append(targets, tid)
 	}
-	sort.Strings(shorts)
+	sort.Strings(targets)
 
 	var buf bytes.Buffer
-	for _, short := range shorts {
+	for _, tid := range targets {
+		tab := s.managed[tid]
 		data, err := json.Marshal(LogRecord{
 			Action: protocol.MethodTabNew,
 			Body:   snapshotBody,
-			Tab:    short,
+			Tab:    tab.short,
+			Target: tid,
 			OK:     true,
-			Time:   s.managed[short],
+			Time:   tab.at,
 		})
 		if err != nil {
 			return err
@@ -338,12 +349,20 @@ func (s *Store) writeManagedSnapshotLocked() error {
 	return err
 }
 
-// ReplayManagedTabActivity returns managed tab short ids and last activity, rebuilt by replaying the log at startup.
+// ReplayManagedTabActivity returns the last activity of every managed tab,
+// keyed by full CDP target id, as rebuilt by replaying the log at startup and
+// kept current by AppendRPC. Records without a target id (written before the
+// log carried one) are never part of it: a short id alone cannot prove which
+// tab a record was about.
 func (s *Store) ReplayManagedTabActivity() map[string]time.Time {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneManaged(s.managed)
+	out := make(map[string]time.Time, len(s.managed))
+	for tid, tab := range s.managed {
+		out[tid] = tab.at
+	}
+	return out
 }

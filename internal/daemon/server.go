@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/state"
 	"github.com/yiplee/go-bb-browser/internal/store"
 	"github.com/yiplee/go-bb-browser/internal/timeout"
@@ -49,6 +50,8 @@ type Server struct {
 
 	tabMuOps    sync.Mutex
 	tabCDPLocks map[string]*tabLockEntry
+	// targetCDPLocks serializes per target id: several aliases can name one tab.
+	targetCDPLocks map[target.ID]*tabLockEntry
 
 	auditMu     sync.Mutex
 	auditClosed bool

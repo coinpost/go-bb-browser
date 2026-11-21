@@ -464,6 +464,7 @@ func TestTabIdleRestartGraceDelaysClose(t *testing.T) {
 		Action: protocol.MethodTabNew,
 		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
 		Tab:    "9999",
+		Target: string(tabID),
 		OK:     true,
 		Time:   expiredAt,
 	})

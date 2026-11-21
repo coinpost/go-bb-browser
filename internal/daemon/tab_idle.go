@@ -108,11 +108,10 @@ func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 		}
 		present[sn.TargetID] = struct{}{}
 	}
-	for shortID, lastAt := range loaded {
-		tid, ok := s.tabs.Lookup(shortID)
-		if !ok {
-			continue
-		}
+	// The log identifies managed tabs by full CDP target id. Never go through a
+	// short id here: after a restart the same alias can name a different tab.
+	for targetID, lastAt := range loaded {
+		tid := target.ID(targetID)
 		if _, ok := present[tid]; !ok {
 			continue
 		}
@@ -139,15 +138,15 @@ func (s *Server) closeTabByShort(ctx context.Context, tab string) error {
 
 // closeTabByShortLocked closes tab while the caller holds its keyed operation lock.
 func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab string) error {
-	tid, ok := s.tabs.Lookup(tab)
-	if !ok {
-		if _, err := s.enumerateTabs(ctx, conn); err == nil {
-			tid, ok = s.tabs.Lookup(tab)
-		}
-	}
+	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
 		return errTabCloseUnknownID
 	}
+	return s.closeTargetLocked(ctx, conn, tid)
+}
+
+// closeTargetLocked closes tid while the caller holds its operation lock.
+func (s *Server) closeTargetLocked(ctx context.Context, conn tabConn, tid target.ID) error {
 	if err := closeTarget(ctx, conn, tid); err != nil {
 		return err
 	}
@@ -207,13 +206,22 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 			}
 			continue
 		}
-		unlock, locked := s.lockTab(ctx, short)
+		// The short id is only the key that serializes with requests spelled the
+		// same way. The tab to close is tid: hold its lock and close it by target
+		// id, so a short id that changed meaning meanwhile cannot redirect the
+		// close to another tab.
+		hold, locked := s.holdTab(ctx, short)
+		if locked && !hold.retarget(ctx, tid) {
+			hold.release()
+			locked = false
+		}
 		if !locked {
 			if s.logger != nil {
 				s.logger.Warn("tab idle cleanup failed", "tab", short, "err", errTabLockTimeout)
 			}
 			continue
 		}
+		unlock := hold.release
 		// Expired returned a snapshot. Activity may have completed while cleanup
 		// waited for this lock, so make the close decision again while serialized
 		// with tab operations.
@@ -221,7 +229,7 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 			unlock()
 			continue
 		}
-		err := s.closeTabByShortLocked(ctx, conn, short)
+		err := s.closeTargetLocked(ctx, conn, tid)
 		if err != nil && browser.ErrorKindOf(err) == browser.ErrorTargetGone {
 			// Idle cleanup is complete when Chrome has already removed the target.
 			// Keep explicit tab_close RPC errors unchanged.
@@ -232,10 +240,6 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 		}
 		unlock()
 		if err != nil {
-			if errors.Is(err, errTabCloseUnknownID) {
-				s.forgetTabManaged(tid)
-				continue
-			}
 			if s.logger != nil {
 				s.logger.Warn("tab idle cleanup failed", "tab", short, "err", err)
 			}

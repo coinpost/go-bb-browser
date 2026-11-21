@@ -174,6 +174,7 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 		Action:   meta.action,
 		Body:     meta.body,
 		Tab:      tab,
+		Target:   string(meta.target),
 		SenderIP: meta.senderIP,
 		Seq:      seq,
 		OK:       ok,
@@ -232,6 +233,12 @@ func (s *Server) touchSuccessfulRPC(ctx context.Context, result any) {
 	}
 	switch meta.action {
 	case protocol.MethodTabNew, protocol.MethodTabClose, protocol.MethodTabList:
+		return
+	}
+	// Prefer the target the request was resolved to: its alias may have become
+	// ambiguous, or may name another tab, by the time the response is written.
+	if meta.target != "" {
+		s.touchTabActivity(meta.target)
 		return
 	}
 	tab := store.TabFromRequestBody(meta.body)
@@ -342,6 +349,7 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		if sn.ShortID == tabField {
 			title = sn.Title
 			url = sn.URL
+			setAuditTarget(ctx, sn.TargetID)
 			break
 		}
 	}
@@ -374,7 +382,7 @@ func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn,
 	if d, ok := conn.(foregroundDetectorContext); ok {
 		sh, ok := d.DetectForegroundShortContext(ctx, snaps)
 		if ok {
-			_ = s.tabs.Select(sh)
+			s.selectSnapshotTab(snaps, sh)
 		}
 		return
 	}
@@ -386,7 +394,19 @@ func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn,
 	if !ok {
 		return
 	}
-	_ = s.tabs.Select(sh)
+	s.selectSnapshotTab(snaps, sh)
+}
+
+// selectSnapshotTab selects the tab that had short id short in snaps. It goes
+// through the snapshot's target id because the alias may have changed meaning
+// since the snapshot was taken.
+func (s *Server) selectSnapshotTab(snaps []state.TabSnapshot, short string) {
+	for _, sn := range snaps {
+		if sn.ShortID == short {
+			_ = s.tabs.SelectTarget(sn.TargetID)
+			return
+		}
+	}
 }
 
 func operationalTabShort(reg *state.TabRegistry, snaps []state.TabSnapshot) string {
@@ -434,14 +454,16 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
-	if !s.tabs.Select(tab) {
+	tid, ok := s.tabs.SelectAlias(tab)
+	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodTabSelect,
 		})
 		return
 	}
+	setAuditTarget(ctx, tid)
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
@@ -471,9 +493,10 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	short := s.tabs.RegisterPageTarget(tid)
+	setAuditTarget(ctx, tid)
 	s.markTabManaged(tid, short, initial, p.Silent)
 	if !p.Silent {
-		s.tabs.Select(short)
+		s.tabs.SelectTarget(tid)
 	}
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
@@ -521,7 +544,7 @@ func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodGoto,
 		})
 		return
@@ -571,7 +594,7 @@ func (s *Server) handleReload(ctx context.Context, w http.ResponseWriter, id jso
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodReload,
 		})
 		return
@@ -616,7 +639,7 @@ func (s *Server) handleTabClose(ctx context.Context, w http.ResponseWriter, id j
 		case errors.Is(err, errTabCloseUnknownID):
 			s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 				Error:  "unknown tab id",
-				Hint:   "invalid or stale tab short id",
+				Hint:   s.unknownTabHint(tab),
 				Method: protocol.MethodTabClose,
 			})
 		case errors.Is(err, errTabCloseNoConn):
@@ -668,7 +691,7 @@ func (s *Server) handleScreenshot(ctx context.Context, w http.ResponseWriter, id
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodScreenshot,
 		})
 		return
@@ -731,7 +754,7 @@ func (s *Server) handleEval(ctx context.Context, w http.ResponseWriter, id json.
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodEval,
 		})
 		return
@@ -793,7 +816,7 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodClick,
 		})
 		return
@@ -850,7 +873,7 @@ func (s *Server) handleFetch(ctx context.Context, w http.ResponseWriter, id json
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodFetch,
 		})
 		return
@@ -1214,7 +1237,7 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   s.unknownTabHint(tab),
 			Method: protocol.MethodFill,
 		})
 		return
@@ -1234,17 +1257,47 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	s.rpcOK(ctx, w, id, protocol.FillResult{Tab: tab, Seq: seq})
 }
 
+// unknownTabHint explains why tab did not resolve. An ambiguous short id is a
+// hard error like an unknown one (INV-3), but the way out differs: the tab is
+// still there under a longer id.
+func (s *Server) unknownTabHint(tab string) string {
+	if s.tabs.Ambiguous(tab) {
+		return "ambiguous tab short id: several open tabs share it; use the longer id from tab_list"
+	}
+	return "invalid or stale tab short id"
+}
+
+// resolveTab resolves the alias a request named to its target (INV-3: unknown
+// and ambiguous aliases fail). For an RPC request it also pins the result:
+// the operation lock taken by lockTab is made to cover exactly this target,
+// and the target id is recorded for the audit log while the tab is known.
 func (s *Server) resolveTab(ctx context.Context, conn tabConn, tab string) (target.ID, bool) {
 	tid, ok := s.tabs.Lookup(tab)
-	if ok {
-		return tid, true
-	}
-	if _, err := s.enumerateTabs(ctx, conn); err == nil {
-		if tid, ok := s.tabs.Lookup(tab); ok {
-			return tid, true
+	if !ok {
+		if _, err := s.enumerateTabs(ctx, conn); err == nil {
+			tid, ok = s.tabs.Lookup(tab)
 		}
 	}
-	return tid, false
+	if !ok {
+		return "", false
+	}
+	meta := auditMetaFrom(ctx)
+	if meta == nil {
+		return tid, true
+	}
+	if hold := meta.tabHold; hold != nil && hold.target != tid {
+		// The alias resolved to another target (or to none) when the lock was
+		// taken. Waiting for this target's lock gives the alias time to change
+		// again, so re-check instead of operating on a tab it no longer names.
+		if !hold.retarget(ctx, tid) {
+			return "", false
+		}
+		if cur, ok := s.tabs.Lookup(tab); !ok || cur != tid {
+			return "", false
+		}
+	}
+	meta.target = tid
+	return tid, true
 }
 
 func (s *Server) cdpHint(err error) string {

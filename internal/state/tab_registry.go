@@ -9,17 +9,42 @@ import (
 	"github.com/chromedp/cdproto/target"
 )
 
-// TabRegistry maps CDP target ids to stable short ids for the HTTP API (INV-3).
+// TabRegistry maps CDP target ids to short ids for the HTTP API (INV-3).
+//
+// Alias contract:
+//
+//   - Every live target claims each suffix of its hex digits that is at least
+//     4 digits long (lower case), plus the always-unique "id=<target id>".
+//     A target id with fewer than 4 hex digits claims its hex digits (or, with
+//     none at all, the id itself) instead of suffixes.
+//   - An alias resolves only while exactly one live target claims it. An alias
+//     claimed by several targets is a hard miss for all of them (INV-3): it is
+//     never handed to whichever target happened to register first.
+//   - The short id reported for a target is its shortest resolvable claim. It
+//     is a pure function of the set of live targets, so every registration
+//     order and a registry rebuilt after a restart agree, and it is 4 digits
+//     whenever no other live target shares them.
+//
+// The consequence, by design: when a later target collides with a registered
+// one, the reported short id of the earlier target grows and its previous
+// alias stops resolving until the collision is gone. Longer aliases stay valid
+// as long as they are unambiguous. Closing a target releases its aliases
+// (INV-6), so a later target may legitimately claim them; anything that must
+// survive a tab's lifetime has to key on the full target id instead.
 type TabRegistry struct {
 	mu sync.RWMutex
 
+	// targetToShort, aliasToTarget and ambiguous are derived from the keys of targetGen
+	// by rebuildAliasesLocked and replaced together.
 	targetToShort map[target.ID]string
-	shortToTarget map[string]target.ID
-	selected      string // short id; empty if none
+	aliasToTarget map[string]target.ID
+	ambiguous     map[string]struct{} // aliases claimed by several targets
+	selected      target.ID           // empty if none
 
 	// gen is a monotonic registration generation. targetGen records the
 	// generation at which each target was last registered (or explicitly
 	// re-registered), so a full enumeration requested earlier cannot remove it.
+	// Its key set is the set of registered targets.
 	gen       uint64
 	targetGen map[target.ID]uint64
 }
@@ -39,7 +64,7 @@ type RemovedTab struct {
 func NewTabRegistry() *TabRegistry {
 	return &TabRegistry{
 		targetToShort: make(map[target.ID]string),
-		shortToTarget: make(map[string]target.ID),
+		aliasToTarget: make(map[string]target.ID),
 		targetGen:     make(map[target.ID]uint64),
 	}
 }
@@ -104,27 +129,33 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 			// event removes it if it is really gone.
 			continue
 		}
+		// short is the alias that was valid while the target was registered.
 		removed = append(removed, RemovedTab{TargetID: id, ShortID: short})
-		r.removeLocked(id)
+	}
+	changed := len(removed) > 0
+	for _, tab := range removed {
+		r.forgetLocked(tab.TargetID)
 	}
 
 	ids := make([]target.ID, 0, len(present))
 	for id := range present {
 		ids = append(ids, id)
+		if _, ok := r.targetGen[id]; !ok {
+			r.gen++
+			r.targetGen[id] = r.gen
+			changed = true
+		}
+	}
+	if changed {
+		r.rebuildAliasesLocked()
 	}
 	slices.SortFunc(ids, func(a, b target.ID) int {
-		if x, y := string(a), string(b); x < y {
-			return -1
-		} else if x > y {
-			return 1
-		}
-		return 0
+		return strings.Compare(string(a), string(b))
 	})
 	out := make([]TabSnapshot, 0, len(ids))
 	for _, id := range ids {
-		short := r.assignShortLocked(id)
 		out = append(out, TabSnapshot{
-			ShortID:  short,
+			ShortID:  r.targetToShort[id],
 			TargetID: id,
 			Title:    tabTitle(infos, id),
 			URL:      tabURL(infos, id),
@@ -133,7 +164,7 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 	return out, removed
 }
 
-// RemoveTarget removes one target and returns its former short id.
+// RemoveTarget removes one target and returns the short id it had.
 func (r *TabRegistry) RemoveTarget(id target.ID) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -141,21 +172,27 @@ func (r *TabRegistry) RemoveTarget(id target.ID) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	r.removeLocked(id)
+	r.forgetLocked(id)
+	r.rebuildAliasesLocked()
 	return short, true
 }
 
-// RegisterPageTarget assigns a short id for a CDP target id without syncing from the browser.
-// Use after Target.createTarget when GetTargets may not yet list the new tab.
+// RegisterPageTarget registers a CDP target id without syncing from the
+// browser and returns its current short id. Use after Target.createTarget when
+// GetTargets may not yet list the new tab. Registering a target that collides
+// with a registered one changes the short id of both (see TabRegistry).
 // It always advances the target's generation, also when the target is already
 // registered, so enumerations already in flight cannot remove it.
 func (r *TabRegistry) RegisterPageTarget(id target.ID) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	short := r.assignShortLocked(id)
+	_, known := r.targetGen[id]
 	r.gen++
 	r.targetGen[id] = r.gen
-	return short
+	if !known {
+		r.rebuildAliasesLocked()
+	}
+	return r.targetToShort[id]
 }
 
 func tabTitle(infos []*target.Info, id target.ID) string {
@@ -197,53 +234,75 @@ type TabSnapshot struct {
 	URL      string
 }
 
-func (r *TabRegistry) removeLocked(id target.ID) {
-	short, ok := r.targetToShort[id]
-	if !ok {
-		return
-	}
-	delete(r.targetToShort, id)
-	delete(r.shortToTarget, short)
+// forgetLocked drops id from the registered set. The caller rebuilds aliases.
+func (r *TabRegistry) forgetLocked(id target.ID) {
 	delete(r.targetGen, id)
-	if r.selected == short {
+	if r.selected == id {
 		r.selected = ""
 	}
 }
 
-// assignShortLocked returns an existing or new short id for target id (caller holds lock).
-func (r *TabRegistry) assignShortLocked(id target.ID) string {
-	if s, ok := r.targetToShort[id]; ok {
-		return s
-	}
+// minAliasDigits is the shortest hex suffix offered as a short id.
+const minAliasDigits = 4
+
+// fullIDAliasPrefix introduces the alias carrying the complete target id. It
+// holds a hex digit and a non-hex rune, so it can equal neither a hex suffix
+// nor the alias of a target id without hex digits: it is unique per target.
+const fullIDAliasPrefix = "id="
+
+// aliasClaims lists every alias id may be addressed by, preferred first.
+func aliasClaims(id target.ID) []string {
 	hexDigits := hexRunes(string(id))
-	if len(hexDigits) == 0 {
-		s := sanitizeShort(string(id))
-		if oid, taken := r.shortToTarget[s]; taken && oid != id {
-			s = string(id)
+	claims := make([]string, 0, max(len(hexDigits)-minAliasDigits+1, 1)+1)
+	switch {
+	case len(hexDigits) >= minAliasDigits:
+		for n := minAliasDigits; n <= len(hexDigits); n++ {
+			claims = append(claims, string(hexDigits[len(hexDigits)-n:]))
 		}
-		r.registerLocked(id, s)
-		return s
-	}
-	for n := 4; n <= len(hexDigits); n++ {
-		cand := string(hexDigits[len(hexDigits)-n:])
-		if oid, taken := r.shortToTarget[cand]; taken && oid != id {
-			continue
+	case len(hexDigits) > 0:
+		claims = append(claims, string(hexDigits))
+	default:
+		if s := sanitizeShort(string(id)); s != "" {
+			claims = append(claims, s)
 		}
-		r.registerLocked(id, cand)
-		return cand
 	}
-	// Extremely unlikely: fall back to full hex digit string.
-	full := string(hexDigits)
-	r.registerLocked(id, full)
-	return full
+	return append(claims, fullIDAliasPrefix+string(id))
 }
 
-// registerLocked records a NEW registration and stamps it with a fresh generation.
-func (r *TabRegistry) registerLocked(id target.ID, short string) {
-	r.targetToShort[id] = short
-	r.shortToTarget[short] = id
-	r.gen++
-	r.targetGen[id] = r.gen
+// rebuildAliasesLocked recomputes both alias maps from the registered set, so
+// the result cannot depend on the order in which targets were registered.
+func (r *TabRegistry) rebuildAliasesLocked() {
+	claims := make(map[target.ID][]string, len(r.targetGen))
+	claimants := make(map[string]int)
+	for id := range r.targetGen {
+		list := aliasClaims(id)
+		claims[id] = list
+		for _, alias := range list {
+			claimants[alias]++
+		}
+	}
+	targetToShort := make(map[target.ID]string, len(claims))
+	aliasToTarget := make(map[string]target.ID, len(claimants))
+	ambiguous := make(map[string]struct{})
+	for alias, n := range claimants {
+		if n > 1 {
+			ambiguous[alias] = struct{}{}
+		}
+	}
+	for id, list := range claims {
+		for _, alias := range list {
+			if claimants[alias] != 1 {
+				continue
+			}
+			aliasToTarget[alias] = id
+			if _, ok := targetToShort[id]; !ok {
+				targetToShort[id] = alias
+			}
+		}
+	}
+	r.targetToShort = targetToShort
+	r.aliasToTarget = aliasToTarget
+	r.ambiguous = ambiguous
 }
 
 func hexRunes(s string) []rune {
@@ -269,7 +328,7 @@ func sanitizeShort(s string) string {
 	return s
 }
 
-// ShortForTarget returns the short id for a CDP target id, if registered.
+// ShortForTarget returns the current short id for a CDP target id, if registered.
 func (r *TabRegistry) ShortForTarget(id target.ID) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -280,36 +339,70 @@ func (r *TabRegistry) ShortForTarget(id target.ID) (string, bool) {
 	return short, ok
 }
 
-// Lookup validates short id and returns the CDP target id (INV-3).
+// Lookup resolves an alias to the one CDP target claiming it (INV-3). Unknown
+// and ambiguous aliases both miss.
 func (r *TabRegistry) Lookup(shortID string) (target.ID, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.lookupLocked(shortID)
+}
+
+// Ambiguous reports whether shortID fails to resolve because several live
+// targets claim it, as opposed to no target claiming it.
+func (r *TabRegistry) Ambiguous(shortID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.ambiguous[strings.TrimSpace(shortID)]
+	return ok
+}
+
+func (r *TabRegistry) lookupLocked(shortID string) (target.ID, bool) {
 	shortID = strings.TrimSpace(shortID)
 	if shortID == "" {
 		return "", false
 	}
-	id, ok := r.shortToTarget[shortID]
+	id, ok := r.aliasToTarget[shortID]
 	return id, ok
 }
 
-// Select marks shortID as the focused tab or returns false if unknown.
+// Select marks the tab addressed by shortID as focused or returns false if the
+// alias is unknown or ambiguous.
 func (r *TabRegistry) Select(shortID string) bool {
+	_, ok := r.SelectAlias(shortID)
+	return ok
+}
+
+// SelectAlias is Select that also reports which target was selected, resolved
+// under the same lock as the selection.
+func (r *TabRegistry) SelectAlias(shortID string) (target.ID, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	shortID = strings.TrimSpace(shortID)
-	if shortID == "" {
+	id, ok := r.lookupLocked(shortID)
+	if !ok || id == "" {
+		return "", false
+	}
+	r.selected = id
+	return id, true
+}
+
+// SelectTarget marks a registered target as focused. The selection is held by
+// target id, so it follows the tab when a collision changes its short id.
+func (r *TabRegistry) SelectTarget(id target.ID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.targetGen[id]; !ok || id == "" {
 		return false
 	}
-	if _, ok := r.shortToTarget[shortID]; !ok {
-		return false
-	}
-	r.selected = shortID
+	r.selected = id
 	return true
 }
 
-// Selected returns the current focus short id, or "".
+// Selected returns the current short id of the focused tab, or "".
 func (r *TabRegistry) Selected() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.selected
+	if r.selected == "" {
+		return ""
+	}
+	return r.targetToShort[r.selected]
 }

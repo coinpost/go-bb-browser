@@ -75,7 +75,7 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 	defer unlock()
 	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: "invalid or stale tab short id", Method: method})
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: s.unknownTabHint(tab), Method: method})
 		return
 	}
 	if sess, ok := conn.(*browser.Session); ok && s.obsSink != nil {

@@ -112,7 +112,16 @@ func TestClosedTabRetriesLeaveNoLockEntries(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || env.Result.Tab == "" {
 			t.Fatalf("tab_new: err %v body %s", err, rec.Body.String())
 		}
-		shorts = append(shorts, env.Result.Tab)
+	}
+	// fakeConn hands out target ids sharing their last 4 hex digits, so each
+	// tab_new changed the short ids of the earlier tabs. Use the current ones.
+	fc := srv.tabHook.(*fakeConn)
+	for _, info := range fc.infos {
+		short, ok := srv.tabs.ShortForTarget(info.TargetID)
+		if !ok {
+			t.Fatalf("target %s not registered", info.TargetID)
+		}
+		shorts = append(shorts, short)
 	}
 	for _, short := range shorts {
 		rec := postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": short}, 2))
