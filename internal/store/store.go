@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -26,7 +27,15 @@ const (
 
 	// maxLogBackups is how many rotated rpc.jsonl.N files are kept for audit.
 	maxLogBackups = 3
+
+	// rpc.jsonl keeps caller-submitted request bodies (fill text, fetch headers,
+	// eval scripts), so the state dir and its log files are owner-only.
+	stateDirPerm os.FileMode = 0o700
+	logFilePerm  os.FileMode = 0o600
 )
+
+// chmodPath is os.Chmod, replaceable in tests to simulate a failing chmod.
+var chmodPath = os.Chmod
 
 // snapshotBody is the placeholder request body written for synthetic tab_new
 // records emitted at rotation time (recovery only needs Action/Tab/Time).
@@ -72,7 +81,10 @@ type LogRecord struct {
 
 // Open initializes rpc.jsonl on disk, or in-memory when cfg.StateDir is "" or
 // "-". A configured StateDir that cannot be created or written returns an error
-// rather than silently falling back to in-memory. The global seq is seeded from
+// rather than silently falling back to in-memory. The state dir, rpc.jsonl and
+// its rotated backups are restricted to the owner (0700 / 0600) before the log
+// is replayed; pre-existing wider modes are tightened, and a failure to do so
+// is an error. The global seq is seeded from
 // the current wall-clock nanosecond so it stays monotonic across restarts
 // (INV-4) without persisting a counter.
 func Open(cfg OpenConfig) (*Store, error) {
@@ -102,14 +114,27 @@ func Open(cfg OpenConfig) (*Store, error) {
 
 	dir = filepath.Clean(dir)
 	logPath := filepath.Join(dir, rpcLogFile)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, stateDirPerm); err != nil {
 		return nil, fmt.Errorf("create state dir %q: %w", dir, err)
+	}
+	if err := tightenPath(dir, stateDirPerm); err != nil {
+		return nil, fmt.Errorf("restrict state dir %q: %w", dir, err)
 	}
 	if !dirWritable(dir) {
 		return nil, fmt.Errorf("state dir %q is not writable", dir)
 	}
+	for k := 1; k <= maxLogBackups; k++ {
+		backup := fmt.Sprintf("%s.%d", logPath, k)
+		fi, err := os.Lstat(backup)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if err := tightenPath(backup, logFilePerm); err != nil {
+			return nil, fmt.Errorf("restrict rpc log backup %q: %w", backup, err)
+		}
+	}
 
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := openPrivateLog(logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR)
 	if err != nil {
 		return nil, fmt.Errorf("open rpc log %q: %w", logPath, err)
 	}
@@ -132,9 +157,51 @@ func Open(cfg OpenConfig) (*Store, error) {
 	return s, nil
 }
 
+// tightenPath removes permission bits outside max from an existing path. Modes
+// already within max are left untouched (never loosened). Windows has no POSIX
+// permission bits, so it is a no-op there.
+func tightenPath(path string, max os.FileMode) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	perm := fi.Mode().Perm()
+	if perm&^max == 0 {
+		return nil
+	}
+	return chmodPath(path, perm&max)
+}
+
+// openPrivateLog opens (or creates) the RPC log owner-only. A pre-existing file
+// keeps its old mode through O_CREATE, so it is tightened on the open handle
+// before anything is read from or written to it.
+func openPrivateLog(path string, flag int) (*os.File, error) {
+	f, err := os.OpenFile(path, flag, logFilePerm)
+	if err != nil {
+		return nil, err
+	}
+	if runtime.GOOS == "windows" {
+		return f, nil
+	}
+	fi, err := f.Stat()
+	if err == nil {
+		if perm := fi.Mode().Perm(); perm&^logFilePerm != 0 {
+			err = f.Chmod(perm & logFilePerm)
+		}
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("restrict permissions: %w", err)
+	}
+	return f, nil
+}
+
 func dirWritable(dir string) bool {
 	testPath := filepath.Join(dir, ".write-test")
-	if err := os.WriteFile(testPath, []byte("1"), 0o644); err != nil {
+	if err := os.WriteFile(testPath, []byte("1"), logFilePerm); err != nil {
 		return false
 	}
 	_ = os.Remove(testPath)
@@ -297,7 +364,7 @@ func (s *Store) rotateLocked() error {
 		_ = os.Rename(s.logPath, fmt.Sprintf("%s.1", s.logPath))
 	}
 
-	f, err := os.OpenFile(s.logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	f, err := openPrivateLog(s.logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR|os.O_TRUNC)
 	if err != nil {
 		return err
 	}
