@@ -30,7 +30,7 @@ func (m *dirtyMarker) MarkTargetDirty() { m.marked.Store(true) }
 func TestInitialTargetEnumerationFailureSchedulesRetry(t *testing.T) {
 	srv := newSupervisorTestServer(t, 3)
 	marker := &dirtyMarker{}
-	if snaps := srv.syncInitialTargets(marker, nil, errors.New("temporary target enumeration failure"), 0); snaps != nil {
+	if snaps := srv.syncInitialTargets(marker, nil, errors.New("temporary target enumeration failure"), srv.tabs.BeginEnumeration()); snaps != nil {
 		t.Fatalf("snapshots = %#v, want nil", snaps)
 	}
 	if !marker.marked.Load() {

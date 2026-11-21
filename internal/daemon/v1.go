@@ -289,7 +289,7 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	snaps, err := s.listAndSyncTabs(ctx, conn)
+	listed, err := s.listAndSyncTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_list targets failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
@@ -298,6 +298,9 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 		})
 		return
 	}
+	// tabs, tab and focus all come from the one registry snapshot the
+	// enumeration produced: a tab opened or selected since is in none of them.
+	snaps := listed.Tabs
 	sort.Slice(snaps, func(i, j int) bool {
 		return snaps[i].ShortID < snaps[j].ShortID
 	})
@@ -309,17 +312,15 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 			URL:   sn.URL,
 		})
 	}
-	focus := s.tabs.Selected()
-	tabField := operationalTabShort(s.tabs, snaps)
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.TabListResult{
-		Tab:   tabField,
+		Tab:   operationalTabShort(listed.Focus, snaps),
 		Seq:   seq,
 		Tabs:  items,
-		Focus: focus,
+		Focus: listed.Focus,
 	})
 }
 
@@ -336,7 +337,7 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	snaps, err := s.listAndSyncTabs(ctx, conn)
+	listed, err := s.listAndSyncTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_focus targets failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
@@ -345,6 +346,7 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		})
 		return
 	}
+	snaps := listed.Tabs
 	if len(snaps) == 0 {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "no focused tab", &protocol.ErrData{
 			Error:  "no page tabs",
@@ -356,39 +358,41 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 	sort.Slice(snaps, func(i, j int) bool {
 		return snaps[i].ShortID < snaps[j].ShortID
 	})
-	s.syncRegistryFocusFromBrowser(ctx, conn, snaps)
-	focus := s.tabs.Selected()
-	tabField := operationalTabShort(s.tabs, snaps)
-	var title, url string
-	for _, sn := range snaps {
-		if sn.ShortID == tabField {
-			title = sn.Title
-			url = sn.URL
-			// The activity belongs to the target this enumeration reported.
-			bindAuditTarget(ctx, sn.TargetID)
-			break
-		}
+	// The probe attaches to pages and takes time. Any of the enumerated tabs
+	// can go away meanwhile and its short id pass to another page, so the answer
+	// is decided afterwards, against the registry as it is then, by full target
+	// id. The response, its title and URL and the audit record all describe the
+	// one tab that decision returns.
+	detected := detectForegroundTarget(ctx, conn, snaps)
+	cur, focus, ok := s.tabs.CommitFocus(snaps, detected)
+	if !ok {
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "no focused tab", &protocol.ErrData{
+			Error:  "tabs changed",
+			Hint:   "the listed tabs were closed while tab_focus was running; retry",
+			Method: protocol.MethodTabFocus,
+		})
+		return
 	}
+	bindAuditTarget(ctx, cur.TargetID)
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.TabFocusResult{
-		Tab:   tabField,
+		Tab:   cur.ShortID,
 		Focus: focus,
-		Title: title,
-		URL:   url,
+		Title: cur.Title,
+		URL:   cur.URL,
 		Seq:   seq,
 	})
 }
 
-// syncRegistryFocusFromBrowser updates TabRegistry selection when the browser
-// has exactly one page with document.visibilityState === "visible" (typical
-// single-window foreground tab after the user switches tabs in Chrome).
-func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn, snaps []state.TabSnapshot) {
-	if conn == nil || len(snaps) == 0 {
-		return
-	}
+// detectForegroundTarget returns the one page among snaps whose
+// document.visibilityState is "visible" (typical single-window foreground tab
+// after the user switches tabs in Chrome), or "" if there is no such single
+// page or the probe is incomplete. It reports the target it looked at; the
+// short id that target had in snaps may belong to another page by now.
+func detectForegroundTarget(ctx context.Context, conn tabConn, snaps []state.TabSnapshot) target.ID {
 	type foregroundDetector interface {
 		DetectForegroundShort(snaps []state.TabSnapshot) (short string, ok bool)
 	}
@@ -403,29 +407,22 @@ func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn,
 		sh, found = d.DetectForegroundShort(snaps)
 	}
 	if !found {
-		return
-	}
-	// Select the target the detector looked at. Its short id may have passed to
-	// another page while the detector ran.
-	for _, sn := range snaps {
-		if sn.ShortID == sh {
-			_, _ = s.tabs.SelectTarget(sn.TargetID)
-			return
-		}
-	}
-}
-
-func operationalTabShort(reg *state.TabRegistry, snaps []state.TabSnapshot) string {
-	if len(snaps) == 0 {
 		return ""
 	}
-	focus := reg.Selected()
-	if focus != "" {
-		for _, sn := range snaps {
-			if sn.ShortID == focus {
-				return focus
-			}
+	for _, sn := range snaps {
+		if sn.ShortID == sh {
+			return sn.TargetID
 		}
+	}
+	return ""
+}
+
+// operationalTabShort is the "tab" of a tab_list result: the focused tab, else
+// the first one. focus and snaps are from the same registry snapshot, so a
+// non-empty focus is one of snaps.
+func operationalTabShort(focus string, snaps []state.TabSnapshot) string {
+	if focus != "" || len(snaps) == 0 {
+		return focus
 	}
 	return snaps[0].ShortID
 }
@@ -459,7 +456,10 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 	}
 	// Bind the target the short id names now. The enumeration below only checks
 	// that this target is still there; a page it discovers under the same short
-	// id is not what the caller asked for.
+	// id is not what the caller asked for. The selection is then committed only
+	// if the short id still names the bound target, checked and set in one
+	// registry critical section: the tab can be closed, and the short id taken
+	// over, while the enumeration is in flight.
 	tid, ok := s.tabs.Lookup(tab)
 	if !ok {
 		unknown()
@@ -473,7 +473,7 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		})
 		return
 	}
-	if _, ok := s.tabs.SelectTarget(tid); !ok {
+	if !s.tabs.SelectAlias(tab, tid) {
 		unknown()
 		return
 	}
@@ -535,7 +535,7 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 	}
 	s.markTabManaged(tid)
 	if !p.Silent {
-		s.tabs.Select(short)
+		s.tabs.SelectTarget(tid)
 	}
 	resp, err := protocol.MarshalResponse(id, protocol.TabNewResult{Tab: short, Seq: seq})
 	if err == nil {

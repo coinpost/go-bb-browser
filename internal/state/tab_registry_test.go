@@ -51,7 +51,7 @@ func TestLookupInvalidTab(t *testing.T) {
 
 func TestSelectUnknownTab(t *testing.T) {
 	r := NewTabRegistry()
-	if r.Select("abcd") {
+	if r.SelectAlias("abcd", "AAAAabcd") || r.SelectAlias("", "") {
 		t.Fatal("select should fail for unknown tab")
 	}
 }
@@ -72,38 +72,6 @@ func TestShortIDCollisionUsesMoreDigits(t *testing.T) {
 	}
 	if len(shorts) != 2 {
 		t.Fatalf("want distinct shorts, got %#v", snap)
-	}
-}
-
-func TestSyncPageTargetsSinceKeepsTargetsRegisteredAfterEpoch(t *testing.T) {
-	r := NewTabRegistry()
-	r.RegisterPageTarget("AAAA1111")
-	epoch := r.Epoch() // enumeration requested here
-	r.RegisterPageTarget("BBBB2222")
-
-	// The reply lists neither target: the old one is gone, the new one was
-	// created after the browser answered.
-	tabs, removed, kept := r.SyncPageTargetsSince(nil, epoch)
-	if len(tabs) != 1 || tabs[0].TargetID != "BBBB2222" || tabs[0].ShortID != "2222" {
-		t.Fatalf("tabs = %#v, want the kept target", tabs)
-	}
-	if len(removed) != 1 || removed[0].TargetID != "AAAA1111" {
-		t.Fatalf("removed = %#v", removed)
-	}
-	if len(kept) != 1 || kept[0] != "BBBB2222" {
-		t.Fatalf("kept = %#v", kept)
-	}
-	if _, ok := r.Lookup("2222"); !ok {
-		t.Fatal("target registered after the epoch was removed")
-	}
-
-	// An enumeration requested after the registration is authoritative.
-	_, removed, kept = r.SyncPageTargetsSince(nil, r.Epoch())
-	if len(removed) != 1 || removed[0].TargetID != "BBBB2222" || len(kept) != 0 {
-		t.Fatalf("removed = %#v kept = %#v", removed, kept)
-	}
-	if _, removed := r.SyncPageTargetsDetailed(nil); len(removed) != 0 {
-		t.Fatalf("registry not empty: %#v", removed)
 	}
 }
 

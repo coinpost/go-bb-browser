@@ -300,7 +300,7 @@ func TestIdleRecoveryRunsOnceOnFirstSuccessfulEnumeration(t *testing.T) {
 	t.Cleanup(func() { _ = srv.closeAudit() })
 
 	marker := &dirtyMarker{}
-	srv.syncInitialTargets(marker, nil, errors.New("temporary target enumeration failure"), 0)
+	srv.syncInitialTargets(marker, nil, errors.New("temporary target enumeration failure"), srv.tabs.BeginEnumeration())
 	drainRPCLog(t, srv)
 	if !marker.marked.Load() {
 		t.Fatal("failed initial enumeration did not schedule a retry")
@@ -343,7 +343,7 @@ func TestIdleRecoverySkipsShortIDReleasedBeforeIt(t *testing.T) {
 
 	fc := &fakeConn{}
 	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
-	srv.syncInitialTargets(&dirtyMarker{}, nil, errors.New("temporary target enumeration failure"), 0)
+	srv.syncInitialTargets(&dirtyMarker{}, nil, errors.New("temporary target enumeration failure"), srv.tabs.BeginEnumeration())
 	srv.tabs.RegisterPageTarget(lifecycleManaged) // Target.targetCreated
 	srv.removeTargetState(lifecycleManaged)       // Target.targetDestroyed
 

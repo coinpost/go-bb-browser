@@ -142,39 +142,47 @@ func (s *Server) logManagedTabGone(tid target.ID, short string) {
 // syncTabsFromTargets applies an enumeration that is known to be current.
 // Request paths that fetch the list themselves use listAndSyncTabs instead.
 func (s *Server) syncTabsFromTargets(infos []*target.Info) []state.TabSnapshot {
-	return s.syncTabsFromTargetsSince(infos, math.MaxUint64)
+	return s.applyEnumeration(infos, nil).Tabs
 }
 
 // listAndSyncTabs enumerates page targets and reconciles daemon state with the
-// reply. Target.getTargets can be answered before a concurrent tab_new's
-// Target.createTarget and applied after it; the registry epoch captured up
-// front keeps such a tab registered and managed instead of treating it as gone.
-func (s *Server) listAndSyncTabs(ctx context.Context, conn tabConn) ([]state.TabSnapshot, error) {
-	epoch := s.tabs.Epoch()
+// reply. The reply can be older than registry changes made while it was in
+// flight (a tab_new, target events); the enumeration token opened up front
+// lets the registry keep those changes instead of undoing them. The token is
+// released on every path: by the apply, or by End on error and cancellation.
+//
+// The result is one registry snapshot: tabs and focus agree with each other.
+func (s *Server) listAndSyncTabs(ctx context.Context, conn tabConn) (state.SyncResult, error) {
+	enum := s.tabs.BeginEnumeration()
+	defer enum.End()
 	targets, err := pageTargets(ctx, conn)
 	if err != nil {
-		return nil, err
+		return state.SyncResult{}, err
 	}
-	return s.syncTabsFromTargetsSince(targets, epoch), nil
+	if s.afterListTargets != nil {
+		s.afterListTargets()
+	}
+	return s.applyEnumeration(targets, enum), nil
 }
 
-// syncTabsFromTargetsSince is the one place an enumeration changes daemon
-// state. Managed tabs are released by full target id, and only those the
-// registry removed for this enumeration; nothing is adopted from rpc.jsonl
-// except by the very first successful enumeration after startup.
-func (s *Server) syncTabsFromTargetsSince(infos []*target.Info, epoch uint64) []state.TabSnapshot {
+// applyEnumeration is the one place an enumeration changes daemon state; enum
+// is its token (nil: the list is current) and is ended here. Managed tabs are
+// released by full target id, and only those the registry removed for this
+// enumeration; nothing is adopted from rpc.jsonl except by the very first
+// successful enumeration after startup.
+func (s *Server) applyEnumeration(infos []*target.Info, enum *state.Enumeration) state.SyncResult {
 	s.lifeMu.Lock()
-	snaps, removed, _ := s.tabs.SyncPageTargetsSince(infos, epoch)
-	for _, tab := range removed {
+	res := s.tabs.Sync(infos, enum)
+	for _, tab := range res.Removed {
 		s.noteTargetGoneLocked(tab.TargetID)
 		s.releaseManagedTabLocked(tab.TargetID, tab.ShortID)
 	}
 	s.recoverIdleFromLogLocked()
 	s.lifeMu.Unlock()
-	for _, tab := range removed {
+	for _, tab := range res.Removed {
 		s.clearTargetResources(tab.TargetID, tab.ShortID)
 	}
-	return snaps
+	return res
 }
 
 // clearTargetResources drops the non-lifecycle state of a removed target.

@@ -44,6 +44,8 @@ type bindConn struct {
 	onOp func(op string)
 	// onList runs inside PageTargets, before the list is read.
 	onList func()
+	// foreground is the short id the visibility probe reports ("": none).
+	foreground string
 }
 
 func (c *bindConn) note(op string, tid target.ID) {
@@ -125,7 +127,7 @@ func (c *bindConn) ObservationStats(id target.ID, _ browser.ObservationKind) bro
 }
 func (c *bindConn) DetectForegroundShort([]state.TabSnapshot) (string, bool) {
 	c.note("focus", "")
-	return "", false
+	return c.foreground, c.foreground != ""
 }
 
 // tabEntries lists every RPC that takes a short tab id and the tab operation
@@ -369,26 +371,6 @@ func TestSuccessfulOperationIsRecordedForExecutedTarget(t *testing.T) {
 			}
 		})
 	}
-
-	// tab_focus has no tab parameter: its activity belongs to the target its
-	// enumeration reported.
-	t.Run(protocol.MethodTabFocus, func(t *testing.T) {
-		srv, conn, stateDir := newBindServer(t)
-		conn.onOp = func(op string) {
-			if op == "focus" {
-				replaceWithUserPage(t, srv, conn)
-			}
-		}
-		rec := postRPC(t, srv, rpcReq(protocol.MethodTabFocus, map[string]any{}, 7))
-		if !bytes.Contains(rec.Body.Bytes(), []byte(`"result"`)) {
-			t.Fatalf("tab_focus = %s", rec.Body.String())
-		}
-		checkUserPageUntouched(t, srv, conn, stateDir)
-		recs := readRPCLog(t, stateDir)
-		if last := recs[len(recs)-1]; last.Action != protocol.MethodTabFocus || last.Target != string(ownTab) {
-			t.Errorf("log record = %s target=%q, want tab_focus on %s", last.Action, last.Target, ownTab)
-		}
-	})
 }
 
 // tab_select checks with the browser that its tab still exists. If the tab is

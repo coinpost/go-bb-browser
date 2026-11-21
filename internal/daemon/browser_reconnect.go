@@ -65,10 +65,11 @@ func (s *Server) connectBrowser(ctx context.Context) error {
 	s.browserLastProbe = time.Now()
 	s.tabMu.Unlock()
 	s.watchCDPSession(sess)
-	// The sync loop registers targets from events while the enumeration below
-	// is in flight. The epoch from before both keeps a target the loop
-	// registered and the (older) reply does not list.
-	epoch := s.tabs.Epoch()
+	// The sync loop applies target events while the enumeration below is in
+	// flight. The token from before both keeps what the loop registered or
+	// removed when the (older) reply says otherwise.
+	enum := s.tabs.BeginEnumeration()
+	defer enum.End()
 	s.bg.Go(func() { s.runTargetSync(ctx, sess) })
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
@@ -79,7 +80,7 @@ func (s *Server) connectBrowser(ctx context.Context) error {
 	// If it failed, the first enumeration that does succeed (runTargetSync's
 	// retry, or an RPC) performs it instead: recovering against an empty
 	// registry would release every persisted managed tab.
-	s.syncInitialTargets(sess, targets, terr, epoch)
+	s.syncInitialTargets(sess, targets, terr, enum)
 	s.bg.Go(func() { s.runCDPWatchdog(ctx, sess) })
 	if s.logger != nil {
 		s.logger.Info("browser CDP session connected", "debugger", s.cfg.DebuggerURL)
@@ -91,12 +92,13 @@ type targetDirtyMarker interface {
 	MarkTargetDirty()
 }
 
-// syncInitialTargets applies the enumeration requested when the registry
-// epoch was epoch.
-func (s *Server) syncInitialTargets(marker targetDirtyMarker, targets []*target.Info, err error, epoch uint64) []state.TabSnapshot {
+// syncInitialTargets applies the reply to enumeration enum, or gives enum up
+// if the enumeration failed.
+func (s *Server) syncInitialTargets(marker targetDirtyMarker, targets []*target.Info, err error, enum *state.Enumeration) []state.TabSnapshot {
 	if err == nil {
-		return s.syncTabsFromTargetsSince(targets, epoch)
+		return s.applyEnumeration(targets, enum).Tabs
 	}
+	enum.End()
 	if s.logger != nil {
 		s.logger.Warn("list targets after browser connect", "err", err)
 	}
@@ -133,7 +135,7 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		if sess.ConsumeTargetDirty() {
 			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
 			// A resync never re-reads rpc.jsonl: once the startup recovery has run,
-			// managed state only changes by full target id (see syncTabsFromTargetsSince).
+			// managed state only changes by full target id (see applyEnumeration).
 			_, err := s.listAndSyncTabs(probe, sess)
 			cancel()
 			if err != nil {

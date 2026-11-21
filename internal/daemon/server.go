@@ -72,10 +72,12 @@ type Server struct {
 	// before the audit queue and the store are closed.
 	bg sync.WaitGroup
 
-	// Test seams: sweeper period (zero derives it from the idle timeout) and a
-	// hook run once an idle close is decided, before its CDP call.
+	// Test seams: sweeper period (zero derives it from the idle timeout), a
+	// hook run once an idle close is decided, before its CDP call, and a hook
+	// run once a target enumeration's reply is in, before it is applied.
 	idleSweepInterval time.Duration
 	beforeIdleClose   func(target.ID)
+	afterListTargets  func()
 
 	// Audit records form one FIFO: auditPending, appended under auditMu, written
 	// in order by whoever holds auditWriteMu (the writer, or an enqueuer once
