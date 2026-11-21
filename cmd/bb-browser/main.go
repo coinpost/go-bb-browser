@@ -39,7 +39,11 @@ func versionString(name string) string {
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// run has already written the [error] diagnostics for an adapter failure.
+		var adapterErr *adapterError
+		if !errors.As(err, &adapterErr) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }
@@ -985,7 +989,6 @@ the command fails with "flag --name needs a value".`),
 			}
 			if jsonOut {
 				fmt.Println(string(b))
-				return rpcEnvelopeError(b)
 			}
 			if err := rpcEnvelopeError(b); err != nil {
 				return err
@@ -996,41 +999,76 @@ the command fails with "flag --name needs a value".`),
 			if err := json.Unmarshal(b, &env); err != nil {
 				return err
 			}
-			printSiteResult(env.Result.Result)
-			return nil
+			var adapterErr *adapterError
+			if jsonOut {
+				// stdout keeps the raw envelope; a JSON-RPC success is still an
+				// adapter failure when the adapter returned { error }.
+				adapterErr = reportAdapterError(env.Result.Result)
+			} else {
+				adapterErr = printSiteResult(env.Result.Result)
+			}
+			if adapterErr == nil {
+				return nil
+			}
+			// Already reported on stderr: keep Cobra from adding "Error: …" and usage.
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return adapterErr
 		},
 	}
 }
 
+// adapterError reports that an adapter ran but returned { error: "…" }.
+// Its diagnostics are already on stderr, so callers must not print it again.
+type adapterError struct{ msg string }
+
+func (e *adapterError) Error() string { return "adapter error: " + e.msg }
+
 var loginHintRe = regexp.MustCompile(`(?i)401|403|unauthorized|forbidden|not\s*logged|login\s*required|sign\s*in|auth`)
 
-func printSiteResult(raw json.RawMessage) {
+// reportAdapterError writes the [error] diagnostics to stderr when the adapter
+// result is an object whose "error" is a non-empty string, and returns nil for
+// every other value.
+func reportAdapterError(raw json.RawMessage) *adapterError {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	errStr, ok := obj["error"].(string)
+	if !ok || errStr == "" {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[error] %s\n", errStr)
+	combined := errStr
+	if h, ok := obj["hint"].(string); ok {
+		combined += " " + h
+		fmt.Fprintf(os.Stderr, "  Hint: %s\n", h)
+	}
+	if loginHintRe.MatchString(combined) {
+		fmt.Fprintln(os.Stderr, "  (Log in to the site in Chrome for this profile, then retry.)")
+	}
+	return &adapterError{msg: errStr}
+}
+
+// printSiteResult pretty-prints the adapter result to stdout, or reports an
+// adapter { error } on stderr and returns it.
+func printSiteResult(raw json.RawMessage) *adapterError {
+	if adapterErr := reportAdapterError(raw); adapterErr != nil {
+		return adapterErr
+	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		fmt.Println(string(raw))
-		return
-	}
-	if obj, ok := v.(map[string]any); ok {
-		if errStr, ok := obj["error"].(string); ok && errStr != "" {
-			fmt.Fprintf(os.Stderr, "[error] %s\n", errStr)
-			combined := errStr
-			if h, ok := obj["hint"].(string); ok {
-				combined += " " + h
-				fmt.Fprintf(os.Stderr, "  Hint: %s\n", h)
-			}
-			if loginHintRe.MatchString(combined) {
-				fmt.Fprintln(os.Stderr, "  (Log in to the site in Chrome for this profile, then retry.)")
-			}
-			return
-		}
+		return nil
 	}
 	// json.Indent preserves \uXXXX from CDP; round-trip through MarshalIndent prints UTF-8.
 	pretty, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		fmt.Println(string(raw))
-		return
+		return nil
 	}
 	fmt.Println(string(pretty))
+	return nil
 }
 
 func pickTabForSite(ctx context.Context, domain string) (string, error) {

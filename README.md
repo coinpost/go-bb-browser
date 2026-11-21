@@ -334,6 +334,7 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 - **首参**：磁盘上的 `.js` 路径（第一个位置参数）；其余为传给脚本的参数。
 - **位置参数**：按出现次序映射到 `@meta.args` 的键，并总是写入 `arg1`、`arg2`…
 - **命名参数**：`--name value` 或 `--name=value` → `args.name`，值原样作为字符串传入。
+- **输出与退出码**：适配器返回值以缩进 JSON 打印到 stdout，退出码 `0`。适配器返回 `error` 为非空字符串的对象（如 `{ error: 'HTTP 401', hint: 'please log in' }`）时视为失败：stderr 打印 `[error] …`（及可选的 `Hint:` 和登录提示），stdout 不输出结果，退出码非 `0`，不打印 usage。`--json` 下 stdout 仍输出完整 JSON-RPC 包络，stderr 与退出码同上——JSON-RPC 成功不代表适配器成功。空字符串或非字符串的 `error` 按普通返回值处理。
 
 ```bash
 bb-browser run ./x.js hello --count 20        # args = { query: "hello", arg1: "hello", count: "20" }

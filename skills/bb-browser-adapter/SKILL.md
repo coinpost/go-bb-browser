@@ -186,6 +186,8 @@ CLI 会打印 `[error] …` 并在 `error/hint` 文本匹配 `401|403|unauthoriz
 
 所以：**401/403 请老老实实返回 `{ error: 'HTTP 401', hint: 'please log in' }`**，别把它当成空数据；登录提示才会触发。
 
+返回 `error` 为**非空字符串**的对象时，`bb-browser run` 以**非 0 退出码**结束（stdout 不输出结果；`--json` 下 stdout 仍是完整 RPC 包络，stderr 与退出码相同），脚本和上层 agent 可以直接用退出码判断失败。空字符串或非字符串的 `error` 不算失败，会按普通返回值打印并以 0 退出。
+
 ## 三层复杂度（按需升级，不要跳级）
 
 ### Tier 1 —— Cookie-only（1 分钟级）
