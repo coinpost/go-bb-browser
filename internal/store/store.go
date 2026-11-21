@@ -53,7 +53,6 @@ type Store struct {
 	maxLogBytes int64
 	seq         atomic.Uint64
 	managed     map[string]time.Time
-	memLogs     []LogRecord
 	logger      *slog.Logger
 	inMemory    bool
 }
@@ -228,6 +227,8 @@ func (s *Store) NextSeq() (uint64, error) {
 }
 
 // AppendRPC appends one RPC log line and updates in-memory managed-tab state.
+// In-memory mode validates the record and updates managed-tab state the same
+// way, but discards the line instead of retaining it.
 func (s *Store) AppendRPC(rec LogRecord) error {
 	if s == nil {
 		return fmt.Errorf("store not initialized")
@@ -257,7 +258,8 @@ func (s *Store) AppendRPC(rec LogRecord) error {
 	applyManagedUpdate(s.managed, rec)
 
 	if s.inMemory {
-		s.memLogs = append(s.memLogs, rec)
+		// No history is kept: nothing reads it, and retaining every record
+		// (and its body) would grow without bound under long-running RPC.
 		return nil
 	}
 	if s.logFile == nil {
