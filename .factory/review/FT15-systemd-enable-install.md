@@ -1,3 +1,7 @@
+---
+branch: factory/FT15-systemd-enable-install
+round: 1
+---
 # [P2] systemd unit 没有 [Install] 段，文档里的 `systemctl --user enable` 与开机自启不生效
 
 ## factory · 2026-11-22 01:11
@@ -22,3 +26,24 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 证据：static-deploy-docs.log（grep 显示 unit 仅有 [Service]）。均位于报告同目录。
 
 执行配置完整 gofmt/vet/race 测试；把对应正确行为断言转换为永久回归，修复前失败、修复后通过。不可把预期诊断 FAIL 当作现有测试失败，也不可把诊断 PASS 当作安全通过。真实 Chrome / Docker / systemd 未验部分必须如实记录。不得使用 headless Chrome；需要真实 Chrome 时仅使用隔离的非 headless 测试实例，不操作用户窗口。
+
+
+## factory · plan · 2026-11-22 05:20
+Behaviour：补齐用户 unit 的 [Unit] Description 及 [Install] WantedBy=default.target，使首次 enable 建立正确用户 target 链接；既有安装重新复制并 enable。保留 Service 与外部 Chrome 管理方式。静态检查拒绝读取错误、空文件、注释、错误 section 或错误目标。
+
+Scope：仅 unit、相邻永久 Go 回归与既有安装更新说明；不改运行时代码、hardening、其他审查项或依赖。
+
+Decisions：使用用户级 default.target；不增加 network-online.target 依赖；按 section 检查实际赋值，不引入 INI 库。WantedBy 必须恰为 default.target，有意扩展需同步更新回归。
+
+Checking：先加测试确认原 unit 失败，再修复变绿；运行完整 gofmt/vet/race。可用隔离 Linux 环境才检查真实 systemd enable/verify，不触碰用户服务。
+
+## factory · 2026-11-22 05:20
+构建完成：ebc11695a09150ce083f813b4944484cd8dae305。新增 [Unit] Description 和 [Install] WantedBy=default.target；Service 未改。新增读取真实 unit 的 Go 永久回归及 19 个无效配置反例；README 提醒旧安装重新复制与 enable。
+
+红绿证据：修复前 TestUnitIsEnableable 因 missing [Install] section 失败；修复后通过。
+
+完整测试：`test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过，经理独立复验通过（离线使用现有模块缓存）。经理首轮复验误指向空缓存而无法解析模块，改用本次已恢复的隔离缓存后通过，并非代码测试失败。
+
+安装：无额外安装；使用已有 Go 1.27.4，已锁定模块从本机缓存恢复。测试 HOME、缓存和临时文件均隔离在本 run TMPDIR 内。
+
+未验证：macOS 无 systemd 且无可用隔离 Linux，未实测 systemd-analyze、enable/is-enabled、linger 与重启；本次不涉及 UI，未运行真实 Chrome 或 Docker。请 review 关注 unit 安装语义及静态回归范围。new/ → review/，round 1。
