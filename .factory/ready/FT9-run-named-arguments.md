@@ -61,3 +61,22 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 推送说明：第一次代码推送的 credential helper 因未携 repository path 被拒；仅命令级添加 credential.useHttpPath=true 后重试成功，未修改用户 git 设置。
 
 状态：代码分支已推送；new/ → review/，第1/3轮。本次仅 build，未 review、未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 04:31
+head: 8004cbd723455c73fd843f07ac0f9c5be43f4468
+verdict: pass
+notes:
+- [P2] cmd/bb-browser/main.go:954: run 前的未知根选项被当作 adapter 参数；`bb-browser --tba intended run x.js` 原本拒绝，现在会在焦点 tab 执行脚本。建议在根分派时校验 run 前的选项。
+- [P2] cmd/bb-browser/run_args.go:73: 需值全局选项会吞掉裸 `--`；`run x.js --tab -- --count 20 --tab inside` 实际在 inside 执行，而非将分隔符后的 tab 传给 adapter。建议对分隔符前的 --tab 报缺值并调整现有单测。
+- [P2] cmd/bb-browser/run_args.go:50: `run x.js -h=true --tab t1` 原本只显示帮助，现在在 t1 执行脚本。建议恢复 pflag 对 -h=<bool> 的解析。
+- [P2] cmd/bb-browser/run_args.go:55: `run -- --x.js hello` 不再支持以 -- 开头的脚本路径。建议尚无路径时原样接收分隔符后的首个 token。
+- [P3] cmd/bb-browser/run_args.go:86: `run x.js --help -- --count` 被 adapter 缺值校验拦截，原本帮助退出0。建议确定帮助后跳过 adapter 参数校验。
+- [P3] cmd/bb-browser/run_args.go:64: 第二个裸 -- 从原本忽略改为错误；`run x.js -- -- --count 20` 不再成功。建议兼容原行为并补回归。
+- [P3] cmd/bb-browser/main.go:954: Cobra __complete 中 `run --h` 丢失 --help 候选，而 `run x.js -- --j` 错误提示 --json。建议补全遵循同一分隔边界。
+
+Codex 只读审查 origin/main...HEAD；未发现 P0/P1，按规则 review/ → ready/。以上 P2/P3 不阻断，但 owner 应查看错误执行目标、帮助及分隔符兼容性风险。无 review-code skill，使用 diff 和基线/HEAD 双版本 CLI 对照。无需冲突解决，代码未修改、未提交。
+
+验收：两种 --count 写法在基线新增回归失败、HEAD 通过；fake daemon 捕获 count 为字符串20；缺值在 HTTP 请求前报 flag --count needs a value。配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过（Go 1.27.4，8包通过、2包无测试）；git diff --check 通过，manager 确认工作树干净、head 未变。
+
+安装：无新增工具/依赖，manifest 未变。临时 HOME、缓存、复现产物位于本次 run tmp 并清理。未验证真实 Chrome/CDP、真实 daemon 端到端、Docker、systemd；补全仅验证 __complete 接口，未做交互 shell 按键测试。无 linked issue/PR，无需 GitHub 评论。本次未合并 main、未发布。
