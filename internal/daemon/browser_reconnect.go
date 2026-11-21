@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/chromedp/cdproto/target"
@@ -30,6 +29,10 @@ const (
 
 // isCDPSessionLost reports errors that mean the browser CDP websocket/session is gone.
 // context.Canceled is excluded — that is usually request shutdown, not CDP loss.
+//
+// browser.ErrorKindOf is the single authority: it trusts typed errors (CDPError,
+// JS exceptions, protocol replies) before any message text. Do not match on
+// err.Error() here — page-controlled text reaches this error chain.
 func isCDPSessionLost(err error) bool {
 	if err == nil {
 		return false
@@ -40,22 +43,7 @@ func isCDPSessionLost(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if browser.ErrorKindOf(err) == browser.ErrorTransport {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "eof"),
-		strings.Contains(msg, "broken pipe"),
-		strings.Contains(msg, "connection reset"),
-		strings.Contains(msg, "use of closed network connection"),
-		strings.Contains(msg, "websocket"),
-		strings.Contains(msg, "channel closed"),
-		strings.Contains(msg, "could not dial"):
-		return true
-	default:
-		return false
-	}
+	return browser.ErrorKindOf(err) == browser.ErrorTransport
 }
 
 // connectBrowserLocked attaches a new chromedp session. Caller must hold s.tabMu.

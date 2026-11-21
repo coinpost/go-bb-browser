@@ -141,7 +141,7 @@ func (s *Session) SnapshotContext(ctx context.Context, tabID target.ID, opts Sna
 	}
 	tabCtx, err := s.tabChromeCtxContext(ctx, tabID)
 	if err != nil {
-		return "", "", "", nil, err
+		return "", "", "", nil, wrapCDPError("Runtime.evaluate", tabID, err)
 	}
 	optMap := map[string]any{
 		"interactiveOnly": opts.InteractiveOnly,
@@ -160,7 +160,7 @@ func (s *Session) SnapshotContext(ctx context.Context, tabID target.ID, opts Sna
 	var raw []byte
 	err = runCDPWithContext(tabCtx, ctx, chromedp.Evaluate(expr, &raw))
 	if err != nil {
-		return "", "", "", nil, err
+		return "", "", "", nil, wrapCDPError("Runtime.evaluate", tabID, err)
 	}
 	var p snapshotPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
