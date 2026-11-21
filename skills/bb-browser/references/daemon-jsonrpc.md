@@ -9,6 +9,8 @@
 
 CLI `--api-token` / `BB_BROWSER_API_TOKEN` 发送单个 `Authorization: Bearer <token>`（标志优先）。daemon 的可重复 `--api-token`、逗号分隔 `BB_BROWSER_API_TOKEN`、`--api-token-file` / `BB_BROWSER_API_TOKEN_FILE` 合并为白名单，去首尾空白、空项和重复项；文件一行一个，忽略空行与 `#` 注释行。白名单为空则不鉴权；更改需重启。鉴权失败是标准 **HTTP 401**，纯文本正文 `unauthorized\n`，并带 `WWW-Authenticate: Bearer`，不是 JSON-RPC envelope；失败请求不读正文、不执行 RPC、不写 audit。`/live`、`/ready`、`/health` 免 token，日志和错误信息不得输出 token。可选 `--api-token-allow-loopback` / `BB_BROWSER_API_TOKEN_ALLOW_LOOPBACK`（默认关闭）让真实回环对端且不带任何代理头的 `POST /v1` 免 token，部署限制见 README。
 
+**短 tab id**：`tab` 是 CDP target id 十六进制位的后缀（≥4 位），返回值取当前最短且无歧义的一个。两个打开的 tab 末 4 位相同时，该 4 位 id 报 `unknown tab id`（`data.hint` 含 `ambiguous`），不会指向另一个 tab；此时重新 `tab_list` 取更长的 id。tab 关闭后其短 id 可能被新 tab 复用。
+
 ## 已实现方法（节选）
 
 | method | params 要点 | result 要点 |

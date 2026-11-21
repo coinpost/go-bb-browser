@@ -111,7 +111,15 @@ bb-daemon --debugger-url 127.0.0.1:9222 --api-token-file /path/to/api-tokens --a
 bb-browser tab list
 ```
 
-**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl` 求出这些 tab 的最后活跃时间来恢复 idle 跟踪（短 tab id 由 CDP target id 确定性派生，跨重启稳定）。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 最后活跃时间），因此恢复只需读当前文件即可保持完整。
+**短 tab id 契约**：短 id 是 CDP target id 的别名，由**当前存活的 tab 集合**唯一决定，与登记顺序、是否重启无关。
+
+- 每个 tab 可用其 target id 十六进制位（小写）的任意 **≥4 位后缀**寻址；`tab_new` / `tab_list` / `tab_focus` 返回其中**最短且无歧义**的一个，没有其他 tab 共享末 4 位时就是 4 位。
+- 一个别名只有在**恰好一个**存活 tab 拥有它时才能解析。两个 tab 末 4 位相同时，这个 4 位 id 对双方都是硬错误（`unknown tab id`，`hint` 说明是歧义），不会落到“先登记”的那个 tab 上；双方改用更长的 id（`tab_list` 可查）。碰撞一方关闭后，4 位 id 恢复可用，碰撞期间发出的更长 id 继续有效。
+- 因此**已发出的 4 位 id 可能因为之后出现的碰撞而失效**（报错，而不是指向别的 tab）；调用方遇到歧义错误时应重新 `tab_list`。
+- tab 关闭即释放其所有别名，之后的新 tab 可以合法地得到同一个短 id。需要跨 tab 生命周期或跨重启识别 tab 的地方（`rpc.jsonl`、idle 恢复）一律使用完整 target id。
+- 极端情形（target id 的十六进制位不足 4 位，或两个 id 的十六进制位完全相同）下，无法区分的 tab 以 `id=<完整 target id>` 作为短 id。
+
+**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl` 求出这些 tab 的最后活跃时间来恢复 idle 跟踪。每条日志除短 id（`tab`）外还记录处理请求时解析到的**完整 CDP target id**（`target`），恢复只按完整 target id 与当前存在的 tab 比对，不经过短 id；没有 `target` 字段的旧版日志记录不会恢复受管资格（升级后首次重启，升级前创建的 tab 不再被自动 idle 关闭）。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 完整 target id + 最后活跃时间），因此恢复只需读当前文件即可保持完整。
 
 **Docker Compose 示例**（需挂载 volume 才能跨容器重建保留 state）：
 
