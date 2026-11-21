@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-2 at your gates | 12 with the agent | 8 done
-Drawn Nov 22, 07:03 | https://github.com/coinpost/go-bb-browser
+3 at your gates | 11 with the agent | 8 done
+Drawn Nov 22, 07:06 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     7h  生命周期事件溢出重同步与优雅关停次序
@@ -27,31 +27,32 @@ NEW (10)                                    avg stay 4h
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
     FT13    1h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon
-    FT28   20m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+    FT28   23m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容
 
-REVIEW (2)                                  avg stay 16m
-    FT20   22m  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
-                其他用户可读取 fill 文本与 fetch 头中的凭据
-    FT21    1m  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
+REVIEW (1)                                  avg stay 17m
+    FT21    3m  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
                 向另一个 tab
 
-READY (2) [!]                               avg stay 1h
-  * FT18   32m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
+READY (3) [!]                               avg stay 1h
+  * FT18   35m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
                 该行及其后的全部记录截断丢弃
                 > Check, then ship
-  * FT19   18m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
+  * FT19   22m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
+                > Check, then ship
+  * FT20    1m  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
+                其他用户可读取 fill 文本与 fetch 头中的凭据
                 > Check, then ship
 
 DONE (8)
-    FT17   30m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
+    FT17   33m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
-    FT16   51m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
+    FT16   54m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
                 写，daemon 启动即退出
-    FT11   54m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
+    FT11   57m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
                 建的受管 tab 从注册表和空闲跟踪中删除
-    FT12   54m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
+    FT12   57m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
                 能命中上一次快照遗留的其它元素
     ... 4 more in .factory/done/
 
