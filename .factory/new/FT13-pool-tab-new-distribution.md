@@ -61,3 +61,17 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：真实 Chrome/CDP、Docker、systemd 均未验证，未启动浏览器或改变用户窗口，无 UI 改动。并发故障测试仅断言成功及健康节点均有分配，不保证并发分布差值≤1；严格均摊验收覆盖顺序调用，review 注意并发与在途负载的边界。
 
 状态：分支已推送，new/ → review/，第1轮；仅 build，未执行独立 review、未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 05:16
+head: 3c2485527155c3ac81f141a4307c939b3e13e7a6
+verdict: fix
+fix:
+- [P1] pkg/daemonclient/pool.go:295: failover 成功后按 skipped 追加推进共享 createRR，会越过另一并发请求尚未使用的健康后端，导致健康后端持续饥饿。三个本地 httptest 后端中，A 在后端0等待503，B在后端1成功后再释放A；A重试后端1成功并将游标从2推进到3，后续每对请求重复该顺序。连续10对在 HEAD（含 -race）分布为 [0,20,0]，基线同一复现为 [0,14,6]。修正并发故障转移的轮次预留/推进，保留最低在途优先、单请求后端去重和无锁HTTP，并将此交错转换为永久回归，验证健康后端计数差≤1。
+notes:
+- Codex 独立只读审查 origin/main...HEAD；无文件修改、无提交。与 origin/main 合并检查无冲突。
+- 配置命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 退出0；两种入口的串行探活分布、逐后端503、恢复及既有均摊测试均通过。上述新并发诊断复现了 P1，不能因现有全量测试通过而放行。
+- 本项回归是新增 skipped 推进在并发时将不均衡扩大为健康后端完全饥饿，并非要求修复所有既有在途负载偏向。修复时保留串行故障均摊验收。
+- 安装：无；使用已有 Go 1.27.4，无清单或锁文件变更。测试 HOME、缓存及临时文件均隔离在本 run tmp，使用本地 httptest。
+- 未检查：真实 Chrome/CDP、Docker、systemd；未启动浏览器或操作用户窗口。无UI改动。
+- 状态：第1/3轮，review/ → new/，下一轮修复以上 P1；未合并 main、未发布。
