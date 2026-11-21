@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -766,8 +765,7 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
-		ref = strings.TrimPrefix(ref, "@")
-		sel = fmt.Sprintf(`[__bb_snap_ref="%s"]`, strings.ReplaceAll(ref, `"`, `\"`))
+		sel = browser.SnapshotRefSelector(ref)
 	}
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -1188,8 +1186,7 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
-		ref = strings.TrimPrefix(ref, "@")
-		sel = fmt.Sprintf(`[__bb_snap_ref="%s"]`, strings.ReplaceAll(ref, `"`, `\"`))
+		sel = browser.SnapshotRefSelector(ref)
 	}
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{

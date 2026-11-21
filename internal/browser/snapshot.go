@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
@@ -130,6 +131,34 @@ type snapshotPayload struct {
 	Refs  map[string]string `json:"refs"`
 }
 
+// SnapshotRefAttr is the DOM attribute snapshot uses to mark referenced nodes.
+const SnapshotRefAttr = "__bb_snap_ref"
+
+// SnapshotRefSelector expands a snapshot ref ("12" or "@12") into the CSS
+// selector that click / fill resolve it with. It is the same selector the
+// snapshot result reports in refs.
+func SnapshotRefSelector(ref string) string {
+	ref = strings.TrimPrefix(strings.TrimSpace(ref), "@")
+	return fmt.Sprintf(`[%s="%s"]`, SnapshotRefAttr, strings.ReplaceAll(ref, `"`, `\"`))
+}
+
+// snapshotExpr builds the JavaScript expression evaluated in the page.
+func snapshotExpr(opts SnapshotOpts) (string, error) {
+	optMap := map[string]any{
+		"interactiveOnly": opts.InteractiveOnly,
+		"pruneEmpty":      opts.PruneEmpty,
+		"selectorScope":   opts.SelectorScope,
+	}
+	if opts.MaxDepth > 0 {
+		optMap["maxDepth"] = opts.MaxDepth
+	}
+	optJSON, err := json.Marshal(optMap)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(snapshotStub, string(optJSON)), nil
+}
+
 // Snapshot captures a compact tree snapshot and assigns __bb_snap_ref attributes for selectors.
 func (s *Session) Snapshot(tabID target.ID, opts SnapshotOpts) (title, url, text string, refs map[string]string, err error) {
 	return s.SnapshotContext(context.Background(), tabID, opts)
@@ -143,19 +172,10 @@ func (s *Session) SnapshotContext(ctx context.Context, tabID target.ID, opts Sna
 	if err != nil {
 		return "", "", "", nil, err
 	}
-	optMap := map[string]any{
-		"interactiveOnly": opts.InteractiveOnly,
-		"pruneEmpty":      opts.PruneEmpty,
-		"selectorScope":   opts.SelectorScope,
-	}
-	if opts.MaxDepth > 0 {
-		optMap["maxDepth"] = opts.MaxDepth
-	}
-	optJSON, err := json.Marshal(optMap)
+	expr, err := snapshotExpr(opts)
 	if err != nil {
 		return "", "", "", nil, err
 	}
-	expr := fmt.Sprintf(snapshotStub, string(optJSON))
 
 	var raw []byte
 	err = runCDPWithContext(tabCtx, ctx, chromedp.Evaluate(expr, &raw))
