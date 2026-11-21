@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
 4 at your gates | 17 with the agent | 0 done
-Drawn Nov 22, 05:17 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 22, 05:21 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     5h  生命周期事件溢出重同步与优雅关停次序
@@ -10,9 +10,7 @@ BACKLOG (5)                                 never built
     FT5     5h  快照ref作用域与脱离节点清理
     FT6     5h  run帮助布尔参数与选项终止符兼容
 
-NEW (16)                                    avg stay 3h
-    FT15    4h  [P2] systemd unit 没有 [Install] 段，文档里的 `systemctl --user
-                enable` 与开机自启不生效
+NEW (15)                                    avg stay 3h
     FT16    4h  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
                 写，daemon 启动即退出
     FT17    4h  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
@@ -39,23 +37,25 @@ NEW (16)                                    avg stay 3h
     FT7     3h  target释放与观测writer退役同步
     FT10    1h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
-    FT13    1m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13    4m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon
 
-REVIEW (1)                                  avg stay 11m
-    FT14    8m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
+REVIEW (2)                                  avg stay 11m
+    FT14   12m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
+    FT15    1m  [P2] systemd unit 没有 [Install] 段，文档里的 `systemctl --user
+                enable` 与开机自启不生效
 
 READY (4) [!]
   * FT8     1h  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
                 断开并整体退出
                 > Check, then ship
-  * FT11   59m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
+  * FT11    1h  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
                 建的受管 tab 从注册表和空闲跟踪中删除
                 > Check, then ship
-  * FT9    45m  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
+  * FT9    49m  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
                 flag 拒绝，文档化的命名参数形式全部不可用
                 > Check, then ship
-  * FT12    9m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
+  * FT12   13m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
                 能命中上一次快照遗留的其它元素
                 > Check, then ship
 
