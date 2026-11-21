@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
 1 at your gates | 12 with the agent | 8 done
-Drawn Nov 22, 06:32 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 22, 06:40 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     7h  生命周期事件溢出重同步与优雅关停次序
@@ -10,9 +10,7 @@ BACKLOG (5)                                 never built
     FT5     7h  快照ref作用域与脱离节点清理
     FT6     7h  run帮助布尔参数与选项终止符兼容
 
-NEW (11)                                    avg stay 4h
-    FT20    5h  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
-                其他用户可读取 fill 文本与 fetch 头中的凭据
+NEW (10)                                    avg stay 4h
     FT21    5h  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
                 向另一个 tab
     FT22    5h  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
@@ -26,29 +24,31 @@ NEW (11)                                    avg stay 4h
                 消失的 tab 永久留在映射中
     FT27    5h  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
-    FT7     4h  target释放与观测writer退役同步
+    FT7     5h  target释放与观测writer退役同步
     FT10    2h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
     FT13    1h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon
 
-REVIEW (1)                                  avg stay 16m
-    FT19   11m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
+REVIEW (2)                                  avg stay 16m
+    FT19   19m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
+    FT20    1m  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
+                其他用户可读取 fill 文本与 fetch 头中的凭据
 
 READY (1) [!]                               avg stay 1h
-  * FT18    2m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
+  * FT18   10m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
                 该行及其后的全部记录截断丢弃
                 > Check, then ship
 
 DONE (8)
-    FT17    1m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
+    FT17    7m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
-    FT16   21m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
+    FT16   29m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
                 写，daemon 启动即退出
-    FT11   24m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
+    FT11   31m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
                 建的受管 tab 从注册表和空闲跟踪中删除
-    FT12   24m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
+    FT12   31m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
                 能命中上一次快照遗留的其它元素
     ... 4 more in .factory/done/
 
