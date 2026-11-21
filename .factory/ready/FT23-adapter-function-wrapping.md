@@ -58,3 +58,19 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：真实非 headless Chrome/CDP 页面执行、Docker、systemd 未实测；没有 UI 变更。包装结果只在本地 Node/V8 中验证。执行偏差：coder 首次运行环境脚本未生效，用过真实 HOME Go 缓存和系统默认临时目录；其报告称测试临时文件已自动清理，未手动删除 /tmp。后续失败证据及全部验证都使用隔离 HOME/TMPDIR。
 
 状态：分支已推送，new/ → review/，第 1 轮。仅 build，未 review、未合并 main、未部署。
+
+
+## factory · review · 2026-11-22 07:44
+head: 65ea3e1637fef14f0f49334dcf0eb8e167b6f844
+verdict: pass
+notes:
+- [P2] internal/site/run.go:45: 调用被追加到整份源码末尾，函数后 `; return;` 会使 adapter 不执行而成功返回 undefined，尾部 await fetch 则先于 adapter 执行；基线行为不同。建议保留函数声明边界及原调用顺序，补充尾部可执行语句回归。
+- [P2] internal/site/run.go:21: const 赋值改变函数后的语法边界：换行 `.bind(null, replacement)` 从基线 SyntaxError 变为可执行并替换参数；同一行紧接 function helper 声明从合法变为 SyntaxError。建议保留声明语法边界，分别加入回归。
+- [P2] internal/site/run.go:40: export default 和 async 之间有块注释或行注释时，旧实现正常，新实现 SyntaxError。应在剥除 export default 后继续跳过并保留注释。
+- [P3] internal/site/run.go:56: 前导扫描只识别四种 ASCII 空白且行注释只找 LF，UTF-8 BOM 及 CR 结束的前导行注释从正常变为 SyntaxError；应按 ECMAScript 空白/行终止符识别。
+
+审查：Codex 对 origin/main@4f86c1c588facd643e4596a40643b88a69061982...HEAD 完成代码审查；以上兼容性问题均以基线与 HEAD 的真实 RunScript 输出在本地 Node 离线对照复现。无 P0/P1，依 factory 规则判定 pass，review/ → ready/；P2/P3 不阻断，但建议 owner 在 ship 前查看这些兼容性边界。coder 建议修复后合并，不等同于本流程的 P0/P1 阻断判定。
+
+测试：`test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0，10 个包通过、2 个无测试；`go test -count=1 -v ./internal/site -run '^TestRunScript'` 通过且无 skip，含实际 node --check、stub fetch 返回值/参数/调用次数断言。git diff --check 通过，工作区干净，保护路径无变更；与当前 main 可干净合并。review 未改代码、未提交代码、未推送代码分支。
+
+安装：无，使用已有 Go 1.27.4、Node v26.4.0。所有本轮测试临时 HOME、缓存与复现文件位于本轮隔离临时目录。未检查：真实 Chrome/CDP、Docker、systemd；无 UI 变更。无 linked issue/PR，未发 GitHub 评论。仅完成审查，未合并 main、未部署。
