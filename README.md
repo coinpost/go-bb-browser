@@ -140,7 +140,13 @@ volumes:
   bb-state:
 ```
 
-镜像内默认用户为 `nonroot`（uid 65532）；bind mount 时需确保目录可写，或使用 named volume。
+镜像内默认用户为 `nonroot`（uid/gid 65532），并预置了归该用户所有的 `/var/lib/bb-daemon`。**全新的空 named volume** 首次挂载到该路径时由 Docker 复制镜像目录的属主，开箱可写。以下情况不会自动修正，daemon 会以 `state dir … is not writable` 退出：
+
+- **已有卷**：用旧镜像（未预置该目录）创建过的卷是 root 属主，或卷内已有内容；
+- **bind mount**：属主取决于宿主机目录；
+- **`volume.nocopy: true`**，或挂载到 `/var/lib/bb-daemon` 以外的镜像内不存在的路径。
+
+这些情况请原地校正属主而不是删卷（需要时先备份）：named volume 用 `docker run --rm -v bb-state:/state busybox chown -R 65532:65532 /state`，bind mount 在宿主机执行 `chown -R 65532:65532 <目录>`。镜像不以 root 启动，也不在运行时 chown。
 
 **HTTP API 摘要**：`GET /live` 是纯 HTTP liveness，不访问 CDP；`GET /ready` 读取 supervisor 缓存，`suspect` / `failed` 返回 503；兼容的 `GET /health` 在 `ready` / `suspect` 返回 connected/200，仅 confirmed failed 返回 disconnected/503。进程存活探针使用 `/live`，接流量前使用 `/ready`。`POST /v1` 体为 JSON-RPC：`jsonrpc`、`method`、`params`、`id`。成功时 `result`；失败时 `error`（`code`、`message`、可选 `data`）。业务成功响应在适用处带 **`tab`** 与 **`seq`**；网络/控制台/错误等观测类结果带 **`cursor`** / **`events`** 等。非 POST 访问 `/v1` 返回 **405**。
 

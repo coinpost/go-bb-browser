@@ -22,6 +22,15 @@ services:
     ports:
       - "8787:8787"
     volumes:
+      # The image ships /var/lib/bb-daemon owned by nonroot (uid/gid 65532).
+      # Docker copies that ownership into a *fresh, empty* named volume on first
+      # use, so this works out of the box. It is NOT applied to a volume that
+      # already has content or was first created by an older image (root-owned),
+      # to bind mounts, or with `volume.nocopy: true`. In those cases the daemon
+      # exits with "state dir ... is not writable": fix ownership in place, e.g.
+      #   docker run --rm -v bb-state:/state busybox chown -R 65532:65532 /state
+      # (bind mount: chown -R 65532:65532 <host-dir>). Back up first if needed;
+      # do not delete the volume just to get past the error.
       - bb-state:/var/lib/bb-daemon
     # The supplied distroless image has no shell/curl. Configure the hosting
     # platform's HTTP liveness probe as GET /live and readiness as GET /ready.
