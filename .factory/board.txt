@@ -1,16 +1,16 @@
 go-bb-browser - factory board
 =============================
 2 at your gates | 19 with the agent | 0 done
-Drawn Nov 22, 04:17 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 22, 04:24 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
-    FT2     4h  生命周期事件溢出重同步与优雅关停次序
-    FT3     4h  创建在途关停收尾与唯一释放记账
-    FT4     4h  日志尾行、轮转恢复与安全可写探测
-    FT5     4h  快照ref作用域与脱离节点清理
-    FT6     4h  run帮助布尔参数与选项终止符兼容
+    FT2     5h  生命周期事件溢出重同步与优雅关停次序
+    FT3     5h  创建在途关停收尾与唯一释放记账
+    FT4     5h  日志尾行、轮转恢复与安全可写探测
+    FT5     5h  快照ref作用域与脱离节点清理
+    FT6     5h  run帮助布尔参数与选项终止符兼容
 
-NEW (19)                                    avg stay 2h
+NEW (18)                                    avg stay 2h
     FT12    3h  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
                 能命中上一次快照遗留的其它元素
     FT13    3h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
@@ -41,20 +41,19 @@ NEW (19)                                    avg stay 2h
                 消失的 tab 永久留在映射中
     FT27    3h  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
-    FT9     3h  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
-                flag 拒绝，文档化的命名参数形式全部不可用
     FT7     2h  target释放与观测writer退役同步
-    FT10    9m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+    FT10   15m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
 
-REVIEW (0)                                  avg stay 6m
-    Nothing here
+REVIEW (1)                                  avg stay 6m
+    FT9     1m  [P1] `bb-browser run SCRIPT.js --name value` 被 cobra 当作未知
+                flag 拒绝，文档化的命名参数形式全部不可用
 
 READY (2) [!]
-  * FT8    32m  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
+  * FT8    39m  [P1] 页面 JS 异常文本含 websocket/eof 等字样时 daemon 误判 CDP
                 断开并整体退出
                 > Check, then ship
-  * FT11    1m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
+  * FT11    6m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
                 建的受管 tab 从注册表和空闲跟踪中删除
                 > Check, then ship
 
