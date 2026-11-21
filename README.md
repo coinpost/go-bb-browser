@@ -111,7 +111,13 @@ bb-daemon --debugger-url 127.0.0.1:9222 --api-token-file /path/to/api-tokens --a
 bb-browser tab list
 ```
 
-**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl` 求出这些 tab 的最后活跃时间来恢复 idle 跟踪（短 tab id 由 CDP target id 确定性派生，跨重启稳定）。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 最后活跃时间），因此恢复只需读当前文件即可保持完整。
+**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`（audit 行，异步写入；成功且已解析到 tab 的行带完整 CDP target id 字段 `target`）；idle 状态维护在内存。
+
+**受管 tab 的持久化生命周期**：哪些 tab 属于 daemon（managed 集合）只由两种同步写入的生命周期记录决定，二者都携带**完整 CDP target id**：`tab_new` 成功时写 `managed_tab_open`；tab 被 `tab_close` 成功关闭、被 idle 清理关闭、收到 target 销毁事件，或在一次成功的 target 枚举中确认已消失时写 `managed_tab_retire`。audit 行（包括 `tab_new` / `tab_close`）不会增删 managed 集合，只会按 `target` 精确匹配刷新仍受管 tab 的最后活跃时间，因此延迟到达的 audit 行不会让已退役的 tab 复活，也不会影响之后复用同一短 id 的新 tab。关闭失败（非“目标已不存在”）或枚举失败不会退役仍存活的 tab。
+
+**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl`：只有**完整 target id 完全一致**且仍存活的 tab 才恢复 idle 跟踪并沿用其最后活跃时间；短 tab id 只是别名，仅短 id 相同的其他 tab（例如用户自己打开的 tab）绝不会被当成受管 tab，也不会被 idle 清理关闭；记录中已不存在的 target 会被退役。重启后有约 30s grace。**旧版本兼容**：旧版本写入的记录只有短 id、没有 target 身份，无法验证，升级后一律不恢复（启动时打印一条 warn 说明数量）；这些由旧版本创建且仍打开的 tab 将不再被自动 idle 关闭，需要时请手动 `tab_close`。生命周期记录写盘失败时内存状态仍会更新并打印 warn，不视为已持久化：未写入的 `managed_tab_open` 表示该 tab 重启后不再受管；未写入的 `managed_tab_retire` 表示陈旧条目会留在 `rpc.jsonl` 直到下次轮转或重启对账（恢复要求 target 精确一致，陈旧条目不会导致误关其他 tab）。
+
+全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前仍受管 tab 的快照（每个 tab 一条 `managed_tab_open`，含完整 target id 与最后活跃时间；已退役的 tab 不会写入），因此恢复只需读当前文件即可保持完整。
 
 **Docker Compose 示例**（需挂载 volume 才能跨容器重建保留 state）：
 

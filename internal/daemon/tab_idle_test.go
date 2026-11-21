@@ -461,9 +461,10 @@ func TestTabIdleRestartGraceDelaysClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	line, err := json.Marshal(store.LogRecord{
-		Action: protocol.MethodTabNew,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
+		Action: store.ActionManagedTabOpen,
+		Body:   json.RawMessage(`{}`),
 		Tab:    "9999",
+		Target: string(tabID),
 		OK:     true,
 		Time:   expiredAt,
 	})

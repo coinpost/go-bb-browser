@@ -78,8 +78,11 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	cancel()
 	snaps := s.syncInitialTargets(sess, targets, terr)
 	// Perform the initial managed-tab recovery. If target enumeration failed,
-	// runTargetSync repeats this reconciliation after its successful retry.
-	s.reconcileIdleFromLog(snaps)
+	// runTargetSync runs this reconciliation after its successful retry; it must
+	// not run on a failed enumeration, which would retire still-live tabs.
+	if terr == nil {
+		s.reconcileIdleFromLog(snaps)
+	}
 	go s.runCDPWatchdog(ctx, sess)
 	if s.logger != nil {
 		s.logger.Info("browser CDP session connected", "debugger", s.cfg.DebuggerURL)

@@ -9,6 +9,7 @@ import (
 	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/browser"
 	"github.com/yiplee/go-bb-browser/internal/state"
+	"github.com/yiplee/go-bb-browser/internal/store"
 )
 
 var (
@@ -17,9 +18,21 @@ var (
 	errTabLockTimeout    = fmt.Errorf("tab lock timeout: %w", context.DeadlineExceeded)
 )
 
+// markTabManaged starts a daemon-created tab's managed lifecycle: in the idle
+// tracker and, synchronously, in the persisted managed set under its full
+// target id. Persisting here rather than through the asynchronous tab_new audit
+// line keeps lifecycle records ordered: a delayed audit line can never register
+// a tab after it was retired.
 func (s *Server) markTabManaged(tid target.ID, short, openURL string, silent bool) {
+	now := time.Now()
 	if s.tabIdle != nil {
-		s.tabIdle.MarkManaged(tid)
+		s.tabIdle.MarkManagedAt(tid, now)
+	}
+	if s.store == nil || tid == "" {
+		return
+	}
+	if err := s.store.RegisterManagedTab(short, string(tid), now.UTC()); err != nil {
+		s.logManagedPersistFailure("managed tab not persisted; it will not be restored for idle cleanup after a daemon restart", short, tid, err)
 	}
 }
 
@@ -29,10 +42,39 @@ func (s *Server) touchTabActivity(tid target.ID) {
 	}
 }
 
+// forgetTabManaged ends a managed lifecycle once the target is known to be
+// gone (closed successfully, destroyed, or absent from a successful
+// enumeration). It must not be called for a close that merely failed.
 func (s *Server) forgetTabManaged(tid target.ID) {
 	if s.tabIdle != nil {
 		s.tabIdle.Forget(tid)
 	}
+	s.retireManagedTarget(tid)
+}
+
+// retireManagedTarget removes tid from the persisted managed set. It is a
+// no-op for targets the daemon did not create. In-memory state is retired even
+// when the write fails; the failure is logged because the entry can then
+// reappear (harmlessly: recovery needs the exact target id) after a restart.
+func (s *Server) retireManagedTarget(tid target.ID) {
+	if s.store == nil || tid == "" {
+		return
+	}
+	if _, err := s.store.RetireManagedTarget(string(tid)); err != nil {
+		s.logManagedPersistFailure("managed tab retirement not persisted; the stale entry stays in rpc.jsonl until rotation or the next restart reconciliation", "", tid, err)
+	}
+}
+
+func (s *Server) logManagedPersistFailure(msg, short string, tid target.ID, err error) {
+	if s.logger == nil {
+		return
+	}
+	if errors.Is(err, store.ErrClosed) {
+		// Shutdown already closed the log; nothing actionable.
+		s.logger.Debug(msg, "tab", short, "target", string(tid), "err", err)
+		return
+	}
+	s.logger.Warn(msg, "tab", short, "target", string(tid), "err", err)
 }
 
 func (s *Server) syncTabsFromTargets(infos []*target.Info) []state.TabSnapshot {
@@ -74,14 +116,28 @@ func (s *Server) syncTabIdlePresence(snaps []state.TabSnapshot) {
 		}
 		present[sn.TargetID] = struct{}{}
 	}
-	s.tabIdle.SyncPresent(present)
+	for _, tid := range s.tabIdle.SyncPresentReturnRemoved(present) {
+		s.retireManagedTarget(tid)
+	}
 }
 
+// reconcileIdleFromLog restores idle tracking for persisted managed tabs after
+// a successful target enumeration (snaps). A persisted tab is recovered only
+// when a live target has exactly the same full CDP target id; a tab that merely
+// shares its short id is never adopted. Persisted tabs whose target is absent
+// from the enumeration are confirmed gone and retired, which keeps the
+// persisted set bounded by the live managed tabs.
+//
+// Callers must not invoke it when enumeration failed: an empty snaps would then
+// retire tabs that are still alive.
 func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 	if s.tabIdle == nil || s.store == nil {
 		return
 	}
-	loaded := s.store.ReplayManagedTabActivity()
+	loaded := s.store.ManagedTabs()
+	if len(loaded) == 0 {
+		return
+	}
 
 	now := time.Now()
 	timeout := s.cfg.TabIdleTimeout
@@ -98,15 +154,13 @@ func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 		}
 		present[sn.TargetID] = struct{}{}
 	}
-	for shortID, lastAt := range loaded {
-		tid, ok := s.tabs.Lookup(shortID)
-		if !ok {
-			continue
-		}
+	for _, mt := range loaded {
+		tid := target.ID(mt.TargetID)
 		if _, ok := present[tid]; !ok {
+			s.forgetTabManaged(tid)
 			continue
 		}
-		effective := lastAt
+		effective := mt.LastActivity
 		if effective.Before(minLast) {
 			effective = minLast
 		}
