@@ -71,3 +71,11 @@ Codex 独立审查 origin/main...HEAD，未发现 P0/P1；holder/waiter 引用�
 安装：无新增未 pin 依赖或工具，使用已有 Go 1.27.4 和本地模块源。
 未检查：未复跑修复前版本；真实 Chrome/CDP、Docker、systemd 未验证，仅 fake conn；无 UI 改动。无关联 issue/PR 需评论。
 状态：review/ → ready/；P3 为非阻塞建议，未自动修复。未合并 main、未发布。
+
+## factory · 2026-11-22 06:32
+
+owner 要求：交付 FT17。已将已审查 head 713ab4ced8349fff235b2d999c970f31e50001b7 合入 main 并推送，merge: 4f86c1c588facd643e4596a40643b88a69061982。无合并冲突；与当时 origin/main@9fa35626d7db7d51afd56cdc3ff33f8f5a0acfa9 的 merge-tree 干净。仅 ship FT17，未一并处理其它 ready 项。
+
+测试：在 throwaway HOME 下先跑变更包 `go test -race ./internal/daemon` 通过（ok 2.509s）。累计 main 完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 首次因 GOPROXY=off 且模块缓存缺 github.com/dop251/goja 失败，属环境而非代码；`go mod download` 恢复已锁定依赖后（go.mod/go.sum 未改）以 GOPROXY=off -mod=readonly 重跑退出 0。10 个测试包通过、2 个无测试包（internal/timeout、pkg/protocol）。保护路径无变更。工作树干净。
+
+按 ship=[merge,push] 未打 tag、未发布、未部署；无关联 issue/PR 需关闭，未删除代码分支 factory/FT17-unknown-tab-lock-retirement。原 review 的非阻断 P3 保留。ready/ → done/。
