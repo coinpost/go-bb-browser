@@ -43,6 +43,11 @@ import (
 //     is done, the walk stops. If every backend fails, the error is
 //     [*AllFailedError]. Failover here never moves an existing tab; tab_new
 //     creates a new tab on the backend that succeeds.
+//   - tab_new spread: tab_new has its own round-robin cursor, so health checks
+//     and other unbound calls made between creates do not shift where tabs
+//     open. After a failover the rotation resumes behind the backend that
+//     actually created the tab, so a down backend's share is split across the
+//     healthy ones instead of all going to its ring neighbour.
 //   - tab_list: query every backend in constructor order, prefix each id, and
 //     merge. A down backend is skipped (its tabs are omitted). If every
 //     backend fails, the error is [*AllFailedError]. Listed ids are bound so
@@ -58,7 +63,8 @@ type Pool struct {
 	keys     []string
 	byKey    map[string]int
 	inFlight []atomic.Int64
-	rr       atomic.Uint64
+	rr       atomic.Uint64 // tie-break cursor for health checks and other unbound calls
+	createRR atomic.Uint64 // tie-break cursor for tab_new only; see callCreate
 
 	mu   sync.Mutex
 	tabs map[string]int // external tab id → backend that opened it
@@ -248,7 +254,7 @@ func (p *Pool) callCreate(ctx context.Context, method string, params any, result
 		return err
 	}
 	var lastErrs []error
-	for _, i := range p.order() {
+	for _, i := range p.order(&p.createRR) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -280,6 +286,13 @@ func (p *Pool) callCreate(ctx context.Context, method string, params any, result
 				p.abandonCreated(ctx, i, native)
 				return fmt.Errorf("daemonclient: decode tab_new result: %w", err)
 			}
+		}
+		// Each backend skipped on the way here also gives up its turn, so the
+		// next create starts behind the one that succeeded. Without this, every
+		// create that lands on a failed backend fails over to the same ring
+		// neighbour and that neighbour gets a double share.
+		if skipped := len(lastErrs); skipped > 0 {
+			p.createRR.Add(uint64(skipped))
 		}
 		return nil
 	}
@@ -382,7 +395,7 @@ func (p *Pool) callTabFocus(ctx context.Context, params any, result any) error {
 
 func (p *Pool) callUnbound(ctx context.Context, method string, params any, result any) error {
 	var lastErrs []error
-	for _, i := range p.order() {
+	for _, i := range p.order(&p.rr) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -400,7 +413,7 @@ func (p *Pool) callUnbound(ctx context.Context, method string, params any, resul
 
 func (p *Pool) walkUnbound(ctx context.Context, op string, fn func(context.Context, *Client) error) error {
 	var lastErrs []error
-	for _, i := range p.order() {
+	for _, i := range p.order(&p.rr) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -421,11 +434,12 @@ func (p *Pool) track(i int) func() {
 	return func() { p.inFlight[i].Add(-1) }
 }
 
-// order returns backend indexes: least in-flight first, round-robin among ties,
-// then the remaining backends in ring order (failover walk).
-func (p *Pool) order() []int {
+// order returns backend indexes: least in-flight first, round-robin among ties
+// (rr is the caller's tie-break cursor and advances by one), then the remaining
+// backends in ring order (failover walk).
+func (p *Pool) order(rr *atomic.Uint64) []int {
 	n := len(p.clients)
-	start := int(p.rr.Add(1)-1) % n
+	start := int((rr.Add(1) - 1) % uint64(n))
 	best := start
 	bestN := p.inFlight[start].Load()
 	for i := 1; i < n; i++ {
