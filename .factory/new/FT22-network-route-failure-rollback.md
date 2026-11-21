@@ -58,3 +58,19 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 安装：无额外工具或未 pin 依赖。coder 恢复 go.sum 已 pin 模块时写入了默认用户模块缓存，违反本次临时缓存隔离要求；未删除共享缓存。manager 复验的 HOME、Go 缓存与所有临时数据均在本 run tmp 内。
 
 未检查：未启动真实 Chrome，Fetch.disable 失败后保留监听的实际暂停请求行为、disable 成功释放暂停请求未实机验证；Docker、systemd 未验证，无 UI 改动、未操作用户窗口。无链接 issue/PR。
+
+## factory · review · 2026-11-22 07:31
+head: a0e00e590abb18e95a9a815522deae62281b7081
+verdict: fix
+fix:
+- [P1] internal/browser/network_routes.go:225: 首次 Fetch.enable 失败后的补偿 Fetch.disable 使用 context.Background()，仍持有全会话 cdpMu，最多再阻塞 60 秒；其他健康 tab 的路由更新等待该互斥锁时无法响应取消，耗尽整个 RPC deadline。隔离每个 target 的更新串行边界，让等待支持 context 取消，并给补偿设置独立短超时；补充 A 补偿阻塞但 B 更新仍可及时完成的回归。
+notes:
+- [P2] internal/browser/network_routes.go:157: 取得 tab context 后排队，直到取得 cdpMu 才读 generation；若期间 ForgetTarget，旧调用可使用清理后的 generation 和已取消 tab context 创建 worker。enable/补偿均失败时留下已删除 target 的 worker。应在 attach/等锁前记录 generation，取得更新锁后校验，提交时继续二次校验。
+- [P2] internal/browser/network_routes.go:186: Fetch.enable 已启用、候选规则尚未提交时 worker 仍按旧表处理暂停事件。临时协议桩用首次 Abort 规则复现发送 Fetch.continueRequest 而非拦截，最终更新却成功。建议监听继续入队，仅暂停该 tab 的 worker 分派，成功后用新表、失败用旧表处理积压事件。
+- [P3] internal/browser/network_routes.go:168: 清空规则时 commit 因 target generation 改变返回 false，调用仍返回 nil。应与非空分支一致返回 ErrorTargetGone（操作名 Fetch.disable），增加最后规则删除与清理并发回归。
+
+审查：Codex 对 origin/main@4f86c1c...HEAD 只读审查，分支可干净合并 main，无代码修改或提交。临时 -overlay 与 -race 验证了上述四个时序；原有失败回滚、disable 失败保留监听与同 tab 并发更新验证通过。
+测试：隔离 HOME、TMPDIR、GOPATH、GOCACHE、GOMODCACHE 执行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过（10 个测试包，2 个无测试包）；git diff --check 通过，工作树干净。
+安装：无额外工具或未 pin 依赖，仅恢复 go.sum 锁定模块。未找到 review-code skill，按只读 code review 执行。
+未检查：真实非 headless Chrome 的 CDP 事件时序、Docker、systemd；未操作用户窗口。无链接 issue/PR，无需 GitHub 评论。
+状态：第 1/3 轮发现 P1，review/ → new/，下一次 build 在原分支修复；P2/P3 为审查备注。未合并 main、未发布。
