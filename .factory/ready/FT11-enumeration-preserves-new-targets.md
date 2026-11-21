@@ -59,3 +59,17 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：未运行真实非 headless Chrome，未操作用户窗口；真实事件时序、Docker、systemd 未验证。本地 CDP 桩只实现必要协议且 createTarget 不自动发 targetCreated。反向竞态（旧快照包含已由 destroyed 移除的 target 后再次注册）仍是既有未处理行为，交 review 注意。新鲜枚举与外部关闭的完整生命周期交错仍需独立 review。
 
 状态：new/ → review/，第 1 轮。本次仅 build，未 review、未合并 main、未发布。
+
+## factory · review · 2026-11-22 04:17
+head: c222ffbecfe0fa54ca2a9b35fb8535e52bb0ae0f
+verdict: pass
+notes:
+- [P2] internal/state/tab_registry.go:101: 快照登记按应用时刻增加代次，可能使更新的空快照无法纠正旧快照复活的已关闭 target。复现：tab_list 取得含 X 的快照 A → targetDestroyed(X) 完成 → tab_select(X) 取得空快照 B → 依次放行 A、B；A 赋予新代次，B 跳过删除，tab_select 对已关闭 tab 返回成功。基线同序列返回错误。建议区分快照登记与显式登记，采用枚举请求序号并添加双快照回归。旧快照复活本身属既有行为，但新鲜快照无法纠正是本次新增。
+- [P3] internal/daemon/tab_idle.go:65: tab_new 登记 X 后，若 targetDestroyed 在 markTabManaged 前完成清理，随后写入的 idle 条目失去注册表记录；删除 SyncPresent 后，下一次空 tab_list 不再清除该孤儿。基线可清除，HEAD 可复现残留；idle timeout=0 时可保留到退出。建议 idle 标记与 target 移除互斥，并在同一临界区检查登记有效性。
+- [P3] internal/daemon/target_enumeration_test.go:217: newEnumServer/newStubSessionServer 创建 Server 后未清理审计 writer；同进程运行三次 200 轮回归，runAuditWriter 协程由 0 增到 3 并持有内存记录。建议 t.Cleanup 调用 srv.closeAudit()。
+
+Codex 只读审查 origin/main...HEAD，无 P0/P1；按工厂门槛 pass，review/ → ready/。以上低优先级问题供 owner 上线前判断，不代表它们已修复。RPC/启动枚举/dirty 重同步/正常空列表/枚举错误均已核查。Codex 对前两项执行基线与 HEAD 对照诊断，确认新增或恶化；诊断源码保存在 review run evidence/FT11-c222ffb/ft11_interleavings_test.go。
+
+验证：Codex 和 manager 分别运行完整配置命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 均通过（manager 多数包使用缓存），git diff --check 通过，工作树干净。复用已有 Go 1.27.4 与锁定模块缓存，离线测试、隔离 HOME/TMPDIR，无新安装。manager 测试记录位于 review run evidence/FT11-c222ffb/manager-test.log。
+
+未验：真实 Chrome 事件时序、Docker、systemd；未运行 headless Chrome，未操作用户窗口。无关联 GitHub issue/PR，无需评论。本次仅 review，不合并 main、不发布。
