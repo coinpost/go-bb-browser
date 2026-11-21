@@ -61,3 +61,14 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：真实 Chrome/CDP+daemon 执行真实 adapter 端到端、Docker、systemd、Windows 均未验证。未启动或操作任何真实 Chrome/用户窗口。
 
 状态：代码分支已推送，new/ → review/，第 1/3 轮；仅 build，未 review、未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 05:29
+head: af719ebad2cd37cb5ed35b973f259af13926dbbd
+verdict: pass
+notes:
+- [P3] cmd/bb-browser/run_test.go:89: captureFile 的读端在 io.ReadAll 后未关闭，每次 executeRun 留下两个描述符等待 GC；建议在读取 goroutine 中 defer r.Close()。Codex 在文件描述符上限 64、GOGC=off 的定向重复运行中复现 pipe: too many open files，不阻塞本次评审。
+- Codex 审查 origin/main...HEAD：普通与 --json 的 adapter 错误均退出 1，普通模式 stdout 为空，JSON 保留原包络，stderr 错误/hint/登录提示各输出一次；成功值及 RPC 错误语义保持。未发现 P0/P1。
+- 完整配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过（Go 1.27.4）；本地 fixtures、固定版本离线模块，HOME/缓存/临时文件在本 run TMPDIR 隔离。无额外安装、无代码修改，工作树干净；与 origin/main 可干净合并。
+- 未验证真实 Chrome/CDP+daemon 端到端、Docker、systemd 或 Windows；未操作用户窗口。
+- review/ → ready/，等待 owner 验收；未合并 main、未发布。
