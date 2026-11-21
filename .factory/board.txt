@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-Nothing at your gates | 14 with the agent | 7 done
-Drawn Nov 22, 06:12 | https://github.com/coinpost/go-bb-browser
+1 at your gates | 13 with the agent | 7 done
+Drawn Nov 22, 06:16 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     6h  生命周期事件溢出重同步与优雅关停次序
@@ -31,26 +31,26 @@ NEW (12)                                    avg stay 3h
     FT7     4h  target释放与观测writer退役同步
     FT10    2h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
-    FT13   55m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13   59m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon
 
-REVIEW (2)                                  avg stay 15m
-    FT17   20m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
-                （key 由客户端控制）
-    FT18    3m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
+REVIEW (1)                                  avg stay 15m
+    FT18    7m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
                 该行及其后的全部记录截断丢弃
 
-READY (0)                                   avg stay 1h
-    Nothing here
+READY (1) [!]                               avg stay 1h
+  * FT17    1m  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
+                （key 由客户端控制）
+                > Check, then ship
 
 DONE (7)
-    FT16    1m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
+    FT16    4m  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
                 写，daemon 启动即退出
-    FT11    3m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
+    FT11    7m  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
                 建的受管 tab 从注册表和空闲跟踪中删除
-    FT12    3m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
+    FT12    7m  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
                 能命中上一次快照遗留的其它元素
-    FT14    3m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
+    FT14    7m  [P2] `bb-browser run` 在 adapter 返回 { error } 时退出码为 0
     ... 3 more in .factory/done/
 
 * waits for you. [!] a stage that holds one.
