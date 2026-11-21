@@ -300,3 +300,24 @@ head: ace8a79711b157055dd7d2b42ae5ed58aaeff4aa
 
 边界及 review 重点：不持锁跨 CDP；短 ID 在最后 CDP 调用后的注册表提交时刻有效，提交之后仍可再次复用，不能承诺响应送达后永久有效；未送达 daemon 的事件不可见。有缓存焦点但不在本次枚举元数据时，返回该有效完整 ID，title/url 为空。需独立复核令牌所有权/结束顺序、删除与重新注册、CommitFocus 候选与响应审计一致性；本轮不宣称全库无缺陷。迟到 targetCreated/生命周期队列溢出等 FT2～FT7 独立 P2/P3 未处理。
 未检查：未启动真实 Chrome，真实 UI/CDP/可见性探测/截图/网络拦截、systemd/Docker/跨平台未实测。真实HTTP focus回归依赖销毁事件在单页500ms探测超时内处理，并非纯barrier；90次重复未见抖动。无关联 issue/PR。
+
+
+## factory · review · 2026-11-22 00:15
+head: ace8a79711b157055dd7d2b42ae5ed58aaeff4aa
+verdict: fix
+fix:
+- [P1] internal/daemon/v1.go:775: screenshot 完成最后一次 CDP 调用后、响应构造前，原页已注销且接替用户页取得请求短 ID，仍成功返回该失效别名；真实 HTTP + 回环 fake CDP 8/8，按返回值再次截图实际到达接替页。普通 RPC 返回可继续操作的别名前应提交复核短 ID、完整 target 与注册代次，失效则明确报错并保留动作可能已执行的事实；显式 close 保留已关闭目标语义。基线相同语义断言亦失败，但该路径在本轮响应身份约束内。
+- [P1] internal/state/tab_registry.go:179: 两次重叠枚举先后采样有页/空列表，旧结果先应用时，其注册被新枚举误认为并发新增而保留；新结果先应用时旧结果又复活死页。真实 HTTP + fake CDP 两种顺序各8/8，前一种基线8/8通过、HEAD失败，属回归。区分枚举引入的注册与真实创建，并建立重叠枚举的顺序边界，或有序完成取列表到应用；两种提交顺序均补永久回归。
+notes:
+- [P2] internal/state/tab_registry.go:219: 未注册 target 的销毁通知直接返回，相关在途旧枚举随后可注册死页；应记录明确销毁信息并随令牌清理。8/8，基线亦失败。
+- [P2] internal/state/tab_registry.go:423: 同一完整 ID 删除后重注册，CommitFocus 可接受旧探测和旧 title/URL；恢复原别名时 SelectAlias 也接受跨代请求。将注册 epoch 带入绑定、候选、元数据并提交复核；各交错8/8，未证实此分支误关接替页。
+- [P2] internal/daemon/v1.go:320: 非空 tab_list 审计只有短 ID、target为空；应从响应同一快照记录完整 ID，保持被动查询不续 idle。HEAD/基线各8/8。
+- [P3] internal/state/tab_registry.go:161: Sync 未校验令牌归属/在途状态，跨注册表误用可遗留令牌，已结束令牌仍可应用旧结果；现有daemon调用配对正确，属内部健壮性。
+
+前轮两项P1原始路径已修复：tab_select 返回 unknown tab id（-32602）；tab_focus 无有效候选返回 tabs changed（-32000），有效其他候选响应/元数据/审计一致。永久回归移至上一轮HEAD各失败5/5，证明检出力。已知target删除过滤、并发真实新增保留、普通令牌成功/错误/取消释放及最老相关枚举结束后墓碑回收通过。FT2～FT7独立backlog保持不动，未重填为本轮修复清单。
+
+验证：本地Codex独立审查origin/main...HEAD累计14提交、43文件；配置gofmt检查、go vet ./...、go test -race ./...在HEAD与导出origin/main均离线通过。身份定向-race -count=12 -cpu=1,2,8，state全包-count=30 -cpu=1,2,8，17入口-count=15，生命周期及browser/store全包-count=10通过。新增只读overlay/barrier/真实HTTP与回环fake CDP证据保留正确行为断言的FAIL，不将诊断PASS当安全通过。manager复核完整报告、两项阻塞交错日志与对应源码；HEAD未变，工作树干净，无修复提交，禁止路径未改。
+安装：复用已有Go1.27.4及Node，仅离线恢复锁定依赖，无新增安装或本轮清单变化。测试HOME/cache/overlay均在本run TMPDIR；证据报告、源码和日志保留于review run的evidence/FT1-ace8a79/。
+未检查：未启动真实Chrome；真实UI/CDP投递概率、截图图像质量、网络拦截、systemd、Docker、跨平台、磁盘故障均未实测。无关联issue/PR，无需GitHub评论。
+
+第6轮为owner额外授权，round=6已超过max_rounds=3；有P1，留在review/等owner决定，不自动开始第7轮。若继续修复，需owner添加说明并移回new/。
