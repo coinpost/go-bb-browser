@@ -62,3 +62,18 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 状态：new/ → review/，第1轮；未review、未合并main、未发布。owner重点检查共享目录兼容性、备份异常路径及权限失败语义。
 
 运行备注：Claude Code五小时额度已用86%，调用完成时约1小时50分后重置；未重试。恢复阶段清理本build目录内过期临时文件，无未提交改动或本地board提交需恢复。首次auth检查因工作目录无仓库未成功，进入专用clone后auth检查成功。
+
+## factory · review · 2026-11-22 07:05
+head: d738276b36bd58166adb300df727626d8504e901
+verdict: pass
+notes:
+- [P2] internal/store/store.go:129: 备份 Lstat 的所有错误均被忽略；Codex 在 macOS 复现 EACCES 后 Open 仍成功、备份保持0644。应仅跳过 ENOENT 与已确认的非普通文件，其他错误携路径终止启动。
+- [P2] internal/store/store.go:182: 活动日志符号链接被 OpenFile 跟随，新增 f.Chmod 会收紧状态目录外目标的权限。应拒绝符号链接并确认普通文件后再收紧，避免修改目录外文件。
+- [P2] internal/store/store.go:367: 既有轮转缺陷：当 .1–.3 均为非空目录时重命名错误被忽略，轮转仍 O_TRUNC 活动日志而丢失内容。Codex 已复现；非本分支新引入。应确认归档成功后才新建活动日志，失败保留原内容并报错。
+- [P3] internal/store/store.go:117: MkdirAll(...,0700) 同时将新建父目录从原0755变为0700，可能影响共享父目录使用；应区分父目录创建和最终状态目录私有权限。
+- [P3] README.md:86: 配置项对权限收紧的描述未注明 Windows 例外，应补充平台边界。
+
+审查：Codex 对 origin/main...HEAD 只读审查，未发现 P0/P1；按 factory 门槛通过，review/ → ready/。未找到 review-code skill，采用只读代码审查。分支与 origin/main 合并检查干净，无需修改或推送代码分支。分支仅含本项提交，工作树干净，git diff --check 通过。
+测试：Codex 在本 run 临时目录内隔离 HOME/缓存，使用既有 Go1.27.4 和锁定模块缓存运行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...`，退出0。安装：无。
+未验：真实 Chrome/CDP、Docker、systemd、Linux/Windows 实机、真实非属主 chmod EPERM；无 UI 人工检查、未操作用户窗口。
+关联 GitHub：无 source 或 owner 明确关联的 issue/PR，因此无评论目标。owner 重点检查上述非阻断权限与异常备份路径问题；尚未合并 main 或发布。
