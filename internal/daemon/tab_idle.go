@@ -38,29 +38,29 @@ func (s *Server) forgetTabManaged(tid target.ID) {
 func (s *Server) syncTabsFromTargets(infos []*target.Info) []state.TabSnapshot {
 	snaps, removed := s.tabs.SyncPageTargetsDetailed(infos)
 	for _, tab := range removed {
-		s.clearRemovedTarget(tab.TargetID, tab.ShortID)
+		s.clearRemovedTarget(tab.TargetID)
 	}
 	s.syncTabIdlePresence(snaps)
 	return snaps
 }
 
-func (s *Server) clearRemovedTarget(tid target.ID, short string) {
+// clearRemovedTarget drops per-target state. The keyed operation lock needs no
+// cleanup here: lockTab reclaims its entry when the last reference exits.
+func (s *Server) clearRemovedTarget(tid target.ID) {
 	if s.obsStore != nil {
 		s.obsStore.ClearTarget(tid)
 	}
 	s.forgetTabManaged(tid)
-	s.forgetTabLock(short)
 	if sess, ok := s.tabConn().(*browser.Session); ok {
 		sess.ForgetTarget(tid)
 	}
 }
 
 func (s *Server) removeTargetState(tid target.ID) {
-	short, ok := s.tabs.RemoveTarget(tid)
-	if !ok {
+	if _, ok := s.tabs.RemoveTarget(tid); !ok {
 		return
 	}
-	s.clearRemovedTarget(tid, short)
+	s.clearRemovedTarget(tid)
 }
 
 func (s *Server) syncTabIdlePresence(snaps []state.TabSnapshot) {
