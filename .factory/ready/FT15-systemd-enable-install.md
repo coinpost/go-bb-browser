@@ -47,3 +47,16 @@ Checking：先加测试确认原 unit 失败，再修复变绿；运行完整 go
 安装：无额外安装；使用已有 Go 1.27.4，已锁定模块从本机缓存恢复。测试 HOME、缓存和临时文件均隔离在本 run TMPDIR 内。
 
 未验证：macOS 无 systemd 且无可用隔离 Linux，未实测 systemd-analyze、enable/is-enabled、linger 与重启；本次不涉及 UI，未运行真实 Chrome 或 Docker。请 review 关注 unit 安装语义及静态回归范围。new/ → review/，round 1。
+
+
+## factory · review · 2026-11-22 05:43
+head: ebc11695a09150ce083f813b4944484cd8dae305
+verdict: pass
+notes:
+- [P2] deploy/systemd/README.md:28: 旧安装升级说明要求重复复制 unit，会覆盖用户按同页说明直接修改的 ExecStart（如自定义 CDP 端口）。建议区分原版/drop-in 安装和直接编辑过 unit 的安装；后者应合入新增 [Unit]/[Install] 后 daemon-reload 并重新 enable，保留原配置。
+
+Codex 独立只读审查 origin/main...HEAD 完成；没有 P0/P1。unit 正确设置 Description 与 WantedBy=default.target，[Service] 与基线一致；工作树无修改、无新提交。分支与 main 可干净合并。
+
+完整测试 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过。审查另在隔离目录验证旧 unit 触发永久回归 missing [Install] section，当前 unit 通过；该预期失败不是现有测试失败。使用已有 Go 1.27.4 和 pinned 模块缓存，GOPROXY=off，测试 HOME/缓存/临时文件隔离；无额外安装。
+
+未验证：macOS 无真实 Linux systemd，未运行 systemd-analyze --user verify、enable/is-enabled、linger 或重启自启；未启动或改动用户服务，未运行 Chrome/Docker，无 UI 变更。P2 文档升级覆盖风险留待 owner 关注。review/ → ready/，仅审查，未合并 main、未发布。
