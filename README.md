@@ -83,7 +83,7 @@ flowchart LR
 | `BB_BROWSER_CDP_WATCHDOG_TIMEOUT` | 单次探测超时，默认 `2s` |
 | `BB_BROWSER_CDP_WATCHDOG_FAILURES` | 连续失败多少次后确认 session 失效并退出，默认 `3` |
 | `BB_BROWSER_OBSERVER_IDLE_TIMEOUT` | 观测接口无查询后 disable CDP domain 的时间，默认 `5m`；`0` 表示保持到 tab 关闭 |
-| `BB_BROWSER_STATE_DIR` | RPC log 目录，默认 `~/.local/state/bb-daemon`（`rpc.jsonl`）；`-` 为 in-memory；等价 `--state-dir` |
+| `BB_BROWSER_STATE_DIR` | RPC log 目录，默认 `~/.local/state/bb-daemon`（`rpc.jsonl`）；`-` 为 in-memory；等价 `--state-dir`。日志含请求体（可能有密码、令牌），因此目录为 `0700`、`rpc.jsonl` 及轮转备份为 `0600`；启动时会收紧既有目录、日志与 `.1`–`.3` 备份的更宽权限（不放宽更严格的权限，不动目录内其他文件），收紧失败则启动报错 |
 | `BB_BROWSER_RPC_LOG_MAX_BYTES` | `rpc.jsonl` 超过该字节数即轮转，默认 `8388608`（8 MiB）；等价 `--rpc-log-max-bytes` |
 | `BB_BROWSER_LOG_LEVEL` | slog 级别：`debug` / `info` / `warn` / `error`，默认 `info`；等价 `--log-level` |
 | `BB_BROWSER_LOG_FORMAT` | slog 输出格式：`text` 或 `json`，默认 `text`；等价 `--log-format` |
@@ -111,7 +111,13 @@ bb-daemon --debugger-url 127.0.0.1:9222 --api-token-file /path/to/api-tokens --a
 bb-browser tab list
 ```
 
-**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl` 求出这些 tab 的最后活跃时间来恢复 idle 跟踪（短 tab id 由 CDP target id 确定性派生，跨重启稳定）。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 最后活跃时间），因此恢复只需读当前文件即可保持完整。
+**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`（audit 行，异步写入；成功且已解析到 tab 的行带完整 CDP target id 字段 `target`）；idle 状态维护在内存。
+
+**受管 tab 的持久化生命周期**：哪些 tab 属于 daemon（managed 集合）只由两种同步写入的生命周期记录决定，二者都携带**完整 CDP target id**：`tab_new` 成功时写 `managed_tab_open`；tab 被 `tab_close` 成功关闭、被 idle 清理关闭、收到 target 销毁事件，或在一次成功的 target 枚举中确认已消失时写 `managed_tab_retire`。audit 行（包括 `tab_new` / `tab_close`）不会增删 managed 集合，只会按 `target` 精确匹配刷新仍受管 tab 的最后活跃时间，因此延迟到达的 audit 行不会让已退役的 tab 复活，也不会影响之后复用同一短 id 的新 tab。关闭失败（非“目标已不存在”）或枚举失败不会退役仍存活的 tab。一次枚举只能退役**在发出该枚举请求之前**就已持久化的受管 target：枚举进行期间或其结果处理完成之前由 `tab_new` 新建的 tab 不在这份候选集合内，不会因为没出现在这次（更早的）枚举结果里而被退役，启动恢复与运行期重新同步都遵守这一约束。
+
+**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl`：只有**完整 target id 完全一致**且仍存活的 tab 才恢复 idle 跟踪并沿用其最后活跃时间；短 tab id 只是别名，仅短 id 相同的其他 tab（例如用户自己打开的 tab）绝不会被当成受管 tab，也不会被 idle 清理关闭；记录中已不存在的 target 会被退役。重启后有约 30s grace。**旧版本兼容**：旧版本写入的记录只有短 id、没有 target 身份，无法验证，升级后一律不恢复（启动时打印一条 warn 说明数量）；这些由旧版本创建且仍打开的 tab 将不再被自动 idle 关闭，需要时请手动 `tab_close`。生命周期记录写盘失败时内存状态仍会更新并打印 warn，不视为已持久化：未写入的 `managed_tab_open` 表示该 tab 重启后不再受管；未写入的 `managed_tab_retire` 表示陈旧条目会留在 `rpc.jsonl` 直到下次轮转或重启对账（恢复要求 target 精确一致，陈旧条目不会导致误关其他 tab）。
+
+全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前仍受管 tab 的快照（每个 tab 一条 `managed_tab_open`，含完整 target id 与最后活跃时间；已退役的 tab 不会写入），因此恢复只需读当前文件即可保持完整。回放按物理换行逐行解析：中间损坏的行告警并跳过（保留在文件中），其后的合法记录照常恢复；末尾缺换行的完整记录正常回放，后续追加前先补换行；末尾不完整的记录被截断。写入失败或短写后，下一次写入同样先补换行，避免与残片粘连。
 
 **Docker Compose 示例**（需挂载 volume 才能跨容器重建保留 state）：
 
@@ -186,6 +192,8 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 | `--json` | — | 打印原始 JSON-RPC（部分子命令为完整 envelope） |
 | `--tab` | — | 短 tab id；省略则用 `tab_list` 返回的 daemon 焦点 tab |
 | `-v` / `--version` | — | 打印版本并退出 |
+
+**超时预算**：daemon 对每个 JSON-RPC（`eval`、`fetch`、`snapshot`、`screenshot`、`goto` 等）的 CDP 工作上限是 60 秒；CLI 的每条命令（含 `run`，其中选 tab、开 tab 与 `eval` 累计计时）使用同一个 60 秒预算，不会比 daemon 等得更久。两者来自同一常量 `internal/timeout.Operation`，超时错误会写明该上限；更长的任务请拆成多条命令。
 
 ---
 

@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
@@ -29,21 +31,39 @@ var routeCDP = runCDP
 // listenTarget is chromedp.ListenTarget. Tests replace it to count listeners.
 var listenTarget = chromedp.ListenTarget
 
+// routeCompensationTimeout bounds the Fetch.disable sent after a tab's first
+// Fetch.enable failed. That call runs after the request already failed (its
+// context may be canceled) while the tab's update lock and paused-request
+// dispatch are still held, so it gets a short deadline of its own instead of a
+// full timeout.Operation: 1s is ample for a responsive tab, and an unresponsive
+// one keeps its listener anyway (see abandonFirstEnable).
+const routeCompensationTimeout = time.Second
+
 type routeState struct {
-	mu    sync.Mutex
-	cdpMu sync.Mutex
+	mu sync.Mutex
 
 	rules   map[target.ID][]NetworkRouteRule
 	workers map[target.ID]*routeWorker
 	gen     map[target.ID]uint64
+	// updates serializes rule updates per target; entries live only while an
+	// update holds or waits for them.
+	updates map[target.ID]*routeUpdateLock
+}
+
+type routeUpdateLock struct {
+	sem  chan struct{}
+	refs int // guarded by routeState.mu
 }
 
 type routeWorker struct {
 	cancel context.CancelFunc
 	wake   chan struct{}
 
-	mu           sync.Mutex
-	queue        []*fetch.EventRequestPaused
+	mu    sync.Mutex
+	queue []*fetch.EventRequestPaused
+	// held pauses dispatch while a rule update for the tab is in flight; the
+	// listener keeps queueing.
+	held         bool
 	listening    bool
 	listenCancel context.CancelFunc
 }
@@ -53,6 +73,7 @@ func newRouteState() *routeState {
 		rules:   make(map[target.ID][]NetworkRouteRule),
 		workers: make(map[target.ID]*routeWorker),
 		gen:     make(map[target.ID]uint64),
+		updates: make(map[target.ID]*routeUpdateLock),
 	}
 }
 
@@ -62,29 +83,26 @@ func (s *Session) routes() *routeState {
 	return s.routeState
 }
 
+// routeFetchApply sends a tab's Fetch interception config: Fetch.enable with the
+// patterns, or Fetch.disable when there are none. Tests replace it.
+var routeFetchApply = func(tabCtx, requestCtx context.Context, patterns []*fetch.RequestPattern) error {
+	return runCDPWithContext(tabCtx, requestCtx, chromedp.ActionFunc(func(c context.Context) error {
+		if len(patterns) == 0 {
+			return fetch.Disable().Do(c)
+		}
+		return fetch.Enable().WithPatterns(patterns).Do(c)
+	}))
+}
+
 // SetNetworkRoutes replaces all Fetch interception rules for a tab and syncs CDP.
 func (s *Session) SetNetworkRoutes(tabID target.ID, rules []NetworkRouteRule) error {
 	return s.SetNetworkRoutesContext(context.Background(), tabID, rules)
 }
 
 func (s *Session) SetNetworkRoutesContext(ctx context.Context, tabID target.ID, rules []NetworkRouteRule) error {
-	if s == nil {
-		return errNilSession()
-	}
-	rs := s.routes()
-	if rs == nil {
-		return fmt.Errorf("browser session route state is not initialized")
-	}
-	rs.mu.Lock()
-	if len(rules) == 0 {
-		delete(rs.rules, tabID)
-	} else {
-		cp := make([]NetworkRouteRule, len(rules))
-		copy(cp, rules)
-		rs.rules[tabID] = cp
-	}
-	rs.mu.Unlock()
-	return s.syncRoutes(ctx, rs, tabID)
+	return s.updateRoutes(ctx, tabID, func([]NetworkRouteRule) []NetworkRouteRule {
+		return append([]NetworkRouteRule(nil), rules...)
+	})
 }
 
 // AppendNetworkRoute adds one rule for a tab (existing rules preserved).
@@ -93,17 +111,9 @@ func (s *Session) AppendNetworkRoute(tabID target.ID, rule NetworkRouteRule) err
 }
 
 func (s *Session) AppendNetworkRouteContext(ctx context.Context, tabID target.ID, rule NetworkRouteRule) error {
-	if s == nil {
-		return errNilSession()
-	}
-	rs := s.routes()
-	if rs == nil {
-		return fmt.Errorf("browser session route state is not initialized")
-	}
-	rs.mu.Lock()
-	rs.rules[tabID] = append(rs.rules[tabID], rule)
-	rs.mu.Unlock()
-	return s.syncRoutes(ctx, rs, tabID)
+	return s.updateRoutes(ctx, tabID, func(cur []NetworkRouteRule) []NetworkRouteRule {
+		return append(cur, rule)
+	})
 }
 
 // RemoveNetworkRoutes removes rules whose URLPattern matches pattern; empty pattern clears all rules for the tab.
@@ -112,33 +122,13 @@ func (s *Session) RemoveNetworkRoutes(tabID target.ID, urlPattern string) error 
 }
 
 func (s *Session) RemoveNetworkRoutesContext(ctx context.Context, tabID target.ID, urlPattern string) error {
-	if s == nil {
-		return errNilSession()
-	}
-	rs := s.routes()
-	if rs == nil {
-		return fmt.Errorf("browser session route state is not initialized")
-	}
-	rs.mu.Lock()
 	pat := strings.TrimSpace(urlPattern)
-	if pat == "" {
-		delete(rs.rules, tabID)
-	} else {
-		cur := rs.rules[tabID]
-		var out []NetworkRouteRule
-		for _, r := range cur {
-			if r.URLPattern != pat {
-				out = append(out, r)
-			}
+	return s.updateRoutes(ctx, tabID, func(cur []NetworkRouteRule) []NetworkRouteRule {
+		if pat == "" {
+			return nil
 		}
-		if len(out) == 0 {
-			delete(rs.rules, tabID)
-		} else {
-			rs.rules[tabID] = out
-		}
-	}
-	rs.mu.Unlock()
-	return s.syncRoutes(ctx, rs, tabID)
+		return slices.DeleteFunc(cur, func(r NetworkRouteRule) bool { return r.URLPattern == pat })
+	})
 }
 
 // NetworkRouteCount returns how many interception rules are active for a tab.
@@ -157,36 +147,181 @@ func (s *Session) NetworkRouteCount(tabID target.ID) int {
 	return len(rs.rules[tabID])
 }
 
-func (s *Session) syncRoutes(ctx context.Context, rs *routeState, tabID target.ID) error {
+// updateRoutes applies one rule change as a transaction: the candidate rules
+// are sent to the browser first and stored only once that sync succeeded, so a
+// failed call leaves the rules (and the listener serving them) as they were.
+//
+// Updates are serialized per target, so concurrent callers of one tab build on
+// each other's committed result while other tabs are never delayed; waiting for
+// the tab's turn ends with ctx. rs.mu is never held across CDP.
+//
+// The target generation is read before attaching and queueing and is checked
+// again once the update owns the tab and when it commits: an update that
+// overlaps ClearRoutesForTarget fails as target gone and cannot bring rules, a
+// worker or a listener back.
+//
+// Requests paused while the sync is in flight stay queued (for this tab only)
+// and are answered once the update is decided: from the candidate rules if it
+// committed, from the previous rules if it failed.
+//
+// A sync that times out or loses its connection may still have been applied by
+// the browser. The local table then keeps the last confirmed rules; the next
+// successful update sends the full pattern list and reconciles the browser.
+func (s *Session) updateRoutes(ctx context.Context, tabID target.ID, mutate func(cur []NetworkRouteRule) []NetworkRouteRule) error {
+	if s == nil {
+		return errNilSession()
+	}
+	rs := s.routes()
+	if rs == nil {
+		return fmt.Errorf("browser session route state is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	gen := rs.generation(tabID)
 	tabCtx, err := s.tabChromeCtxContext(ctx, tabID)
 	if err != nil {
 		return wrapCDPError("Fetch.enable", tabID, err)
 	}
-	rs.cdpMu.Lock()
-	defer rs.cdpMu.Unlock()
+	unlock, err := rs.lockUpdates(ctx, tabID)
+	if err != nil {
+		return wrapCDPError("Fetch.enable", tabID, err)
+	}
+	defer unlock()
 
-	rules, gen := rs.snapshot(tabID)
-	if len(rules) == 0 {
-		err := runCDPWithContext(tabCtx, ctx, chromedp.ActionFunc(func(c context.Context) error {
-			return fetch.Disable().Do(c)
-		}))
-		if w := rs.worker(tabID); w != nil {
+	cur, curGen := rs.snapshot(tabID)
+	next := mutate(cur) // cur is a private copy
+	op := "Fetch.enable"
+	if len(next) == 0 {
+		op = "Fetch.disable"
+	}
+	if curGen != gen {
+		return routeTargetGone(op, tabID)
+	}
+	if err := ctx.Err(); err != nil {
+		return wrapCDPError(op, tabID, err)
+	}
+
+	if len(next) == 0 {
+		w := rs.worker(tabID)
+		if w != nil {
+			w.hold()
+			defer w.release()
+		}
+		// Paused requests still need the listener until the browser confirms
+		// that interception is off.
+		if err := routeFetchApply(tabCtx, ctx, nil); err != nil {
+			return wrapCDPError(op, tabID, err)
+		}
+		if !rs.commit(tabID, gen, nil) {
+			return routeTargetGone(op, tabID)
+		}
+		if w != nil {
 			w.stopListening()
 		}
-		return wrapCDPError("Fetch.disable", tabID, err)
+		return nil
 	}
 
+	// The listener must be in place before Fetch.enable. Dispatch is held first,
+	// so nothing paused by the candidate patterns is answered from the old rules.
 	w := rs.ensureWorker(tabID, tabCtx, gen)
-	if w == nil || !w.startListening(tabCtx, rs, tabID, gen) {
-		return nil
+	if w == nil {
+		return routeTargetGone(op, tabID)
 	}
-	patterns := routePatterns(rules)
-	if len(patterns) == 0 {
-		return nil
+	w.hold()
+	defer w.release()
+	if !w.startListening(tabCtx, rs, tabID, gen) {
+		return routeTargetGone(op, tabID)
 	}
-	return wrapCDPError("Fetch.enable", tabID, runCDPWithContext(tabCtx, ctx, chromedp.ActionFunc(func(c context.Context) error {
-		return fetch.Enable().WithPatterns(patterns).Do(c)
-	})))
+	if patterns := routePatterns(next); len(patterns) > 0 {
+		if err := routeFetchApply(tabCtx, ctx, patterns); err != nil {
+			if len(cur) == 0 {
+				rs.abandonFirstEnable(tabCtx, tabID, w)
+			}
+			return wrapCDPError(op, tabID, err)
+		}
+	}
+	if !rs.commit(tabID, gen, next) {
+		return routeTargetGone(op, tabID)
+	}
+	return nil
+}
+
+func routeTargetGone(op string, tabID target.ID) error {
+	return &CDPError{Kind: ErrorTargetGone, Op: op, Target: tabID, Err: fmt.Errorf("target removed while updating routes")}
+}
+
+// lockUpdates waits for tabID's turn to update its rules, or for ctx to end.
+func (rs *routeState) lockUpdates(ctx context.Context, tabID target.ID) (unlock func(), err error) {
+	rs.mu.Lock()
+	if rs.updates == nil {
+		rs.updates = make(map[target.ID]*routeUpdateLock)
+	}
+	l := rs.updates[tabID]
+	if l == nil {
+		l = &routeUpdateLock{sem: make(chan struct{}, 1)}
+		rs.updates[tabID] = l
+	}
+	l.refs++
+	rs.mu.Unlock()
+	drop := func() {
+		rs.mu.Lock()
+		if l.refs--; l.refs == 0 && rs.updates[tabID] == l {
+			delete(rs.updates, tabID)
+		}
+		rs.mu.Unlock()
+	}
+	select {
+	case l.sem <- struct{}{}:
+		return func() {
+			<-l.sem
+			drop()
+		}, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
+}
+
+// commit stores rules unless the target was cleared since gen was read, so an
+// in-flight update cannot bring a removed target's rules back.
+func (rs *routeState) commit(tabID target.ID, gen uint64, rules []NetworkRouteRule) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.gen[tabID] != gen {
+		return false
+	}
+	if len(rules) == 0 {
+		delete(rs.rules, tabID)
+	} else {
+		rs.rules[tabID] = rules
+	}
+	return true
+}
+
+// abandonFirstEnable releases the worker and listener of a tab whose first
+// Fetch.enable failed. The failed call may still have reached the browser, so
+// interception is switched off first, within routeCompensationTimeout and
+// independent of the (possibly canceled) request. If that cannot be confirmed
+// either, the listener stays (with no rules it continues every paused request)
+// until a later update or target cleanup.
+func (rs *routeState) abandonFirstEnable(tabCtx context.Context, tabID target.ID, w *routeWorker) {
+	ctx, cancel := context.WithTimeout(context.Background(), routeCompensationTimeout)
+	err := routeFetchApply(tabCtx, ctx, nil)
+	cancel()
+	if err != nil {
+		return
+	}
+	rs.mu.Lock()
+	owned := rs.workers[tabID] == w
+	if owned {
+		delete(rs.workers, tabID)
+	}
+	rs.mu.Unlock()
+	w.stopListening()
+	if owned {
+		w.cancel()
+	}
 }
 
 func routePatterns(rules []NetworkRouteRule) []*fetch.RequestPattern {
@@ -226,7 +361,7 @@ func (rs *routeState) worker(tabID target.ID) *routeWorker {
 
 func (rs *routeState) ensureWorker(tabID target.ID, tabCtx context.Context, gen uint64) *routeWorker {
 	rs.mu.Lock()
-	if rs.gen[tabID] != gen || len(rs.rules[tabID]) == 0 {
+	if rs.gen[tabID] != gen {
 		rs.mu.Unlock()
 		return nil
 	}
@@ -304,10 +439,29 @@ func (w *routeWorker) onPaused(ev any) {
 	}
 }
 
-func (w *routeWorker) pop() *fetch.EventRequestPaused {
+// hold pauses dispatch of queued paused requests until release. Updates of one
+// target are serialized, so holds never nest.
+func (w *routeWorker) hold() {
+	w.mu.Lock()
+	w.held = true
+	w.mu.Unlock()
+}
+
+func (w *routeWorker) release() {
+	w.mu.Lock()
+	w.held = false
+	w.mu.Unlock()
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+}
+
+// pop returns the next queued event; while dispatch is held only force does.
+func (w *routeWorker) pop(force bool) *fetch.EventRequestPaused {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.queue) == 0 {
+	if len(w.queue) == 0 || (w.held && !force) {
 		return nil
 	}
 	ev := w.queue[0]
@@ -322,19 +476,21 @@ func (w *routeWorker) pop() *fetch.EventRequestPaused {
 func (w *routeWorker) loop(ctx context.Context, rs *routeState, tabID target.ID, tabCtx context.Context) {
 	defer w.stopListening()
 	for {
-		w.dispatchAll(rs, tabID, tabCtx)
+		w.dispatchAll(rs, tabID, tabCtx, false)
 		select {
 		case <-ctx.Done():
-			w.dispatchAll(rs, tabID, tabCtx)
+			// The worker is being retired: answer what is left even if an
+			// update still holds dispatch.
+			w.dispatchAll(rs, tabID, tabCtx, true)
 			return
 		case <-w.wake:
 		}
 	}
 }
 
-func (w *routeWorker) dispatchAll(rs *routeState, tabID target.ID, tabCtx context.Context) {
+func (w *routeWorker) dispatchAll(rs *routeState, tabID target.ID, tabCtx context.Context, force bool) {
 	for {
-		ev := w.pop()
+		ev := w.pop(force)
 		if ev == nil {
 			return
 		}

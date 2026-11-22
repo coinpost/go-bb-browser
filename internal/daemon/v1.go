@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -174,6 +175,7 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 		Action:   meta.action,
 		Body:     meta.body,
 		Tab:      tab,
+		Target:   meta.target,
 		SenderIP: meta.senderIP,
 		Seq:      seq,
 		OK:       ok,
@@ -241,6 +243,9 @@ func (s *Server) touchSuccessfulRPC(ctx context.Context, result any) {
 		}
 	}
 	if tid, ok := s.tabs.Lookup(tab); ok {
+		// The audit line names the full target so a delayed line cannot renew a
+		// different tab that later reuses this short id.
+		meta.target = string(tid)
 		s.touchTabActivity(tid)
 	}
 }
@@ -471,6 +476,9 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	short := s.tabs.RegisterPageTarget(tid)
+	if meta := auditMetaFrom(ctx); meta != nil {
+		meta.target = string(tid)
+	}
 	s.markTabManaged(tid, short, initial, p.Silent)
 	if !p.Silent {
 		s.tabs.Select(short)
@@ -1255,6 +1263,7 @@ func (s *Server) cdpHint(err error) string {
 		s.fatalCDPLost(err)
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		s.triggerBrowserProbe()
+		return fmt.Sprintf("%v (one RPC is limited to %ds; split longer work into several calls)", err, timeout.OperationSeconds)
 	}
 	return err.Error()
 }
