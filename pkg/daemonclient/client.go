@@ -79,10 +79,11 @@ func NewClient(baseURL string, opts ...ClientOption) *Client {
 }
 
 func (c *Client) applyHeaders(req *http.Request) {
-	if len(c.Headers) == 0 {
-		return
-	}
-	for k, vv := range c.Headers {
+	applyHeaders(req, c.Headers)
+}
+
+func applyHeaders(req *http.Request, h http.Header) {
+	for k, vv := range h {
 		for _, v := range vv {
 			req.Header.Set(k, v)
 		}
@@ -186,36 +187,71 @@ func (c *Client) Live(ctx context.Context) error {
 // Call performs a single JSON-RPC request on POST /v1. result must be a non-nil pointer
 // to decode the result field on success; if nil, the result payload is ignored when there is no error.
 func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
-	var paramsJSON json.RawMessage
-	if params == nil {
-		paramsJSON = []byte("{}")
-	} else {
-		b, err := json.Marshal(params)
-		if err != nil {
-			return fmt.Errorf("marshal params: %w", err)
-		}
-		paramsJSON = b
+	paramsJSON, err := marshalParams(params)
+	if err != nil {
+		return err
 	}
+	return c.rpcTarget(false).call(ctx, method, paramsJSON, result)
+}
 
+func marshalParams(params any) (json.RawMessage, error) {
+	if params == nil {
+		return json.RawMessage("{}"), nil
+	}
+	b, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("marshal params: %w", err)
+	}
+	return b, nil
+}
+
+// rpcTarget is what one POST /v1 needs from a [Client], read at a single point
+// in time: where to send it, with which HTTP client and headers, and the
+// request id already drawn from the Client's counter. A request made from it
+// never touches the Client again, so it may outlive the call that created it.
+type rpcTarget struct {
+	http    *http.Client
+	url     string
+	headers http.Header
+	id      json.RawMessage
+}
+
+// rpcTarget captures the Client's current configuration and the next request
+// id. With cloneHeaders the headers are deep-copied, for requests that keep
+// running on another goroutine while the caller is free to change the Client.
+func (c *Client) rpcTarget(cloneHeaders bool) rpcTarget {
+	t := rpcTarget{
+		http:    c.httpClient(),
+		url:     c.BaseURL + "/v1",
+		headers: c.Headers,
+		id:      c.nextID(),
+	}
+	if cloneHeaders {
+		t.headers = c.Headers.Clone()
+	}
+	return t
+}
+
+func (t rpcTarget) call(ctx context.Context, method string, paramsJSON json.RawMessage, result any) error {
 	reqObj := protocol.Request{
 		JSONRPC: "2.0",
 		Method:  method,
 		Params:  paramsJSON,
-		ID:      c.nextID(),
+		ID:      t.id,
 	}
 	raw, err := json.Marshal(reqObj)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1", bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.url, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
-	c.applyHeaders(req)
+	applyHeaders(req, t.headers)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient().Do(req)
+	resp, err := t.http.Do(req)
 	if err != nil {
 		return err
 	}

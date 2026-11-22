@@ -3,12 +3,14 @@ package daemonclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
@@ -51,13 +53,28 @@ import (
 //     is therefore split across the healthy ones instead of all going to its
 //     ring neighbour, and a create that fails over while others are running
 //     does not re-take or skip their turns.
-//   - tab_list: query every backend in constructor order, prefix each id, and
-//     merge. A down backend is skipped (its tabs are omitted). If every
-//     backend fails, the error is [*AllFailedError]. Listed ids are bound so
-//     later tab ops can use them. There is no pool-wide focus: Tab and Focus
-//     are the first non-empty values in constructor order.
-//   - tab_focus: first successful backend in constructor order (skip down);
+//   - tab_list: query every backend concurrently, prefix each id, and merge
+//     in constructor order (not completion order). A down backend is skipped
+//     (its tabs are omitted). If every backend fails, the error is
+//     [*AllFailedError]. Listed ids are bound so later tab ops can use them.
+//     There is no pool-wide focus: Tab and Focus are the first non-empty
+//     values in constructor order.
+//   - tab_focus: query every backend concurrently and return the first
+//     successful one in constructor order (skip down), not the fastest;
 //     return prefixed ids. Not a pool-wide focus.
+//   - tab_list / tab_focus wait at most 2s (or the caller's deadline if
+//     sooner) for backends. One that has not answered by then is skipped like
+//     a down backend and its request is cancelled; answers already received
+//     are returned. An answer completed after that budget never counts, even
+//     if it arrives before the call returns. If none succeeded the error is
+//     the caller's context error when its deadline passed, else
+//     [*AllFailedError]. Cancelling the caller's context aborts the call with
+//     that error, no result and no bindings, even if answers are already in.
+//     Bindings and result are staged and committed together; the last
+//     cancellation check is made under the pool's tab lock right before that
+//     commit, so only a cancellation after that check comes too late. Each
+//     request uses the backend Client's HTTP / BaseURL / Headers as they were
+//     when the call started. No other Pool method has a built-in timeout.
 //   - Bound requests: parse the prefix, then lookup in the tab map. Unknown
 //     tab ids return [*UnknownTabError]; malformed / unknown-prefix ids return
 //     [*InvalidTabIDError] (no silent fallback).
@@ -74,9 +91,16 @@ type Pool struct {
 	createMu   sync.Mutex
 	createNext int
 
+	fanoutTimeout time.Duration // see defaultFanoutTimeout
+
 	mu   sync.Mutex
 	tabs map[string]int // external tab id → backend that opened it
 }
+
+// defaultFanoutTimeout bounds how long tab_list / tab_focus wait for backends
+// (a shorter caller deadline still wins). It matches the daemon's default CDP
+// watchdog probe timeout.
+const defaultFanoutTimeout = 2 * time.Second
 
 // PoolBackend is one named member of a [Pool]. Key is the prefix in external
 // tab ids (`<key>:<daemonShortId>`). If Key is empty, [NewPoolBackends] uses
@@ -134,6 +158,8 @@ func NewPoolBackends(backends ...PoolBackend) (*Pool, error) {
 		byKey:    byKey,
 		inFlight: make([]atomic.Int64, len(clients)),
 		tabs:     make(map[string]int),
+
+		fanoutTimeout: defaultFanoutTimeout,
 	}, nil
 }
 
@@ -340,25 +366,18 @@ func (p *Pool) callBound(ctx context.Context, tab, method string, params any, re
 }
 
 func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
+	replies, err := fanout[protocol.TabListResult](ctx, p, protocol.MethodTabList, params, false)
+	if err != nil {
+		return err
+	}
 	merged := protocol.TabListResult{Tabs: []protocol.TabListItem{}}
-	var lastErrs []error
-	anyOK := false
-	for i := range p.clients {
-		if err := ctx.Err(); err != nil {
-			return err
+	var observed []observedTab
+	for _, r := range replies {
+		one := prefixTabListResult(p.keys[r.idx], r.val)
+		observed = appendObserved(observed, r.idx, one.Tab, one.Focus)
+		for _, item := range one.Tabs {
+			observed = appendObserved(observed, r.idx, item.Tab)
 		}
-		var one protocol.TabListResult
-		hold := p.track(i)
-		err := p.clients[i].Call(ctx, protocol.MethodTabList, params, &one)
-		hold()
-		if err != nil {
-			lastErrs = append(lastErrs, err)
-			continue
-		}
-		anyOK = true
-		one = prefixTabListResult(p.keys[i], one)
-		ids := append([]string{one.Tab, one.Focus}, tabIDsFromList(one)...)
-		p.bindObservedTabs(i, ids...)
 		merged.Tabs = append(merged.Tabs, one.Tabs...)
 		if one.Seq > merged.Seq {
 			merged.Seq = one.Seq
@@ -370,32 +389,233 @@ func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
 			merged.Focus = one.Focus
 		}
 	}
-	if !anyOK {
-		return &AllFailedError{Op: protocol.MethodTabList, Errs: lastErrs}
-	}
-	return copyResult(result, merged)
+	return p.commitObserved(ctx, observed, result, merged)
 }
 
 func (p *Pool) callTabFocus(ctx context.Context, params any, result any) error {
-	var lastErrs []error
-	for i := range p.clients {
-		if err := ctx.Err(); err != nil {
-			return err
+	replies, err := fanout[protocol.TabFocusResult](ctx, p, protocol.MethodTabFocus, params, true)
+	if err != nil {
+		return err
+	}
+	i, one := replies[0].idx, replies[0].val
+	one.Tab = prefixPoolTab(p.keys[i], one.Tab)
+	one.Focus = prefixPoolTab(p.keys[i], one.Focus)
+	return p.commitObserved(ctx, appendObserved(nil, i, one.Tab, one.Focus), result, one)
+}
+
+// observedTab is a binding staged by tab_list / tab_focus: Pool-facing tab id
+// → backend that reported it.
+type observedTab struct {
+	tab string
+	idx int
+}
+
+func appendObserved(dst []observedTab, idx int, tabs ...string) []observedTab {
+	for _, tab := range tabs {
+		if tab = strings.TrimSpace(tab); tab != "" {
+			dst = append(dst, observedTab{tab: tab, idx: idx})
 		}
-		var one protocol.TabFocusResult
-		hold := p.track(i)
-		err := p.clients[i].Call(ctx, protocol.MethodTabFocus, params, &one)
-		hold()
-		if err != nil {
-			lastErrs = append(lastErrs, err)
+	}
+	return dst
+}
+
+// commitObserved is the single point where a tab_list / tab_focus outcome
+// takes effect. Up to here nothing has touched the pool's tab map or the
+// caller's result: the bindings are staged in observed and src is decoded into
+// a fresh value of the result's type (outside the lock, since that can be slow
+// and may run the caller's own decoder).
+//
+// Then, holding the affinity lock, the caller's context is checked one last
+// time. If it was cancelled (done for a reason other than its deadline) at any
+// point before that check, including while preparing the result or waiting
+// for the lock, the call returns that error with no binding made and result
+// left exactly as it was. A deadline that passed is not a cancellation: the
+// in-budget answers are committed. Otherwise the whole batch is bound under
+// the same lock hold and the prepared value replaces *result.
+//
+// A cancellation after that check is too late: the batch is committed and the
+// call succeeds.
+//
+// Bindings follow [Pool.bind]: an id another backend already owns is left
+// alone. A src that cannot be decoded into result is reported after binding
+// (the tabs were observed either way) and result is not written.
+func (p *Pool) commitObserved(ctx context.Context, observed []observedTab, result any, src any) error {
+	deliver, decodeErr := stageResult(result, src)
+
+	p.mu.Lock()
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		p.mu.Unlock()
+		return err
+	}
+	for _, o := range observed {
+		if prev, ok := p.tabs[o.tab]; ok && prev != o.idx {
 			continue
 		}
-		one.Tab = prefixPoolTab(p.keys[i], one.Tab)
-		one.Focus = prefixPoolTab(p.keys[i], one.Focus)
-		p.bindObservedTabs(i, one.Tab, one.Focus)
-		return copyResult(result, one)
+		p.tabs[o.tab] = o.idx
 	}
-	return &AllFailedError{Op: protocol.MethodTabFocus, Errs: lastErrs}
+	p.mu.Unlock()
+
+	if decodeErr != nil {
+		return decodeErr
+	}
+	deliver()
+	return nil
+}
+
+// stageResult decodes src (through JSON, like [Client.Call] would) into a new
+// value of the type dst points to and returns a deliver func that stores it in
+// *dst. dst itself is not touched until deliver runs, which is a plain
+// assignment: it cannot fail and runs none of the caller's code. On success
+// *dst is replaced as a whole (nothing of its previous value is merged in). A
+// nil dst discards the result.
+func stageResult(dst any, src any) (deliver func(), err error) {
+	if dst == nil {
+		return func() {}, nil
+	}
+	b, err := json.Marshal(src)
+	if err != nil {
+		return nil, err
+	}
+	rv := reflect.ValueOf(dst)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return nil, fmt.Errorf("daemonclient: decode result: %w", &json.InvalidUnmarshalError{Type: rv.Type()})
+	}
+	staged := reflect.New(rv.Type().Elem())
+	if err := json.Unmarshal(b, staged.Interface()); err != nil {
+		return nil, fmt.Errorf("daemonclient: decode result: %w", err)
+	}
+	return func() { rv.Elem().Set(staged.Elem()) }, nil
+}
+
+// fanoutReply is one backend's answer to a [fanout] request.
+type fanoutReply[R any] struct {
+	idx  int
+	val  R
+	err  error
+	done time.Time // when the answer was fully read and decoded
+}
+
+// fanout sends method to every backend at once and returns the successful
+// replies in constructor order (never empty when err is nil). The wait ends
+// when every backend has answered, when the caller's context is done, or after
+// p.fanoutTimeout, whichever comes first; with firstOnly it also ends as soon
+// as the first success in constructor order is known.
+//
+// Only a success that completed inside that budget counts: each reply is
+// timestamped when it is fully decoded, and one stamped at or after the
+// deadline is treated as timed out however it reached the collector. Backends
+// that have not answered when the wait ends are abandoned (their requests are
+// cancelled) and count as failed too. With no success the error is the
+// caller's context error if it is done, else [*AllFailedError].
+//
+// Cancellation wins over any answer: if the caller's context is cancelled
+// (done for a reason other than its deadline) when the wait ends, the call
+// returns that error and discards the whole batch. The callers check again at
+// the point of commit (see [Pool.commitObserved]).
+//
+// Each request is built before its goroutine starts from a snapshot of the
+// backend [Client] (HTTP client, URL, cloned headers, request id), so an
+// abandoned request never reads a Client the caller may now be reconfiguring.
+// The goroutines only write to their own reply; binding and handing over the
+// caller's result happen in the calling goroutine after fanout returns, so a
+// late answer has no effect.
+func fanout[R any](ctx context.Context, p *Pool, method string, params any, firstOnly bool) ([]fanoutReply[R], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Marshal once: abandoned goroutines must not read the caller's params.
+	paramsJSON, err := marshalParams(params)
+	if err != nil {
+		return nil, err
+	}
+	n := len(p.clients)
+	targets := make([]rpcTarget, n)
+	for i, c := range p.clients {
+		targets[i] = c.rpcTarget(true)
+	}
+
+	fctx, cancel := context.WithTimeout(ctx, p.fanoutTimeout)
+	defer cancel()
+	deadline, _ := fctx.Deadline()
+
+	ch := make(chan fanoutReply[R], n) // buffered: abandoned senders never block
+	for i, target := range targets {
+		release := p.track(i)
+		go func() {
+			r := fanoutReply[R]{idx: i}
+			r.err = target.call(fctx, method, paramsJSON, &r.val)
+			r.done = time.Now()
+			release()
+			ch <- r
+		}()
+	}
+
+	replies := make([]*fanoutReply[R], n)
+	record := func(r fanoutReply[R]) {
+		if r.err == nil && !r.done.Before(deadline) {
+			var zero R
+			r.val, r.err = zero, context.DeadlineExceeded
+		}
+		replies[r.idx] = &r
+	}
+	// decided reports whether the first success in constructor order is known.
+	decided := func() bool {
+		for _, r := range replies {
+			if r == nil {
+				return false
+			}
+			if r.err == nil {
+				return true
+			}
+		}
+		return false
+	}
+wait:
+	for pending := n; pending > 0; pending-- {
+		select {
+		case r := <-ch:
+			record(r)
+			if firstOnly && decided() {
+				break wait
+			}
+		case <-fctx.Done():
+			// Keep answers that lost the select race; record still rejects
+			// the ones that completed too late.
+			for {
+				select {
+				case r := <-ch:
+					record(r)
+				default:
+					break wait
+				}
+			}
+		}
+	}
+
+	// Whichever select case fired, a cancelled caller gets no result and no
+	// bindings. This is an early exit; commitObserved makes the final check.
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
+	var ok []fanoutReply[R]
+	var errs []error
+	for _, r := range replies {
+		switch {
+		case r == nil:
+			errs = append(errs, context.DeadlineExceeded)
+		case r.err != nil:
+			errs = append(errs, r.err)
+		default:
+			ok = append(ok, *r)
+		}
+	}
+	if len(ok) == 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, &AllFailedError{Op: method, Errs: errs}
+	}
+	return ok, nil
 }
 
 func (p *Pool) callUnbound(ctx context.Context, method string, params any, result any) error {
@@ -648,38 +868,6 @@ func prefixTabListResult(key string, r protocol.TabListResult) protocol.TabListR
 	}
 	r.Tabs = out
 	return r
-}
-
-func tabIDsFromList(r protocol.TabListResult) []string {
-	ids := make([]string, 0, len(r.Tabs))
-	for _, item := range r.Tabs {
-		ids = append(ids, item.Tab)
-	}
-	return ids
-}
-
-func (p *Pool) bindObservedTabs(idx int, tabs ...string) {
-	for _, tab := range tabs {
-		tab = strings.TrimSpace(tab)
-		if tab == "" {
-			continue
-		}
-		_ = p.bind(tab, idx)
-	}
-}
-
-func copyResult(dst any, src any) error {
-	if dst == nil {
-		return nil
-	}
-	b, err := json.Marshal(src)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(b, dst); err != nil {
-		return fmt.Errorf("daemonclient: decode result: %w", err)
-	}
-	return nil
 }
 
 // setJSONTab rewrites only the tab field and leaves every other value untouched.
