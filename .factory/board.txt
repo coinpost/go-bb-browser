@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
 5 at your gates | 9 with the agent | 8 done
-Drawn Nov 22, 09:26 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 22, 09:32 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2    10h  生命周期事件溢出重同步与优雅关停次序
@@ -10,7 +10,7 @@ BACKLOG (5)                                 never built
     FT5    10h  快照ref作用域与脱离节点清理
     FT6    10h  run帮助布尔参数与选项终止符兼容
 
-NEW (7)                                     avg stay 5h
+NEW (8)                                     avg stay 5h
     FT7     7h  target释放与观测writer退役同步
     FT10    5h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
@@ -20,18 +20,18 @@ NEW (7)                                     avg stay 5h
                 兼容
     FT21    2h  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
                 向另一个 tab
-    FT22    1h  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
-    FT25   40m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+    FT22    2h  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
+    FT25   46m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败
-
-REVIEW (2)                                  avg stay 17m
-    FT26   12m  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
+    FT26    1m  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中
-    FT27    1m  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
+
+REVIEW (1)                                  avg stay 17m
+    FT27    6m  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
 
 READY (5) [!]                               avg stay 1h
-  * FT18    2h  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
+  * FT18    3h  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
                 该行及其后的全部记录截断丢弃
                 > Check, then ship
   * FT19    2h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
@@ -48,7 +48,7 @@ READY (5) [!]                               avg stay 1h
                 > Check, then ship
 
 DONE (8)
-    FT17    2h  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
+    FT17    3h  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
     FT16    3h  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
                 写，daemon 启动即退出
