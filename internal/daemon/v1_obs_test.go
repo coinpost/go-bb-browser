@@ -47,7 +47,7 @@ func TestV1NetworkSinceAndCursor(t *testing.T) {
 	srv.obsStore.PushNetwork(tid, seq2, json.RawMessage(`{"k":2}`))
 
 	body := bytes.NewBufferString(rpcReq(protocol.MethodNetwork, map[string]any{
-		"tab":   "3456",
+		"tab":   "ABCDEF123456",
 		"since": 0,
 	}, 1))
 	rec := httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestV1NetworkSinceAndCursor(t *testing.T) {
 	}
 
 	body2 := bytes.NewBufferString(rpcReq(protocol.MethodNetwork, map[string]any{
-		"tab":   "3456",
+		"tab":   "ABCDEF123456",
 		"since": env.Result.Events[0].Seq,
 	}, 2))
 	rec2 := httptest.NewRecorder()
@@ -107,7 +107,7 @@ func TestObsQueryIgnoresPreEnqueueCursor(t *testing.T) {
 	srv.obsStore.PushNetwork(tid, 100, json.RawMessage(`{"k":1}`))
 
 	body := bytes.NewBufferString(rpcReq(protocol.MethodNetwork, map[string]any{
-		"tab":   "3456",
+		"tab":   "ABCDEF123456",
 		"since": 0,
 	}, 1))
 	rec := httptest.NewRecorder()
@@ -133,7 +133,7 @@ func TestObsQueryIgnoresPreEnqueueCursor(t *testing.T) {
 
 	srv.obsStore.PushNetwork(tid, 200, json.RawMessage(`{"k":2}`))
 	body2 := bytes.NewBufferString(rpcReq(protocol.MethodNetwork, map[string]any{
-		"tab":   "3456",
+		"tab":   "ABCDEF123456",
 		"since": env.Result.Cursor,
 	}, 2))
 	rec2 := httptest.NewRecorder()

@@ -17,7 +17,7 @@ var (
 	errTabLockTimeout    = fmt.Errorf("tab lock timeout: %w", context.DeadlineExceeded)
 )
 
-func (s *Server) markTabManaged(tid target.ID, short, openURL string, silent bool) {
+func (s *Server) markTabManaged(tid target.ID) {
 	if s.tabIdle != nil {
 		s.tabIdle.MarkManaged(tid)
 	}
@@ -81,7 +81,7 @@ func (s *Server) clearRemovedTarget(tid target.ID) {
 }
 
 func (s *Server) removeTargetState(tid target.ID) {
-	if _, ok := s.tabs.RemoveTarget(tid); !ok {
+	if !s.tabs.RemoveTarget(tid) {
 		return
 	}
 	s.clearRemovedTarget(tid)
@@ -108,11 +108,11 @@ func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 		}
 		present[sn.TargetID] = struct{}{}
 	}
-	for shortID, lastAt := range loaded {
-		tid, ok := s.tabs.Lookup(shortID)
-		if !ok {
-			continue
-		}
+	// The log names tabs by complete CDP target id only. A logged tab is
+	// adopted when a page with exactly that id is still open; records written
+	// before that format carry no such identity and were skipped by the store.
+	for logged, lastAt := range loaded {
+		tid := target.ID(logged)
 		if _, ok := present[tid]; !ok {
 			continue
 		}
@@ -124,7 +124,7 @@ func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 	}
 }
 
-func (s *Server) closeTabByShort(ctx context.Context, tab string) error {
+func (s *Server) closeTab(ctx context.Context, tab string) error {
 	conn := s.tabConn()
 	if conn == nil {
 		return errTabCloseNoConn
@@ -134,17 +134,12 @@ func (s *Server) closeTabByShort(ctx context.Context, tab string) error {
 		return errTabLockTimeout
 	}
 	defer unlock()
-	return s.closeTabByShortLocked(ctx, conn, tab)
+	return s.closeTabLocked(ctx, conn, tab)
 }
 
-// closeTabByShortLocked closes tab while the caller holds its keyed operation lock.
-func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab string) error {
-	tid, ok := s.tabs.Lookup(tab)
-	if !ok {
-		if _, err := s.enumerateTabs(ctx, conn); err == nil {
-			tid, ok = s.tabs.Lookup(tab)
-		}
-	}
+// closeTabLocked closes tab while the caller holds its keyed operation lock.
+func (s *Server) closeTabLocked(ctx context.Context, conn tabConn, tab string) error {
+	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
 		return errTabCloseUnknownID
 	}
@@ -195,22 +190,22 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 			}
 			return
 		}
-		short, ok := s.tabs.ShortForTarget(tid)
-		if !ok {
+		if !s.tabs.Has(tid) {
 			s.forgetTabManaged(tid)
 			continue
 		}
+		tab := string(tid)
 		conn := s.tabConn()
 		if conn == nil {
 			if s.logger != nil {
-				s.logger.Warn("tab idle cleanup failed", "tab", short, "err", errTabCloseNoConn)
+				s.logger.Warn("tab idle cleanup failed", "tab", tab, "err", errTabCloseNoConn)
 			}
 			continue
 		}
-		unlock, locked := s.lockTab(ctx, short)
+		unlock, locked := s.lockTab(ctx, tab)
 		if !locked {
 			if s.logger != nil {
-				s.logger.Warn("tab idle cleanup failed", "tab", short, "err", errTabLockTimeout)
+				s.logger.Warn("tab idle cleanup failed", "tab", tab, "err", errTabLockTimeout)
 			}
 			continue
 		}
@@ -221,7 +216,7 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 			unlock()
 			continue
 		}
-		err := s.closeTabByShortLocked(ctx, conn, short)
+		err := s.closeTabLocked(ctx, conn, tab)
 		if err != nil && browser.ErrorKindOf(err) == browser.ErrorTargetGone {
 			// Idle cleanup is complete when Chrome has already removed the target.
 			// Keep explicit tab_close RPC errors unchanged.
@@ -237,12 +232,12 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 				continue
 			}
 			if s.logger != nil {
-				s.logger.Warn("tab idle cleanup failed", "tab", short, "err", err)
+				s.logger.Warn("tab idle cleanup failed", "tab", tab, "err", err)
 			}
 			continue
 		}
 		if s.logger != nil {
-			s.logger.Info("tab idle closed", "tab", short, "idle", timeout)
+			s.logger.Info("tab idle closed", "tab", tab, "idle", timeout)
 		}
 	}
 }

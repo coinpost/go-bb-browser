@@ -128,6 +128,16 @@ type TabListParams struct{}
 // TabFocusParams is optional for tab_focus (empty object).
 type TabFocusParams struct{}
 
+// Tab ids. Every "tab" field in params and results — and "focus" and the items
+// of tab_list — is the complete CDP target id of a page target, as an opaque
+// string. Send it back exactly as the daemon returned it: the daemon matches it
+// byte for byte (no trimming, case folding, prefix or suffix match) and answers
+// "unknown tab id" (CodeInvalidParams) for anything else, including ids of tabs
+// that are gone. It never substitutes the focused tab or another tab for an id
+// that was supplied. The short suffix ids of earlier versions no longer exist.
+// A target id is unique among the targets of one running browser; it is not
+// promised to stay unique across browser restarts.
+
 type TabSelectParams struct {
 	Tab string `json:"tab"`
 }
@@ -237,6 +247,8 @@ type TabListItem struct {
 
 // --- Result payloads (nested under "result") — INV-1 tab + seq where applicable ---
 
+// TabListResult lists page targets ordered by tab id. Tab is the operational
+// tab (Focus when set, else the first item); both are complete target ids.
 type TabListResult struct {
 	Tab   string        `json:"tab,omitempty"`
 	Seq   uint64        `json:"seq"`

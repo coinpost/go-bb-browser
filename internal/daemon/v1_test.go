@@ -118,7 +118,7 @@ func (f *fakeConn) RemoveNetworkRoutes(target.ID, string) error { return nil }
 
 func (f *fakeConn) NetworkRouteCount(target.ID) int { return 0 }
 
-func (f *fakeConn) DetectForegroundShort([]state.TabSnapshot) (string, bool) {
+func (f *fakeConn) DetectForegroundTarget([]state.TabSnapshot) (target.ID, bool) {
 	f.focusCalls.Add(1)
 	return "", false
 }
@@ -191,10 +191,10 @@ func TestV1TabListWithoutTabParam(t *testing.T) {
 	if env.Result.Seq == 0 {
 		t.Fatalf("seq %d want > 0", env.Result.Seq)
 	}
-	if env.Result.Tab != "3456" {
-		t.Fatalf("tab %q want 3456 (first when no focus)", env.Result.Tab)
+	if env.Result.Tab != "ABCDEF123456" {
+		t.Fatalf("tab %q want ABCDEF123456 (first when no focus)", env.Result.Tab)
 	}
-	if len(env.Result.Tabs) != 1 || env.Result.Tabs[0].Tab != "3456" {
+	if len(env.Result.Tabs) != 1 || env.Result.Tabs[0].Tab != "ABCDEF123456" {
 		t.Fatalf("tabs %#v", env.Result.Tabs)
 	}
 }
@@ -280,8 +280,8 @@ func TestV1TabFocus(t *testing.T) {
 	if env.Result.Seq == 0 {
 		t.Fatalf("seq %d want > 0", env.Result.Seq)
 	}
-	if env.Result.Tab != "3456" {
-		t.Fatalf("tab %q want 3456", env.Result.Tab)
+	if env.Result.Tab != "ABCDEF123456" {
+		t.Fatalf("tab %q want ABCDEF123456", env.Result.Tab)
 	}
 	if env.Result.Title != "t" || env.Result.URL != "https://ex" {
 		t.Fatalf("meta title=%q url=%q", env.Result.Title, env.Result.URL)
@@ -514,7 +514,7 @@ func TestV1SeqMonotonicAcrossCalls(t *testing.T) {
 	}
 
 	a := do(rpcReq(protocol.MethodTabList, map[string]any{}, 1))
-	b := do(rpcReq(protocol.MethodTabSelect, map[string]string{"tab": "3456"}, 2))
+	b := do(rpcReq(protocol.MethodTabSelect, map[string]string{"tab": "ABCDEF123456"}, 2))
 	c := do(rpcReq(protocol.MethodTabList, map[string]any{}, 3))
 	if !(a < b && b < c) {
 		t.Fatalf("seq not increasing: %d %d %d", a, b, c)

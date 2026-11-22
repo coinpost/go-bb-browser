@@ -17,9 +17,9 @@ type targetsExecutor struct {
 
 func TestDetectForegroundHungTabDoesNotSerializeProbes(t *testing.T) {
 	snaps := []state.TabSnapshot{
-		{ShortID: "a", TargetID: "A"},
-		{ShortID: "b", TargetID: "B"},
-		{ShortID: "c", TargetID: "C"},
+		{TargetID: "A"},
+		{TargetID: "B"},
+		{TargetID: "C"},
 	}
 	var calls atomic.Int64
 	start := time.Now()

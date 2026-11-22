@@ -72,11 +72,13 @@ func TestCompactRPCLogBody_longScript(t *testing.T) {
 }
 
 func TestCompactRPCLogBody_tabStillReadable(t *testing.T) {
+	// A complete CDP target id is far below the compaction threshold.
+	const tab = "AAAA0000000000000000000000AB1234"
 	script := strings.Repeat("z", 500)
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "eval",
-		"params":  map[string]any{"tab": "1234", "script": script},
+		"params":  map[string]any{"tab": tab, "script": script},
 		"id":      1,
 	})
 	if err != nil {
@@ -84,8 +86,16 @@ func TestCompactRPCLogBody_tabStillReadable(t *testing.T) {
 	}
 
 	got := compactRPCLogBody(body)
-	if tab := TabFromRequestBody(got); tab != "1234" {
-		t.Fatalf("tab from compacted body: got %q want 1234", tab)
+	var env struct {
+		Params struct {
+			Tab string `json:"tab"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(got, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Params.Tab != tab {
+		t.Fatalf("tab from compacted body: got %q want %q", env.Params.Tab, tab)
 	}
 }
 
@@ -123,10 +133,10 @@ func TestAppendRPC_compactsLongScriptOnDisk(t *testing.T) {
 	}
 
 	if err := s.AppendRPC(LogRecord{
-		Action: "eval",
-		Body:   body,
-		Tab:    "aa11",
-		OK:     true,
+		Action:   "eval",
+		Body:     body,
+		TargetID: "aa11",
+		OK:       true,
 	}); err != nil {
 		t.Fatal(err)
 	}

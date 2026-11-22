@@ -500,14 +500,14 @@ func pageTargetsWithExecutor(ctx context.Context, ex cdp.Executor) ([]*target.In
 	return pages, nil
 }
 
-// DetectForegroundShort returns the short id of the unique page target whose
+// DetectForegroundTarget returns the target id of the unique page target whose
 // document.visibilityState is "visible". If zero or more than one target
 // qualifies (typical with multiple visible browser windows), it returns "", false.
-func (s *Session) DetectForegroundShort(snaps []state.TabSnapshot) (string, bool) {
-	return s.DetectForegroundShortContext(context.Background(), snaps)
+func (s *Session) DetectForegroundTarget(snaps []state.TabSnapshot) (target.ID, bool) {
+	return s.DetectForegroundTargetContext(context.Background(), snaps)
 }
 
-func (s *Session) DetectForegroundShortContext(ctx context.Context, snaps []state.TabSnapshot) (string, bool) {
+func (s *Session) DetectForegroundTargetContext(ctx context.Context, snaps []state.TabSnapshot) (target.ID, bool) {
 	if s == nil || len(snaps) == 0 {
 		return "", false
 	}
@@ -524,7 +524,7 @@ func (s *Session) DetectForegroundShortContext(ctx context.Context, snaps []stat
 
 type visibilityProbe func(context.Context, state.TabSnapshot) (bool, error)
 
-func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, concurrency int, perTab, total time.Duration, probe visibilityProbe) (string, bool) {
+func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, concurrency int, perTab, total time.Duration, probe visibilityProbe) (target.ID, bool) {
 	if len(snaps) == 0 || probe == nil {
 		return "", false
 	}
@@ -537,7 +537,7 @@ func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, 
 	overall, cancel := context.WithTimeout(ctx, total)
 	defer cancel()
 	type result struct {
-		short   string
+		id      target.ID
 		visible bool
 		ok      bool
 	}
@@ -564,10 +564,10 @@ func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, 
 				results <- result{}
 				return
 			}
-			results <- result{short: sn.ShortID, visible: visible, ok: true}
+			results <- result{id: sn.TargetID, visible: visible, ok: true}
 		}()
 	}
-	var picked string
+	var picked target.ID
 	complete := 0
 	for range len(snaps) {
 		var r result
@@ -585,7 +585,7 @@ func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, 
 		if picked != "" {
 			return "", false
 		}
-		picked = r.short
+		picked = r.id
 	}
 	if complete != len(snaps) || picked == "" {
 		return "", false

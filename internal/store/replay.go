@@ -17,17 +17,19 @@ func cloneManaged(in map[string]time.Time) map[string]time.Time {
 	return out
 }
 
-// applyManagedUpdate folds one log record into the managed-tab activity map:
-// tab_new registers a tab, tab_close releases it, and other tab-related methods
-// refresh its last-activity time.
+// applyManagedUpdate folds one log record into the managed-tab activity map,
+// keyed by complete CDP target id: tab_new registers a tab, tab_close releases
+// it, and other tab-related methods refresh its last-activity time.
+//
+// The identity comes from rec.TargetID alone. A record without it (written by
+// a daemon that named tabs by short alias, or for a request that was never
+// resolved) is skipped: neither a legacy alias nor the tab the client asked
+// for in the request body proves which target was operated on.
 func applyManagedUpdate(managed map[string]time.Time, rec LogRecord) {
 	if managed == nil || !rec.OK {
 		return
 	}
-	tab := rec.Tab
-	if tab == "" {
-		tab = tabFromRequestBody(rec.Body)
-	}
+	tab := rec.TargetID
 	switch rec.Action {
 	case protocol.MethodTabNew:
 		if tab != "" {

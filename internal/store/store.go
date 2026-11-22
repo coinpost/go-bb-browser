@@ -29,7 +29,7 @@ const (
 )
 
 // snapshotBody is the placeholder request body written for synthetic tab_new
-// records emitted at rotation time (recovery only needs Action/Tab/Time).
+// records emitted at rotation time (recovery only needs Action/TargetID/Time).
 var snapshotBody = json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{}}`)
 
 // RPCLogFile returns the on-disk RPC log filename under StateDir.
@@ -68,10 +68,15 @@ type Store struct {
 }
 
 // LogRecord is one append-only RPC log line.
+//
+// TargetID is the complete CDP target id the request was resolved to; it is
+// the only field recovery reads a tab identity from. Logs written before this
+// format named tabs by a short suffix alias under "tab": that key is no longer
+// read, so those records identify no tab.
 type LogRecord struct {
 	Action   string          `json:"action"`
 	Body     json.RawMessage `json:"body"`
-	Tab      string          `json:"tab,omitempty"`
+	TargetID string          `json:"target_id,omitempty"`
 	SenderIP string          `json:"sender_ip"`
 	Seq      uint64          `json:"seq,omitempty"`
 	OK       bool            `json:"ok"`
@@ -124,13 +129,21 @@ func Open(cfg OpenConfig) (*Store, error) {
 	}
 
 	managed := make(map[string]time.Time)
+	unidentified := 0
 	needNewline, err := replayLog(f, logger, func(rec LogRecord) error {
+		if rec.OK && rec.Action == protocol.MethodTabNew && rec.TargetID == "" {
+			unidentified++
+		}
 		applyManagedUpdate(managed, rec)
 		return nil
 	})
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("replay rpc log: %w", err)
+	}
+	if unidentified > 0 {
+		logger.Warn("rpc log has tab_new records without a complete target id (written by an older daemon); those tabs are not adopted for idle cleanup",
+			"records", unidentified)
 	}
 
 	s.logFile = f
@@ -324,20 +337,20 @@ func (s *Store) writeManagedSnapshotLocked() error {
 	if len(s.managed) == 0 {
 		return nil
 	}
-	shorts := make([]string, 0, len(s.managed))
-	for short := range s.managed {
-		shorts = append(shorts, short)
+	ids := make([]string, 0, len(s.managed))
+	for id := range s.managed {
+		ids = append(ids, id)
 	}
-	sort.Strings(shorts)
+	sort.Strings(ids)
 
 	var buf bytes.Buffer
-	for _, short := range shorts {
+	for _, id := range ids {
 		data, err := json.Marshal(LogRecord{
-			Action: protocol.MethodTabNew,
-			Body:   snapshotBody,
-			Tab:    short,
-			OK:     true,
-			Time:   s.managed[short],
+			Action:   protocol.MethodTabNew,
+			Body:     snapshotBody,
+			TargetID: id,
+			OK:       true,
+			Time:     s.managed[id],
 		})
 		if err != nil {
 			return err
@@ -388,7 +401,8 @@ func (s *Store) rawWriteLocked(p []byte) (int, error) {
 	return s.logFile.Write(p)
 }
 
-// ReplayManagedTabActivity returns managed tab short ids and last activity, rebuilt by replaying the log at startup.
+// ReplayManagedTabActivity returns managed tabs keyed by complete CDP target id
+// with their last activity, rebuilt by replaying the log at startup.
 func (s *Store) ReplayManagedTabActivity() map[string]time.Time {
 	if s == nil {
 		return nil

@@ -111,12 +111,12 @@ func TestOpenDiskMode(t *testing.T) {
 	}
 	body := json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`)
 	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabNew,
-		Body:   body,
-		Tab:    "ab12",
-		Seq:    seq1,
-		OK:     true,
-		Time:   time.Now().UTC(),
+		Action:   protocol.MethodTabNew,
+		Body:     body,
+		TargetID: "ab12",
+		Seq:      seq1,
+		OK:       true,
+		Time:     time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +156,8 @@ func TestOpenRebuildsManagedFromFullLog(t *testing.T) {
 
 	t0 := time.Now().UTC().Add(-time.Hour)
 	records := []LogRecord{
-		{Action: protocol.MethodTabNew, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`), Tab: "aa11", OK: true, Time: t0},
-		{Action: protocol.MethodGoto, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`), Tab: "aa11", OK: true, Time: t0.Add(time.Minute)},
+		{Action: protocol.MethodTabNew, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`), TargetID: "aa11", OK: true, Time: t0},
+		{Action: protocol.MethodGoto, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`), TargetID: "aa11", OK: true, Time: t0.Add(time.Minute)},
 	}
 	var b strings.Builder
 	for _, rec := range records {
@@ -230,11 +230,11 @@ func TestOpenTruncatesIncompleteFinalLine(t *testing.T) {
 
 			// Append after recovery must not glue onto leftover corrupt bytes.
 			if err := s.AppendRPC(LogRecord{
-				Action: protocol.MethodGoto,
-				Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":3}`),
-				Tab:    "aa11",
-				OK:     true,
-				Time:   t0.Add(2 * time.Minute),
+				Action:   protocol.MethodGoto,
+				Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":3}`),
+				TargetID: "aa11",
+				OK:       true,
+				Time:     t0.Add(2 * time.Minute),
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -255,20 +255,20 @@ func TestLogRotationPreservesManaged(t *testing.T) {
 
 	newBody := json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`)
 	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabNew, Body: newBody, Tab: "aa11", OK: true, Time: time.Now().UTC(),
+		Action: protocol.MethodTabNew, Body: newBody, TargetID: "aa11", OK: true, Time: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// A tab that gets closed must NOT survive rotation.
 	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabNew, Body: newBody, Tab: "bb22", OK: true, Time: time.Now().UTC(),
+		Action: protocol.MethodTabNew, Body: newBody, TargetID: "bb22", OK: true, Time: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabClose,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":"bb22"},"id":2}`),
-		Tab:    "bb22", OK: true, Time: time.Now().UTC(),
+		Action:   protocol.MethodTabClose,
+		Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":"bb22"},"id":2}`),
+		TargetID: "bb22", OK: true, Time: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestLogRotationPreservesManaged(t *testing.T) {
 	gotoBody := json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://example.com/some/long/path"},"id":3}`)
 	for i := 0; i < 50; i++ {
 		if err := s.AppendRPC(LogRecord{
-			Action: protocol.MethodGoto, Body: gotoBody, Tab: "aa11", OK: true, Time: time.Now().UTC(),
+			Action: protocol.MethodGoto, Body: gotoBody, TargetID: "aa11", OK: true, Time: time.Now().UTC(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -310,30 +310,30 @@ func TestReplayManagedTabActivity(t *testing.T) {
 
 	managed := make(map[string]time.Time)
 	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodTabNew, Tab: "aa11", Seq: 1, OK: true, Time: t0,
+		Action: protocol.MethodTabNew, TargetID: "aa11", Seq: 1, OK: true, Time: t0,
 	})
 	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodGoto,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11"},"id":2}`),
-		Tab:    "aa11", Seq: 2, OK: true, Time: t1,
+		Action:   protocol.MethodGoto,
+		Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11"},"id":2}`),
+		TargetID: "aa11", Seq: 2, OK: true, Time: t1,
 	})
 	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodTabClose,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":"aa11"},"id":3}`),
-		Tab:    "aa11", Seq: 3, OK: true, Time: t2,
+		Action:   protocol.MethodTabClose,
+		Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":"aa11"},"id":3}`),
+		TargetID: "aa11", Seq: 3, OK: true, Time: t2,
 	})
 	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodTabNew, Tab: "bb22", Seq: 4, OK: true, Time: t1,
+		Action: protocol.MethodTabNew, TargetID: "bb22", Seq: 4, OK: true, Time: t1,
 	})
 	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodGoto,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"bb22"},"id":5}`),
-		Tab:    "bb22", Seq: 5, OK: false, Error: "fail", Time: t2,
+		Action:   protocol.MethodGoto,
+		Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"bb22"},"id":5}`),
+		TargetID: "bb22", Seq: 5, OK: false, Error: "fail", Time: t2,
 	})
 	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodGoto,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"cc33"},"id":6}`),
-		Tab:    "cc33", Seq: 6, OK: true, Time: t2,
+		Action:   protocol.MethodGoto,
+		Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"cc33"},"id":6}`),
+		TargetID: "cc33", Seq: 6, OK: true, Time: t2,
 	})
 
 	if len(managed) != 1 {

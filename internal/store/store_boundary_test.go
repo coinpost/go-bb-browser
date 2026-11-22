@@ -17,11 +17,11 @@ import (
 
 func tabNewRecord(tab string, at time.Time) LogRecord {
 	return LogRecord{
-		Action: protocol.MethodTabNew,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
-		Tab:    tab,
-		OK:     true,
-		Time:   at,
+		Action:   protocol.MethodTabNew,
+		Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
+		TargetID: tab,
+		OK:       true,
+		Time:     at,
 	}
 }
 
@@ -404,11 +404,11 @@ func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
 	}
 	s.mu.Unlock()
 	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodGoto,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`),
-		Tab:    "aa11",
-		OK:     true,
-		Time:   t0.Add(2 * time.Minute),
+		Action:   protocol.MethodGoto,
+		Body:     json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`),
+		TargetID: "aa11",
+		OK:       true,
+		Time:     t0.Add(2 * time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}

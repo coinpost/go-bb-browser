@@ -66,14 +66,14 @@ func (c *failingConn) AppendNetworkRoute(tid target.ID, r browser.NetworkRouteRu
 	return c.fakeConn.AppendNetworkRoute(tid, r)
 }
 
-const classificationTab = "1b2c"
+const classificationTab = "AAAA00000000000000000000000A1B2C"
 
 // newClassificationServer wires the fake as the live session (not tabHook) so
 // ensureBrowserSession really consults browserState instead of short-circuiting.
 func newClassificationServer(t *testing.T) (*Server, *failingConn) {
 	t.Helper()
 	srv := newSupervisorTestServer(t, 3)
-	conn := &failingConn{fakeConn: &fakeConn{infos: []*target.Info{{TargetID: "AAAA00000000000000000000000A1B2C", Type: "page"}}}}
+	conn := &failingConn{fakeConn: &fakeConn{infos: []*target.Info{{TargetID: classificationTab, Type: "page"}}}}
 	srv.tabLive = conn
 	if srv.tabHook != nil || srv.SkipBrowserAttach {
 		t.Fatal("test server must not bypass ensureBrowserSession")

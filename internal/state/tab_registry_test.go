@@ -1,43 +1,58 @@
 package state
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chromedp/cdproto/target"
 )
 
-func TestShortIDFromSuffix(t *testing.T) {
+const (
+	regIDA = target.ID("AAAA0000000000000000000000AB1234")
+	regIDB = target.ID("BBBB0000000000000000000000AB1234")
+)
+
+func TestSnapshotsCarryCompleteTargetID(t *testing.T) {
 	r := NewTabRegistry()
-	infos := []*target.Info{
-		{TargetID: "ABCDEF123456", Type: "page", Title: "a", URL: "https://a"},
+	snap := r.SyncPageTargets([]*target.Info{
+		{TargetID: regIDB, Type: "page", Title: "b", URL: "https://b"},
+		{TargetID: regIDA, Type: "page", Title: "a", URL: "https://a"},
+		{TargetID: "WORKER", Type: "service_worker"},
+	})
+	if len(snap) != 2 || snap[0].TargetID != regIDA || snap[1].TargetID != regIDB {
+		t.Fatalf("snapshots = %#v, want the two page targets ordered by id", snap)
 	}
-	snap := r.SyncPageTargets(infos)
-	if len(snap) != 1 {
-		t.Fatalf("snap len %d", len(snap))
+	if snap[0].Title != "a" || snap[0].URL != "https://a" {
+		t.Fatalf("snapshot = %#v", snap[0])
 	}
-	// Last 4 hex chars of id: ...3456
-	if snap[0].ShortID != "3456" {
-		t.Fatalf("short id %q want 3456", snap[0].ShortID)
+	if _, ok := r.Lookup("WORKER"); ok {
+		t.Fatal("a non-page target must not resolve")
 	}
 }
 
-func TestShortIDCollisionLengthens(t *testing.T) {
+// Lookup takes the complete target id verbatim. In particular the suffix
+// aliases the registry used to derive ("1234", lengthened on collision) and
+// every other partial or normalized spelling resolve to nothing.
+func TestLookupMatchesCompleteIDExactly(t *testing.T) {
 	r := NewTabRegistry()
-	// Two ids that share the same last 4 hex digits
-	infos := []*target.Info{
-		{TargetID: "1111AAAA2222BBBB", Type: "page", Title: "1", URL: ""},
-		{TargetID: "9999CCCC2222BBBB", Type: "page", Title: "2", URL: ""},
+	r.SyncPageTargets(pageInfos(regIDA, regIDB))
+
+	for _, id := range []target.ID{regIDA, regIDB} {
+		if got, ok := r.Lookup(string(id)); !ok || got != id {
+			t.Fatalf("Lookup(%q) = %q, %v", id, got, ok)
+		}
 	}
-	snap := r.SyncPageTargets(infos)
-	if len(snap) != 2 {
-		t.Fatalf("snap len %d", len(snap))
-	}
-	shorts := map[string]struct{}{}
-	for _, s := range snap {
-		shorts[s.ShortID] = struct{}{}
-	}
-	if len(shorts) != 2 {
-		t.Fatalf("expected distinct short ids, got %#v", snap)
+	a := string(regIDA)
+	for _, in := range []string{
+		"", "1234", "ab1234", "AB1234", a[len(a)-8:], a[1:], a[:4], a[:len(a)-1],
+		strings.ToLower(a), " " + a, a + " ", a + "\n", a + "0",
+	} {
+		if got, ok := r.Lookup(in); ok {
+			t.Errorf("Lookup(%q) resolved to %q", in, got)
+		}
+		if r.Select(target.ID(in)) {
+			t.Errorf("Select(%q) succeeded", in)
+		}
 	}
 }
 
@@ -56,21 +71,53 @@ func TestSelectUnknownTab(t *testing.T) {
 	}
 }
 
-func TestShortIDCollisionUsesMoreDigits(t *testing.T) {
+// When A goes away and a same-suffix B appears, A's id stops resolving and
+// never comes to mean B, whatever order the two were registered in and also
+// in a registry rebuilt from scratch.
+func TestGoneTargetIDNeverResolvesToSameSuffixTarget(t *testing.T) {
+	orders := map[string][]target.ID{"A first": {regIDA, regIDB}, "B first": {regIDB, regIDA}}
+	for name, order := range orders {
+		t.Run(name, func(t *testing.T) {
+			r := NewTabRegistry()
+			for _, id := range order {
+				r.RegisterPageTarget(id)
+			}
+			if !r.Select(regIDA) {
+				t.Fatal("select A")
+			}
+			_, removed := r.SyncPageTargetsDetailed(pageInfos(regIDB))
+			if len(removed) != 1 || removed[0].TargetID != regIDA {
+				t.Fatalf("removed = %#v, want A", removed)
+			}
+			if got, ok := r.Lookup(string(regIDA)); ok {
+				t.Fatalf("gone A resolved to %q", got)
+			}
+			if r.Selected() != "" {
+				t.Fatalf("selection = %q, want cleared with A (never moved to B)", r.Selected())
+			}
+			if got, ok := r.Lookup(string(regIDB)); !ok || got != regIDB {
+				t.Fatalf("live B = %q, %v", got, ok)
+			}
+
+			rebuilt := NewTabRegistry()
+			rebuilt.SyncPageTargets(pageInfos(regIDB))
+			if _, ok := rebuilt.Lookup(string(regIDA)); ok {
+				t.Fatal("rebuilt registry resolved the gone A")
+			}
+			if got, ok := rebuilt.Lookup(string(regIDB)); !ok || got != regIDB {
+				t.Fatalf("rebuilt registry: B = %q, %v", got, ok)
+			}
+		})
+	}
+}
+
+func TestRemoveTargetReportsRegistration(t *testing.T) {
 	r := NewTabRegistry()
-	infos := []*target.Info{
-		{TargetID: "AAA11115678", Type: "page"},
-		{TargetID: "BBB22225678", Type: "page"},
+	r.RegisterPageTarget(regIDA)
+	if !r.RemoveTarget(regIDA) {
+		t.Fatal("RemoveTarget of a registered target = false")
 	}
-	snap := r.SyncPageTargets(infos)
-	if len(snap) != 2 {
-		t.Fatalf("snap len %d", len(snap))
-	}
-	shorts := map[string]struct{}{}
-	for _, s := range snap {
-		shorts[s.ShortID] = struct{}{}
-	}
-	if len(shorts) != 2 {
-		t.Fatalf("want distinct shorts, got %#v", snap)
+	if r.RemoveTarget(regIDA) || r.Has(regIDA) {
+		t.Fatal("target still registered after removal")
 	}
 }

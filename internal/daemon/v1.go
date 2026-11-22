@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -166,14 +165,13 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 	if meta == nil || s.store == nil {
 		return
 	}
-	tab, seq, ok, errMsg := store.ParseResponseSummary(resp)
-	if tab == "" {
-		tab = store.TabFromRequestBody(meta.body)
-	}
+	seq, ok, errMsg := store.ParseResponseSummary(resp)
 	rec := store.LogRecord{
-		Action:   meta.action,
-		Body:     meta.body,
-		Tab:      tab,
+		Action: meta.action,
+		Body:   meta.body,
+		// Only the identity this request was actually resolved to is recorded;
+		// what the client asked for stays in Body.
+		TargetID: string(meta.target),
 		SenderIP: meta.senderIP,
 		Seq:      seq,
 		OK:       ok,
@@ -216,7 +214,7 @@ func (s *Server) rpcErr(ctx context.Context, w http.ResponseWriter, id json.RawM
 }
 
 func (s *Server) rpcOK(ctx context.Context, w http.ResponseWriter, id json.RawMessage, result any) {
-	s.touchSuccessfulRPC(ctx, result)
+	s.touchSuccessfulRPC(ctx)
 	s.writeJSONRPCBytes(ctx, w, id, func() ([]byte, error) {
 		return protocol.MarshalResponse(id, result)
 	})
@@ -225,24 +223,38 @@ func (s *Server) rpcOK(ctx context.Context, w http.ResponseWriter, id json.RawMe
 // touchSuccessfulRPC keeps the in-memory idle clock aligned with rpc.jsonl:
 // only successful tab-related RPCs renew a managed tab. tab_new is registered
 // at creation, tab_close removes state, and tab_list is intentionally passive.
-func (s *Server) touchSuccessfulRPC(ctx context.Context, result any) {
+// The tab renewed is the identity pinned while the request ran; nothing is
+// looked up again here.
+func (s *Server) touchSuccessfulRPC(ctx context.Context) {
 	meta := auditMetaFrom(ctx)
-	if meta == nil || !protocol.IsTabRelatedMethod(meta.action) {
+	if meta == nil || meta.target == "" || !protocol.IsTabRelatedMethod(meta.action) {
 		return
 	}
 	switch meta.action {
 	case protocol.MethodTabNew, protocol.MethodTabClose, protocol.MethodTabList:
 		return
 	}
-	tab := store.TabFromRequestBody(meta.body)
-	if tab == "" && meta.action == protocol.MethodTabFocus {
-		if focus, ok := result.(protocol.TabFocusResult); ok {
-			tab = focus.Tab
-		}
+	s.touchTabActivity(meta.target)
+}
+
+// pinTarget records the complete target id this request operates on. It is set
+// once: the lock, the CDP command, the idle renewal and the audit record of a
+// request all refer to the same target.
+func pinTarget(ctx context.Context, tid target.ID) {
+	if meta := auditMetaFrom(ctx); meta != nil && meta.target == "" {
+		meta.target = tid
 	}
-	if tid, ok := s.tabs.Lookup(tab); ok {
-		s.touchTabActivity(tid)
+}
+
+const unknownTabHint = "tab must be the complete CDP target id of an open tab, exactly as returned by tab_new / tab_list"
+
+// requestTab returns the tab id of a request exactly as sent, or "" when it is
+// missing or blank. The id is never trimmed or otherwise normalized.
+func requestTab(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
 	}
+	return raw
 }
 
 func (s *Server) nextSeq(ctx context.Context, w http.ResponseWriter, id json.RawMessage) (uint64, bool) {
@@ -276,28 +288,25 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 		})
 		return
 	}
-	sort.Slice(snaps, func(i, j int) bool {
-		return snaps[i].ShortID < snaps[j].ShortID
-	})
 	items := make([]protocol.TabListItem, 0, len(snaps))
 	for _, sn := range snaps {
 		items = append(items, protocol.TabListItem{
-			Tab:   sn.ShortID,
+			Tab:   string(sn.TargetID),
 			Title: sn.Title,
 			URL:   sn.URL,
 		})
 	}
 	focus := s.tabs.Selected()
-	tabField := operationalTabShort(s.tabs, snaps)
+	tabField := operationalTab(s.tabs, snaps)
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.TabListResult{
-		Tab:   tabField,
+		Tab:   string(tabField),
 		Seq:   seq,
 		Tabs:  items,
-		Focus: focus,
+		Focus: string(focus),
 	})
 }
 
@@ -331,15 +340,13 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		})
 		return
 	}
-	sort.Slice(snaps, func(i, j int) bool {
-		return snaps[i].ShortID < snaps[j].ShortID
-	})
 	s.syncRegistryFocusFromBrowser(ctx, conn, snaps)
 	focus := s.tabs.Selected()
-	tabField := operationalTabShort(s.tabs, snaps)
+	tabField := operationalTab(s.tabs, snaps)
+	pinTarget(ctx, tabField)
 	var title, url string
 	for _, sn := range snaps {
-		if sn.ShortID == tabField {
+		if sn.TargetID == tabField {
 			title = sn.Title
 			url = sn.URL
 			break
@@ -350,8 +357,8 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.TabFocusResult{
-		Tab:   tabField,
-		Focus: focus,
+		Tab:   string(tabField),
+		Focus: string(focus),
 		Title: title,
 		URL:   url,
 		Seq:   seq,
@@ -366,15 +373,15 @@ func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn,
 		return
 	}
 	type foregroundDetector interface {
-		DetectForegroundShort(snaps []state.TabSnapshot) (short string, ok bool)
+		DetectForegroundTarget(snaps []state.TabSnapshot) (id target.ID, ok bool)
 	}
 	type foregroundDetectorContext interface {
-		DetectForegroundShortContext(context.Context, []state.TabSnapshot) (short string, ok bool)
+		DetectForegroundTargetContext(context.Context, []state.TabSnapshot) (id target.ID, ok bool)
 	}
 	if d, ok := conn.(foregroundDetectorContext); ok {
-		sh, ok := d.DetectForegroundShortContext(ctx, snaps)
+		tid, ok := d.DetectForegroundTargetContext(ctx, snaps)
 		if ok {
-			_ = s.tabs.Select(sh)
+			_ = s.tabs.Select(tid)
 		}
 		return
 	}
@@ -382,26 +389,28 @@ func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn,
 	if !ok {
 		return
 	}
-	sh, ok := d.DetectForegroundShort(snaps)
+	tid, ok := d.DetectForegroundTarget(snaps)
 	if !ok {
 		return
 	}
-	_ = s.tabs.Select(sh)
+	_ = s.tabs.Select(tid)
 }
 
-func operationalTabShort(reg *state.TabRegistry, snaps []state.TabSnapshot) string {
+// operationalTab is the tab reported by calls that name none: the selected tab
+// when it is in snaps, else the first snapshot (snaps are ordered by target id).
+func operationalTab(reg *state.TabRegistry, snaps []state.TabSnapshot) target.ID {
 	if len(snaps) == 0 {
 		return ""
 	}
 	focus := reg.Selected()
 	if focus != "" {
 		for _, sn := range snaps {
-			if sn.ShortID == focus {
+			if sn.TargetID == focus {
 				return focus
 			}
 		}
 	}
-	return snaps[0].ShortID
+	return snaps[0].TargetID
 }
 
 func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id json.RawMessage, params json.RawMessage) {
@@ -410,7 +419,7 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -434,14 +443,16 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
-	if !s.tabs.Select(tab) {
+	tid, known := s.tabs.Lookup(tab)
+	if !known || !s.tabs.Select(tid) {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodTabSelect,
 		})
 		return
 	}
+	pinTarget(ctx, tid)
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
@@ -470,16 +481,17 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		})
 		return
 	}
-	short := s.tabs.RegisterPageTarget(tid)
-	s.markTabManaged(tid, short, initial, p.Silent)
+	s.tabs.RegisterPageTarget(tid)
+	pinTarget(ctx, tid)
+	s.markTabManaged(tid)
 	if !p.Silent {
-		s.tabs.Select(short)
+		s.tabs.Select(tid)
 	}
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
 	}
-	s.rpcOK(ctx, w, id, protocol.TabNewResult{Tab: short, Seq: seq})
+	s.rpcOK(ctx, w, id, protocol.TabNewResult{Tab: string(tid), Seq: seq})
 }
 
 func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.RawMessage, params json.RawMessage) {
@@ -488,7 +500,7 @@ func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -521,7 +533,7 @@ func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodGoto,
 		})
 		return
@@ -547,7 +559,7 @@ func (s *Server) handleReload(ctx context.Context, w http.ResponseWriter, id jso
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -571,7 +583,7 @@ func (s *Server) handleReload(ctx context.Context, w http.ResponseWriter, id jso
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodReload,
 		})
 		return
@@ -597,7 +609,7 @@ func (s *Server) handleTabClose(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -611,12 +623,12 @@ func (s *Server) handleTabClose(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	if err := s.closeTabByShort(ctx, tab); err != nil {
+	if err := s.closeTab(ctx, tab); err != nil {
 		switch {
 		case errors.Is(err, errTabCloseUnknownID):
 			s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 				Error:  "unknown tab id",
-				Hint:   "invalid or stale tab short id",
+				Hint:   unknownTabHint,
 				Method: protocol.MethodTabClose,
 			})
 		case errors.Is(err, errTabCloseNoConn):
@@ -645,7 +657,7 @@ func (s *Server) handleScreenshot(ctx context.Context, w http.ResponseWriter, id
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -668,7 +680,7 @@ func (s *Server) handleScreenshot(ctx context.Context, w http.ResponseWriter, id
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodScreenshot,
 		})
 		return
@@ -700,7 +712,7 @@ func (s *Server) handleEval(ctx context.Context, w http.ResponseWriter, id json.
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	script := strings.TrimSpace(p.Script)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -731,7 +743,7 @@ func (s *Server) handleEval(ctx context.Context, w http.ResponseWriter, id json.
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodEval,
 		})
 		return
@@ -758,7 +770,7 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
@@ -793,7 +805,7 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodClick,
 		})
 		return
@@ -819,7 +831,7 @@ func (s *Server) handleFetch(ctx context.Context, w http.ResponseWriter, id json
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	rawURL := strings.TrimSpace(p.URL)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -850,7 +862,7 @@ func (s *Server) handleFetch(ctx context.Context, w http.ResponseWriter, id json
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodFetch,
 		})
 		return
@@ -896,7 +908,7 @@ func (s *Server) handleSnapshot(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -919,6 +931,7 @@ func (s *Server) handleSnapshot(ctx context.Context, w http.ResponseWriter, id j
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodSnapshot,
 		})
 		return
@@ -965,7 +978,7 @@ func (s *Server) handleNetworkRoute(ctx context.Context, w http.ResponseWriter, 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	pat := strings.TrimSpace(p.URLPattern)
 	if tab == "" || pat == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab or url_pattern", nil)
@@ -984,7 +997,7 @@ func (s *Server) handleNetworkRoute(ctx context.Context, w http.ResponseWriter, 
 	defer unlock()
 	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: unknownTabHint})
 		return
 	}
 	rc, ok := conn.(routeConn)
@@ -1021,7 +1034,7 @@ func (s *Server) handleNetworkUnroute(ctx context.Context, w http.ResponseWriter
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1039,7 +1052,7 @@ func (s *Server) handleNetworkUnroute(ctx context.Context, w http.ResponseWriter
 	defer unlock()
 	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: unknownTabHint})
 		return
 	}
 	rc, ok := conn.(routeConn)
@@ -1068,7 +1081,7 @@ func (s *Server) handleConsoleClear(ctx context.Context, w http.ResponseWriter, 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1086,7 +1099,7 @@ func (s *Server) handleConsoleClear(ctx context.Context, w http.ResponseWriter, 
 	defer unlock()
 	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: unknownTabHint})
 		return
 	}
 	if s.obsStore != nil {
@@ -1105,7 +1118,7 @@ func (s *Server) handleErrorsClear(ctx context.Context, w http.ResponseWriter, i
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1123,7 +1136,7 @@ func (s *Server) handleErrorsClear(ctx context.Context, w http.ResponseWriter, i
 	defer unlock()
 	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: unknownTabHint})
 		return
 	}
 	if s.obsStore != nil {
@@ -1142,7 +1155,7 @@ func (s *Server) handleNetworkClear(ctx context.Context, w http.ResponseWriter, 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1160,7 +1173,7 @@ func (s *Server) handleNetworkClear(ctx context.Context, w http.ResponseWriter, 
 	defer unlock()
 	tid, ok := s.resolveTab(ctx, conn, tab)
 	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: unknownTabHint})
 		return
 	}
 	if s.obsStore != nil {
@@ -1179,7 +1192,7 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := requestTab(p.Tab)
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
@@ -1214,7 +1227,7 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	if !ok {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
 			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
+			Hint:   unknownTabHint,
 			Method: protocol.MethodFill,
 		})
 		return
@@ -1234,17 +1247,22 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	s.rpcOK(ctx, w, id, protocol.FillResult{Tab: tab, Seq: seq})
 }
 
+// resolveTab resolves the tab id of a request to a registered target and pins
+// it for the rest of the request. tab must be a complete CDP target id; when it
+// is not registered yet the registry is aligned with the browser once and the
+// same id is looked up again. Nothing else is ever substituted for it.
 func (s *Server) resolveTab(ctx context.Context, conn tabConn, tab string) (target.ID, bool) {
 	tid, ok := s.tabs.Lookup(tab)
-	if ok {
-		return tid, true
-	}
-	if _, err := s.enumerateTabs(ctx, conn); err == nil {
-		if tid, ok := s.tabs.Lookup(tab); ok {
-			return tid, true
+	if !ok {
+		if _, err := s.enumerateTabs(ctx, conn); err == nil {
+			tid, ok = s.tabs.Lookup(tab)
 		}
 	}
-	return tid, false
+	if !ok {
+		return "", false
+	}
+	pinTarget(ctx, tid)
+	return tid, true
 }
 
 func (s *Server) cdpHint(err error) string {

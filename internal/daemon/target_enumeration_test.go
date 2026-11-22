@@ -172,11 +172,11 @@ func enumMustRPC(t *testing.T, srv *Server, method string, params map[string]any
 
 func enumTabNew(t *testing.T, srv *Server) string {
 	t.Helper()
-	short, _ := enumMustRPC(t, srv, protocol.MethodTabNew, nil)["tab"].(string)
-	if short == "" {
+	tab, _ := enumMustRPC(t, srv, protocol.MethodTabNew, nil)["tab"].(string)
+	if tab == "" {
 		t.Fatal("tab_new returned no tab id")
 	}
-	return short
+	return tab
 }
 
 func enumAwait(t *testing.T, ch <-chan struct{}, what string) {
@@ -199,16 +199,16 @@ func enumPushNetwork(t *testing.T, srv *Server, tid target.ID) {
 
 // assertTabIntact checks every daemon-side resource a stale enumeration used to
 // destroy for a tab that tab_new reported as created.
-func assertTabIntact(t *testing.T, srv *Server, short string, tid target.ID) {
+func assertTabIntact(t *testing.T, srv *Server, tab string, tid target.ID) {
 	t.Helper()
-	if got, ok := srv.tabs.Lookup(short); !ok || got != tid {
-		t.Errorf("tab %q returned by tab_new is no longer registered (got %q, %v)", short, got, ok)
+	if got, ok := srv.tabs.Lookup(tab); !ok || got != tid {
+		t.Errorf("tab %q returned by tab_new is no longer registered (got %q, %v)", tab, got, ok)
 	}
 	if _, ok := srv.tabIdle.Snapshot()[tid]; !ok {
-		t.Errorf("tab %q lost its managed idle tracking", short)
+		t.Errorf("tab %q lost its managed idle tracking", tab)
 	}
 	if events, _, _ := srv.obsStore.QueryNetwork(tid, 0); len(events) != 1 {
-		t.Errorf("tab %q observation buffer has %d events, want 1", short, len(events))
+		t.Errorf("tab %q observation buffer has %d events, want 1", tab, len(events))
 	}
 }
 
@@ -231,7 +231,7 @@ func TestStaleEnumerationKeepsTabCreatedMeanwhile(t *testing.T) {
 	cases := []struct {
 		name   string
 		method string
-		params func(oldShort string) map[string]any
+		params func(oldTab string) map[string]any
 		// wantErr is true when the enumerating request itself must still fail
 		// (unknown tab id), independently of the tab created meanwhile.
 		wantErr bool
@@ -258,7 +258,7 @@ func TestStaleEnumerationKeepsTabCreatedMeanwhile(t *testing.T) {
 			srv := newEnumServer(t, conn)
 
 			enumMustRPC(t, srv, protocol.MethodTabList, nil)
-			oldShort, ok := srv.tabs.ShortForTarget(enumOldID)
+			oldTab, ok := testTabID(srv, enumOldID)
 			if !ok {
 				t.Fatal("precondition: existing tab not registered")
 			}
@@ -267,7 +267,7 @@ func TestStaleEnumerationKeepsTabCreatedMeanwhile(t *testing.T) {
 			defer release()
 			var params map[string]any
 			if tc.params != nil {
-				params = tc.params(oldShort)
+				params = tc.params(oldTab)
 			}
 			type outcome struct {
 				reply enumRPCReply
@@ -280,9 +280,9 @@ func TestStaleEnumerationKeepsTabCreatedMeanwhile(t *testing.T) {
 			}()
 			enumAwait(t, entered, tc.method+" to take its target snapshot")
 
-			short := enumTabNew(t, srv)
+			tab := enumTabNew(t, srv)
 			enumPushNetwork(t, srv, enumNewID)
-			assertTabIntact(t, srv, short, enumNewID)
+			assertTabIntact(t, srv, tab, enumNewID)
 			if t.Failed() {
 				t.Fatal("precondition: tab_new did not leave the tab registered and managed")
 			}
@@ -301,8 +301,8 @@ func TestStaleEnumerationKeepsTabCreatedMeanwhile(t *testing.T) {
 				t.Fatalf("%s error = %v, wantErr %v", tc.method, got.reply.Error, tc.wantErr)
 			}
 
-			assertTabIntact(t, srv, short, enumNewID)
-			if _, ok := srv.tabs.Lookup(oldShort); !ok {
+			assertTabIntact(t, srv, tab, enumNewID)
+			if _, ok := srv.tabs.Lookup(oldTab); !ok {
 				t.Error("pre-existing tab was removed")
 			}
 			if !conn.has(enumNewID) {
@@ -310,16 +310,16 @@ func TestStaleEnumerationKeepsTabCreatedMeanwhile(t *testing.T) {
 			}
 			// The id handed out by tab_new keeps working without any re-enumeration.
 			conn.setListErr(errors.New("enumeration must not be needed"))
-			enumMustRPC(t, srv, protocol.MethodEval, map[string]any{"tab": short, "script": "1"})
+			enumMustRPC(t, srv, protocol.MethodEval, map[string]any{"tab": tab, "script": "1"})
 			conn.setListErr(nil)
-			assertTabIntact(t, srv, short, enumNewID)
+			assertTabIntact(t, srv, tab, enumNewID)
 
 			// A fresh enumeration lists it and keeps it.
 			tabs, _ := enumMustRPC(t, srv, protocol.MethodTabList, nil)["tabs"].([]any)
 			if len(tabs) != 2 {
 				t.Errorf("fresh tab_list returned %d tabs, want 2: %v", len(tabs), tabs)
 			}
-			assertTabIntact(t, srv, short, enumNewID)
+			assertTabIntact(t, srv, tab, enumNewID)
 		})
 	}
 }
@@ -331,7 +331,7 @@ func TestStaleEnumerationStillRemovesTargetGoneBeforeRequest(t *testing.T) {
 	conn.nextIDs = []target.ID{enumNewID}
 	srv := newEnumServer(t, conn)
 	enumMustRPC(t, srv, protocol.MethodTabList, nil)
-	oldShort, _ := srv.tabs.ShortForTarget(enumOldID)
+	oldTab, _ := testTabID(srv, enumOldID)
 	srv.tabIdle.MarkManaged(enumOldID)
 	enumPushNetwork(t, srv, enumOldID)
 
@@ -344,7 +344,7 @@ func TestStaleEnumerationStillRemovesTargetGoneBeforeRequest(t *testing.T) {
 		done <- err
 	}()
 	enumAwait(t, entered, "tab_list to take its target snapshot")
-	short := enumTabNew(t, srv)
+	tab := enumTabNew(t, srv)
 	enumPushNetwork(t, srv, enumNewID)
 	release()
 	select {
@@ -356,8 +356,8 @@ func TestStaleEnumerationStillRemovesTargetGoneBeforeRequest(t *testing.T) {
 		t.Fatal("tab_list did not finish")
 	}
 
-	assertTabIntact(t, srv, short, enumNewID)
-	if _, ok := srv.tabs.Lookup(oldShort); ok {
+	assertTabIntact(t, srv, tab, enumNewID)
+	if _, ok := srv.tabs.Lookup(oldTab); ok {
 		t.Error("vanished target still registered")
 	}
 	if _, ok := srv.tabIdle.Snapshot()[enumOldID]; ok {
@@ -374,13 +374,13 @@ func TestFreshEnumerationRemovesVanishedTargets(t *testing.T) {
 	conn := newEnumConn()
 	srv := newEnumServer(t, conn)
 
-	shortA := enumTabNew(t, srv)
-	shortB := enumTabNew(t, srv)
-	tidA, _ := srv.tabs.Lookup(shortA)
-	tidB, _ := srv.tabs.Lookup(shortB)
+	tabA := enumTabNew(t, srv)
+	tabB := enumTabNew(t, srv)
+	tidA, _ := srv.tabs.Lookup(tabA)
+	tidB, _ := srv.tabs.Lookup(tabB)
 	enumPushNetwork(t, srv, tidA)
 	enumPushNetwork(t, srv, tidB)
-	unlock, ok := srv.lockTab(context.Background(), shortA)
+	unlock, ok := srv.lockTab(context.Background(), tabA)
 	if !ok {
 		t.Fatal("lock failed")
 	}
@@ -388,7 +388,7 @@ func TestFreshEnumerationRemovesVanishedTargets(t *testing.T) {
 
 	conn.removeExternally(tidA)
 	enumMustRPC(t, srv, protocol.MethodTabList, nil)
-	if _, ok := srv.tabs.Lookup(shortA); ok {
+	if _, ok := srv.tabs.Lookup(tabA); ok {
 		t.Error("vanished tab still registered after fresh tab_list")
 	}
 	if _, ok := srv.tabIdle.Snapshot()[tidA]; ok {
@@ -398,12 +398,12 @@ func TestFreshEnumerationRemovesVanishedTargets(t *testing.T) {
 		t.Errorf("vanished tab kept %d observation events", len(events))
 	}
 	srv.tabMuOps.Lock()
-	_, lockRetained := srv.tabCDPLocks[shortA]
+	_, lockRetained := srv.tabCDPLocks[tabA]
 	srv.tabMuOps.Unlock()
 	if lockRetained {
 		t.Error("vanished tab kept its keyed lock")
 	}
-	assertTabIntact(t, srv, shortB, tidB)
+	assertTabIntact(t, srv, tabB, tidB)
 
 	// The resolveTab fallback is a fresh enumeration too: it removes B, and
 	// the now-empty snapshot leaves nothing behind.
@@ -415,7 +415,7 @@ func TestFreshEnumerationRemovesVanishedTargets(t *testing.T) {
 	if reply.Error == nil {
 		t.Fatal("goto on an unknown tab must fail")
 	}
-	if _, ok := srv.tabs.Lookup(shortB); ok {
+	if _, ok := srv.tabs.Lookup(tabB); ok {
 		t.Error("tab missing from an empty fresh snapshot is still registered")
 	}
 	if left := srv.tabIdle.Snapshot(); len(left) != 0 {
@@ -437,7 +437,7 @@ func TestFailedEnumerationLeavesStateUntouched(t *testing.T) {
 	conn.nextIDs = []target.ID{enumNewID}
 	srv := newEnumServer(t, conn)
 	enumMustRPC(t, srv, protocol.MethodTabList, nil)
-	oldShort, _ := srv.tabs.ShortForTarget(enumOldID)
+	oldTab, _ := testTabID(srv, enumOldID)
 
 	conn.setListErr(errors.New("getTargets failed"))
 	entered, release := conn.holdNextSnapshot()
@@ -448,7 +448,7 @@ func TestFailedEnumerationLeavesStateUntouched(t *testing.T) {
 		done <- reply
 	}()
 	enumAwait(t, entered, "tab_list to reach the browser")
-	short := enumTabNew(t, srv)
+	tab := enumTabNew(t, srv)
 	enumPushNetwork(t, srv, enumNewID)
 	release()
 	select {
@@ -465,7 +465,7 @@ func TestFailedEnumerationLeavesStateUntouched(t *testing.T) {
 		params map[string]any
 	}{
 		{protocol.MethodTabFocus, nil},
-		{protocol.MethodTabSelect, map[string]any{"tab": short}},
+		{protocol.MethodTabSelect, map[string]any{"tab": tab}},
 		{protocol.MethodGoto, map[string]any{"tab": "feed", "url": "about:blank"}},
 		{protocol.MethodTabClose, map[string]any{"tab": "feed"}},
 	} {
@@ -477,8 +477,8 @@ func TestFailedEnumerationLeavesStateUntouched(t *testing.T) {
 			t.Errorf("%s succeeded although enumeration failed", call.method)
 		}
 	}
-	assertTabIntact(t, srv, short, enumNewID)
-	if _, ok := srv.tabs.Lookup(oldShort); !ok {
+	assertTabIntact(t, srv, tab, enumNewID)
+	if _, ok := srv.tabs.Lookup(oldTab); !ok {
 		t.Error("failed enumeration removed the pre-existing tab")
 	}
 	if !conn.has(enumNewID) || !conn.has(enumOldID) {
@@ -503,13 +503,13 @@ func TestConcurrentTabNewAndEnumerationKeepEveryNewTabManaged(t *testing.T) {
 	})
 	srv := newEnumServer(t, conn)
 	enumMustRPC(t, srv, protocol.MethodTabList, nil)
-	oldShort, _ := srv.tabs.ShortForTarget(enumOldID)
+	oldTab, _ := testTabID(srv, enumOldID)
 
 	for round := 0; round < rounds; round++ {
 		var (
 			wg     sync.WaitGroup
 			mu     sync.Mutex
-			shorts []string
+			tabIDs []string
 			errs   []error
 		)
 		fail := func(err error) {
@@ -536,9 +536,9 @@ func TestConcurrentTabNewAndEnumerationKeepEveryNewTabManaged(t *testing.T) {
 					fail(err)
 					return
 				}
-				short, _ := reply.Result["tab"].(string)
+				tab, _ := reply.Result["tab"].(string)
 				mu.Lock()
-				shorts = append(shorts, short)
+				tabIDs = append(tabIDs, tab)
 				mu.Unlock()
 			})
 		}
@@ -559,7 +559,7 @@ func TestConcurrentTabNewAndEnumerationKeepEveryNewTabManaged(t *testing.T) {
 			}
 		})
 		run(func() {
-			if _, err := enumRPC(srv, protocol.MethodTabSelect, map[string]any{"tab": oldShort}); err != nil {
+			if _, err := enumRPC(srv, protocol.MethodTabSelect, map[string]any{"tab": oldTab}); err != nil {
 				fail(err)
 			}
 		})
@@ -575,23 +575,23 @@ func TestConcurrentTabNewAndEnumerationKeepEveryNewTabManaged(t *testing.T) {
 		if len(errs) != 0 {
 			t.Fatalf("round %d: %v", round, errs)
 		}
-		if len(shorts) != newPerRound {
-			t.Fatalf("round %d: %d tab_new results, want %d", round, len(shorts), newPerRound)
+		if len(tabIDs) != newPerRound {
+			t.Fatalf("round %d: %d tab_new results, want %d", round, len(tabIDs), newPerRound)
 		}
 		managed := srv.tabIdle.Snapshot()
-		for _, short := range shorts {
-			tid, ok := srv.tabs.Lookup(short)
+		for _, tab := range tabIDs {
+			tid, ok := srv.tabs.Lookup(tab)
 			if !ok {
-				t.Fatalf("round %d: tab %q returned by tab_new is not registered", round, short)
+				t.Fatalf("round %d: tab %q returned by tab_new is not registered", round, tab)
 			}
 			if _, ok := managed[tid]; !ok {
-				t.Fatalf("round %d: tab %q returned by tab_new is not idle-managed", round, short)
+				t.Fatalf("round %d: tab %q returned by tab_new is not idle-managed", round, tab)
 			}
 		}
 		// Closing through the returned id proves it is usable and exercises
 		// genuine removal; nothing may linger afterwards.
-		for _, short := range shorts {
-			enumMustRPC(t, srv, protocol.MethodTabClose, map[string]any{"tab": short})
+		for _, tab := range tabIDs {
+			enumMustRPC(t, srv, protocol.MethodTabClose, map[string]any{"tab": tab})
 		}
 		tabs, _ := enumMustRPC(t, srv, protocol.MethodTabList, nil)["tabs"].([]any)
 		if len(tabs) != 1 {
@@ -670,7 +670,7 @@ func TestDirtyResyncWithStaleSnapshotKeepsNewTab(t *testing.T) {
 
 	enumMustRPC(t, srv, protocol.MethodTabList, nil) // Target.getTargets #1
 	awaitGetTargets(t, st, 1)
-	oldShort, ok := srv.tabs.ShortForTarget(enumOldID)
+	oldTab, ok := testTabID(srv, enumOldID)
 	if !ok {
 		t.Fatal("precondition: existing tab not registered")
 	}
@@ -683,11 +683,11 @@ func TestDirtyResyncWithStaleSnapshotKeepsNewTab(t *testing.T) {
 	awaitGetTargets(t, st, 2)
 
 	st.queueCreateID(enumNewID)
-	short := enumTabNew(t, srv)
+	tab := enumTabNew(t, srv)
 	// Attach the pooled chromedp child: forgetting it would close the tab.
-	enumMustRPC(t, srv, protocol.MethodEval, map[string]any{"tab": short, "script": "1"})
+	enumMustRPC(t, srv, protocol.MethodEval, map[string]any{"tab": tab, "script": "1"})
 	enumPushNetwork(t, srv, enumNewID)
-	assertTabIntact(t, srv, short, enumNewID)
+	assertTabIntact(t, srv, tab, enumNewID)
 	if t.Failed() {
 		t.Fatal("precondition: tab_new did not leave the tab registered and managed")
 	}
@@ -699,15 +699,15 @@ func TestDirtyResyncWithStaleSnapshotKeepsNewTab(t *testing.T) {
 	close(staleGate)
 	awaitGetTargets(t, st, 3)
 
-	assertTabIntact(t, srv, short, enumNewID)
-	if _, ok := srv.tabs.Lookup(oldShort); !ok {
+	assertTabIntact(t, srv, tab, enumNewID)
+	if _, ok := srv.tabs.Lookup(oldTab); !ok {
 		t.Error("pre-existing tab was removed")
 	}
 
 	close(nextGate)
-	enumMustRPC(t, srv, protocol.MethodEval, map[string]any{"tab": short, "script": "1"})
+	enumMustRPC(t, srv, protocol.MethodEval, map[string]any{"tab": tab, "script": "1"})
 	enumMustRPC(t, srv, protocol.MethodTabList, nil)
-	assertTabIntact(t, srv, short, enumNewID)
+	assertTabIntact(t, srv, tab, enumNewID)
 	if closed := st.closedTargets(); containsTarget(closed, enumNewID) {
 		t.Errorf("stale resync closed the new tab in the browser: %v", closed)
 	}
@@ -723,7 +723,7 @@ func TestDirtyResyncWithStaleSnapshotKeepsNewTab(t *testing.T) {
 	st.emitInfoChanged(enumOldID)
 	deadline := time.Now().Add(enumTestWait)
 	for {
-		_, registered := srv.tabs.Lookup(short)
+		_, registered := srv.tabs.Lookup(tab)
 		_, managed := srv.tabIdle.Snapshot()[enumNewID]
 		if !registered && !managed {
 			break
@@ -759,7 +759,7 @@ func TestStartupEnumerationKeepsTargetRegisteredMeanwhile(t *testing.T) {
 	st.addPage(enumNewID, true) // Target.targetCreated → runTargetSync registers it
 	deadline := time.Now().Add(enumTestWait)
 	for {
-		if _, ok := srv.tabs.ShortForTarget(enumNewID); ok {
+		if _, ok := testTabID(srv, enumNewID); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -767,7 +767,7 @@ func TestStartupEnumerationKeepsTargetRegisteredMeanwhile(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	short, _ := srv.tabs.ShortForTarget(enumNewID)
+	tab, _ := testTabID(srv, enumNewID)
 	enumPushNetwork(t, srv, enumNewID)
 
 	close(gate)
@@ -780,13 +780,13 @@ func TestStartupEnumerationKeepsTargetRegisteredMeanwhile(t *testing.T) {
 		t.Fatal("connect did not finish")
 	}
 
-	if got, ok := srv.tabs.Lookup(short); !ok || got != enumNewID {
+	if got, ok := srv.tabs.Lookup(tab); !ok || got != enumNewID {
 		t.Errorf("target registered during startup enumeration was removed (got %q, %v)", got, ok)
 	}
 	if events, _, _ := srv.obsStore.QueryNetwork(enumNewID, 0); len(events) != 1 {
 		t.Errorf("observation buffer has %d events, want 1", len(events))
 	}
-	if _, ok := srv.tabs.ShortForTarget(enumOldID); !ok {
+	if _, ok := testTabID(srv, enumOldID); !ok {
 		t.Error("startup enumeration did not register the pre-existing tab")
 	}
 	if closed := st.closedTargets(); len(closed) != 0 {

@@ -2,24 +2,25 @@ package state
 
 import (
 	"slices"
-	"strings"
 	"sync"
-	"unicode"
 
 	"github.com/chromedp/cdproto/target"
 )
 
-// TabRegistry maps CDP target ids to stable short ids for the HTTP API (INV-3).
+// TabRegistry is the set of page targets the daemon knows about (INV-3).
+//
+// A tab is identified on every layer by its complete CDP target id, used
+// verbatim: the registry derives no alias from it and never normalizes it, so
+// an id either names exactly one registered target or nothing at all.
 type TabRegistry struct {
 	mu sync.RWMutex
 
-	targetToShort map[target.ID]string
-	shortToTarget map[string]target.ID
-	selected      string // short id; empty if none
+	selected target.ID // empty if none
 
-	// gen is a monotonic registration generation. targetGen records the
-	// generation at which each target was last registered (or explicitly
-	// re-registered), so a full enumeration requested earlier cannot remove it.
+	// gen is a monotonic registration generation. targetGen holds every
+	// registered target with the generation at which it was last registered
+	// (or explicitly re-registered), so a full enumeration requested earlier
+	// cannot remove it.
 	gen       uint64
 	targetGen map[target.ID]uint64
 }
@@ -33,14 +34,11 @@ type EnumerationToken struct {
 
 type RemovedTab struct {
 	TargetID target.ID
-	ShortID  string
 }
 
 func NewTabRegistry() *TabRegistry {
 	return &TabRegistry{
-		targetToShort: make(map[target.ID]string),
-		shortToTarget: make(map[string]target.ID),
-		targetGen:     make(map[target.ID]uint64),
+		targetGen: make(map[target.ID]uint64),
 	}
 }
 
@@ -55,7 +53,7 @@ func (r *TabRegistry) BeginEnumeration() EnumerationToken {
 }
 
 // SyncPageTargets updates registration from the current set of page-type targets.
-// Targets that disappeared are removed (INV-6: release short id and clear association).
+// Targets that disappeared are removed (INV-6: the id stops resolving).
 func (r *TabRegistry) SyncPageTargets(infos []*target.Info) []TabSnapshot {
 	tabs, _ := r.SyncPageTargetsDetailed(infos)
 	return tabs
@@ -87,24 +85,24 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 
 	present := make(map[target.ID]struct{}, len(infos))
 	for _, info := range infos {
-		if info == nil || !isPageTarget(info) {
+		if info == nil || info.TargetID == "" || !isPageTarget(info) {
 			continue
 		}
 		present[info.TargetID] = struct{}{}
 	}
 
 	var removed []RemovedTab
-	for id, short := range r.targetToShort {
+	for id, gen := range r.targetGen {
 		if _, ok := present[id]; ok {
 			continue
 		}
-		if r.targetGen[id] > tok.gen {
+		if gen > tok.gen {
 			// Registered after the enumeration was requested: the snapshot may
 			// simply predate this target. A later enumeration or its lifecycle
 			// event removes it if it is really gone.
 			continue
 		}
-		removed = append(removed, RemovedTab{TargetID: id, ShortID: short})
+		removed = append(removed, RemovedTab{TargetID: id})
 		r.removeLocked(id)
 	}
 
@@ -122,9 +120,8 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 	})
 	out := make([]TabSnapshot, 0, len(ids))
 	for _, id := range ids {
-		short := r.assignShortLocked(id)
+		r.ensureLocked(id)
 		out = append(out, TabSnapshot{
-			ShortID:  short,
 			TargetID: id,
 			Title:    tabTitle(infos, id),
 			URL:      tabURL(infos, id),
@@ -133,29 +130,29 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 	return out, removed
 }
 
-// RemoveTarget removes one target and returns its former short id.
-func (r *TabRegistry) RemoveTarget(id target.ID) (string, bool) {
+// RemoveTarget removes one target and reports whether it was registered.
+func (r *TabRegistry) RemoveTarget(id target.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	short, ok := r.targetToShort[id]
-	if !ok {
-		return "", false
+	if _, ok := r.targetGen[id]; !ok {
+		return false
 	}
 	r.removeLocked(id)
-	return short, true
+	return true
 }
 
-// RegisterPageTarget assigns a short id for a CDP target id without syncing from the browser.
+// RegisterPageTarget registers a CDP target id without syncing from the browser.
 // Use after Target.createTarget when GetTargets may not yet list the new tab.
 // It always advances the target's generation, also when the target is already
 // registered, so enumerations already in flight cannot remove it.
-func (r *TabRegistry) RegisterPageTarget(id target.ID) string {
+func (r *TabRegistry) RegisterPageTarget(id target.ID) {
+	if id == "" {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	short := r.assignShortLocked(id)
 	r.gen++
 	r.targetGen[id] = r.gen
-	return short
 }
 
 func tabTitle(infos []*target.Info, id target.ID) string {
@@ -191,124 +188,67 @@ func isPageTarget(info *target.Info) bool {
 
 // TabSnapshot is one row for API responses after sync.
 type TabSnapshot struct {
-	ShortID  string
 	TargetID target.ID
 	Title    string
 	URL      string
 }
 
 func (r *TabRegistry) removeLocked(id target.ID) {
-	short, ok := r.targetToShort[id]
-	if !ok {
-		return
-	}
-	delete(r.targetToShort, id)
-	delete(r.shortToTarget, short)
 	delete(r.targetGen, id)
-	if r.selected == short {
+	if r.selected == id {
 		r.selected = ""
 	}
 }
 
-// assignShortLocked returns an existing or new short id for target id (caller holds lock).
-func (r *TabRegistry) assignShortLocked(id target.ID) string {
-	if s, ok := r.targetToShort[id]; ok {
-		return s
+// ensureLocked registers id with a fresh generation unless it is already
+// registered (caller holds lock).
+func (r *TabRegistry) ensureLocked(id target.ID) {
+	if _, ok := r.targetGen[id]; ok {
+		return
 	}
-	hexDigits := hexRunes(string(id))
-	if len(hexDigits) == 0 {
-		s := sanitizeShort(string(id))
-		if oid, taken := r.shortToTarget[s]; taken && oid != id {
-			s = string(id)
-		}
-		r.registerLocked(id, s)
-		return s
-	}
-	for n := 4; n <= len(hexDigits); n++ {
-		cand := string(hexDigits[len(hexDigits)-n:])
-		if oid, taken := r.shortToTarget[cand]; taken && oid != id {
-			continue
-		}
-		r.registerLocked(id, cand)
-		return cand
-	}
-	// Extremely unlikely: fall back to full hex digit string.
-	full := string(hexDigits)
-	r.registerLocked(id, full)
-	return full
-}
-
-// registerLocked records a NEW registration and stamps it with a fresh generation.
-func (r *TabRegistry) registerLocked(id target.ID, short string) {
-	r.targetToShort[id] = short
-	r.shortToTarget[short] = id
 	r.gen++
 	r.targetGen[id] = r.gen
 }
 
-func hexRunes(s string) []rune {
-	var out []rune
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9':
-			out = append(out, unicode.ToLower(r))
-		case r >= 'a' && r <= 'f':
-			out = append(out, r)
-		case r >= 'A' && r <= 'F':
-			out = append(out, unicode.ToLower(r))
-		}
-	}
-	return out
-}
-
-func sanitizeShort(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) > 64 {
-		return s[len(s)-64:]
-	}
-	return s
-}
-
-// ShortForTarget returns the short id for a CDP target id, if registered.
-func (r *TabRegistry) ShortForTarget(id target.ID) (string, bool) {
+// Has reports whether id is a registered page target.
+func (r *TabRegistry) Has(id target.ID) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if id == "" {
-		return "", false
+		return false
 	}
-	short, ok := r.targetToShort[id]
-	return short, ok
+	_, ok := r.targetGen[id]
+	return ok
 }
 
-// Lookup validates short id and returns the CDP target id (INV-3).
-func (r *TabRegistry) Lookup(shortID string) (target.ID, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	shortID = strings.TrimSpace(shortID)
-	if shortID == "" {
+// Lookup resolves a client-supplied tab id (INV-3). The id must be the complete
+// CDP target id of a registered page target, byte for byte: it is not trimmed,
+// case-folded, or matched by prefix/suffix, and nothing is substituted when it
+// does not match.
+func (r *TabRegistry) Lookup(tab string) (target.ID, bool) {
+	id := target.ID(tab)
+	if !r.Has(id) {
 		return "", false
 	}
-	id, ok := r.shortToTarget[shortID]
-	return id, ok
+	return id, true
 }
 
-// Select marks shortID as the focused tab or returns false if unknown.
-func (r *TabRegistry) Select(shortID string) bool {
+// Select marks id as the focused tab or returns false if it is not registered.
+func (r *TabRegistry) Select(id target.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	shortID = strings.TrimSpace(shortID)
-	if shortID == "" {
+	if id == "" {
 		return false
 	}
-	if _, ok := r.shortToTarget[shortID]; !ok {
+	if _, ok := r.targetGen[id]; !ok {
 		return false
 	}
-	r.selected = shortID
+	r.selected = id
 	return true
 }
 
-// Selected returns the current focus short id, or "".
-func (r *TabRegistry) Selected() string {
+// Selected returns the current focus target id, or "".
+func (r *TabRegistry) Selected() target.ID {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.selected

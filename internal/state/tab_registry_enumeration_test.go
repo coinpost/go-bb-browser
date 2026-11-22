@@ -21,8 +21,9 @@ func TestApplyEnumerationKeepsTargetsRegisteredAfterToken(t *testing.T) {
 	tok := r.BeginEnumeration()
 	// Browser snapshot taken here: AAAA0002 is already gone, BBBB0003 not yet created.
 	stale := pageInfos("AAAA0001")
-	newShort := r.RegisterPageTarget("BBBB0003")
-	if !r.Select(newShort) {
+	const newID = target.ID("BBBB0003")
+	r.RegisterPageTarget(newID)
+	if !r.Select(newID) {
 		t.Fatal("select failed")
 	}
 
@@ -33,19 +34,19 @@ func TestApplyEnumerationKeepsTargetsRegisteredAfterToken(t *testing.T) {
 	if len(removed) != 1 || removed[0].TargetID != "AAAA0002" {
 		t.Fatalf("removed = %#v, want only AAAA0002", removed)
 	}
-	if id, ok := r.Lookup(newShort); !ok || id != "BBBB0003" {
+	if id, ok := r.Lookup(string(newID)); !ok || id != newID {
 		t.Fatalf("target registered after the token was removed (%q, %v)", id, ok)
 	}
-	if r.Selected() != newShort {
-		t.Fatalf("selection = %q, want %q", r.Selected(), newShort)
+	if r.Selected() != newID {
+		t.Fatalf("selection = %q, want %q", r.Selected(), newID)
 	}
 
 	// An enumeration requested after the registration is authoritative for it.
 	_, removed = r.ApplyEnumeration(r.BeginEnumeration(), stale)
-	if len(removed) != 1 || removed[0].TargetID != "BBBB0003" || removed[0].ShortID != newShort {
+	if len(removed) != 1 || removed[0].TargetID != "BBBB0003" {
 		t.Fatalf("removed = %#v, want BBBB0003", removed)
 	}
-	if _, ok := r.Lookup(newShort); ok {
+	if _, ok := r.Lookup(string(newID)); ok {
 		t.Fatal("fresh enumeration kept a vanished target")
 	}
 	if r.Selected() != "" {
@@ -56,16 +57,13 @@ func TestApplyEnumerationKeepsTargetsRegisteredAfterToken(t *testing.T) {
 func TestApplyEnumerationRespectsExplicitReRegistration(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos("AAAA0001"))
-	short, _ := r.ShortForTarget("AAAA0001")
 
 	tok := r.BeginEnumeration()
-	if got := r.RegisterPageTarget("AAAA0001"); got != short {
-		t.Fatalf("re-registration changed the short id: %q -> %q", short, got)
-	}
+	r.RegisterPageTarget("AAAA0001")
 	if _, removed := r.ApplyEnumeration(tok, nil); len(removed) != 0 {
 		t.Fatalf("removed = %#v, want none: target was re-registered after the token", removed)
 	}
-	if _, ok := r.Lookup(short); !ok {
+	if _, ok := r.Lookup("AAAA0001"); !ok {
 		t.Fatal("explicitly re-registered target was removed by an older enumeration")
 	}
 }
@@ -79,7 +77,7 @@ func TestApplyEnumerationProtectsTargetsAddedByNewerEnumeration(t *testing.T) {
 	if _, removed := r.ApplyEnumeration(older, nil); len(removed) != 0 {
 		t.Fatalf("removed = %#v, want none", removed)
 	}
-	if _, ok := r.ShortForTarget("AAAA0001"); !ok {
+	if !r.Has("AAAA0001") {
 		t.Fatal("older empty snapshot removed a target registered by a newer one")
 	}
 	// Merely being listed again does not renew protection: the next
@@ -102,7 +100,7 @@ func TestApplyEnumerationZeroTokenNeverRemoves(t *testing.T) {
 		t.Fatalf("snapshots = %#v", snaps)
 	}
 	for _, id := range []target.ID{"AAAA0001", "AAAA0002"} {
-		if _, ok := r.ShortForTarget(id); !ok {
+		if !r.Has(id) {
 			t.Fatalf("%s not registered", id)
 		}
 	}
