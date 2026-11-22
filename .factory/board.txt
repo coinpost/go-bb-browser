@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-4 at your gates | 6 with the agent | 11 done | 3 sent back
-Drawn Nov 22, 11:32 | https://github.com/coinpost/go-bb-browser
+5 at your gates | 5 with the agent | 11 done | 3 sent back
+Drawn Nov 22, 11:45 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2    12h  生命周期事件溢出重同步与优雅关停次序
@@ -18,14 +18,13 @@ NEW (5)                                     avg stay 5h
                 消失的 tab 永久留在映射中
     FT28    1h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容
-    FT7    57m  target释放与观测writer退役同步 (round 2)
+    FT7     1h  target释放与观测writer退役同步 (round 2)
 
-REVIEW (1)                                  avg stay 16m
-    FT13    1m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
-                顺序调用方的 tab 会全部落到同一个 daemon (round 2)
+REVIEW (0)                                  avg stay 16m
+    Nothing here
 
-READY (4) [!]                               avg stay 1h
-  * FT19    4h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
+READY (5) [!]                               avg stay 1h
+  * FT19    5h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
                 > Check, then ship
   * FT20    4h  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
@@ -34,16 +33,19 @@ READY (4) [!]                               avg stay 1h
   * FT27    1h  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
                 > Check, then ship
-  * FT10   13m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+  * FT10   26m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
+                > Check, then ship
+  * FT13    1m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+                顺序调用方的 tab 会全部落到同一个 daemon (round 2)
                 > Check, then ship
 
 DONE (11)
-    FT18    1h  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
+    FT18    2h  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
                 该行及其后的全部记录截断丢弃
-    FT23    1h  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
+    FT23    2h  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
                 adapter 被截断成永不执行的脚本
-    FT24    1h  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
+    FT24    2h  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
                 screenshot-<ts>.png
     FT17    5h  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
