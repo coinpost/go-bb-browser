@@ -1,6 +1,6 @@
 ---
 branch: factory/FT13-pool-tab-new-distribution
-round: 1
+round: 2
 ---
 # [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，顺序调用方的 tab 会全部落到同一个 daemon
 
@@ -75,3 +75,28 @@ notes:
 - 安装：无；使用已有 Go 1.27.4，无清单或锁文件变更。测试 HOME、缓存及临时文件均隔离在本 run tmp，使用本地 httptest。
 - 未检查：真实 Chrome/CDP、Docker、systemd；未启动浏览器或操作用户窗口。无UI改动。
 - 状态：第1/3轮，review/ → new/，下一轮修复以上 P1；未合并 main、未发布。
+
+
+## factory · plan · 2026-11-22 11:32
+
+第2轮补充：
+- Behaviour：故障转移不得追加跨过其它并发请求的健康轮次；通道控制的 A等待后端0的503、B在后端1成功、再释放A，连续10对健康端差≤1。保留首轮探活交错、顺序故障均摊、恢复及亲和语义。
+- Scope：仅创建调度、相应文档和永久回归，不处理独立 hung/stale binding 任务。
+- Decisions：每次尝试选最低在途且本请求未试过的后端，并列从独立创建游标起选取；选取与在途预留用短锁，HTTP不持锁，不串行化整个请求。按实际选取后端推进一次，不做完成后的 skipped 补偿。
+- Checking：修复前永久回归必须FAIL；typed/Call均覆盖，修复后重复race及完整配置测试。真实环境未验如实记录。
+
+## factory · 2026-11-22 11:32
+
+第2轮构建：5793946；先以 d9c4dd8 合并 origin/main@7223e5a，无冲突。原分支保留首轮提交，仅修改 pkg/daemonclient 下实现、测试、README，无保护路径变更。
+
+已修复最新 review 的 P1：pickCreate 按尝试选择、推进创建游标并原子预留在途计数，各请求每后端最多一次；移除成功后 skipped 追加推进。Health/Ready/Live 等不消耗创建游标。直接影响是故障重试同样遵守最低在途优先，不再固定环重试；长期在途时健康端轮转也会改善，是同一实现的结果，未加入冷却或调度抽象。
+
+永久回归 TestPool_tabNewConcurrentFailoverKeepsHealthySpread 覆盖 TabNew/Call。生产修复前两入口均复现 [0,20,0]；修复后为 [0,10,10]。定向 -race -count=50 通过，首轮探活交错、逐后端503、恢复及已有并发测试保留。证据位于本run evidence/FT13-round2/，未提交机器路径或日志。
+
+测试：coder 完整配置首次通过。manager首次复验遇到 TestShutdownWaitsForHandlerBeforeClosingAudit：server_test.go:413: shutdown timed out waiting for handler。额外定位证实 main@7223e5a 同断言在负载下复现：24进程×60轮，main失败16/1440，本分支19/1440；单独300轮两边均通过，确认为既有flaky，不在本分支修无关问题。coder 随后完整配置连续3次通过；manager再以隔离新GOCACHE执行 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过，10个有测试包通过、2个无测试包。git diff --check 通过，工作树干净。
+
+安装：无新增未pin工具或依赖变更；使用已有Go 1.27.4及固定模块恢复，go.mod/go.sum未改。所有测试HOME、缓存、临时文件隔离在run TMPDIR，仅本地httptest。
+
+未检查：真实Chrome/CDP、Docker、systemd；未启动浏览器或操作用户窗口，无UI改动。取消路径未加专门回归，依赖既有全量测试。任意并发负载不保证严格差≤1，严格验收涵盖顺序和上述确定性交错。review 应检查调度边界及已有main关停flaky记录。
+
+状态：分支已推送，new/ → review/，round=2；本次仅build，未执行独立review、未合并main或发布。分支首次push因credential helper缺仓库路径失败，按命令添加credential.useHttpPath=true后重试成功，未修改持久设置。
