@@ -1,6 +1,6 @@
 ---
 branch: factory/FT10-persist-managed-target-retirement
-round: 1
+round: 2
 ---
 # [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
 
@@ -77,3 +77,22 @@ notes:
 Codex 只读审查 origin/main...HEAD；配置完整 gofmt/vet/race 在 HEAD 与基线均通过（各8个测试包、2个无测试包），新增并发生命周期测试重复60次通过。临时 overlay 定向探针复现上述生命周期、审计与轮转问题；P1 已对照基线确认新增影响。git diff --check 通过，工作树干净、保护路径无差异。使用已有 mise Go 1.27.4，仅恢复固定模块，无新增安装。真实 Chrome/CDP、Docker、systemd 未验证；ErrClosed 日志级别为静态核对；未发现可用 review-code skill。
 
 第1/3轮发现P1，review/ → new/，下一 build 按 fix 列表修复；P2/P3为非阻塞审查记录。本次未修改代码、未合并 main、未发布。无 source 或 owner 签名关联 issue/PR，未发 GitHub 评论。
+
+
+## factory · plan · 2026-11-22 11:09
+
+第2轮补充：在发起会触发受管对账的 CDP 枚举前固定完整 target 退役候选，仅对这些候选判定缺席。启动恢复、dirty 重试共用约束；失败枚举不退役，空库安全，保持完整身份与启动 grace。不持锁跨 CDP，不扩展非阻塞 P2/P3。合并最新 main，保留 FT11 已上线枚举 token 保护及 FT18 日志边界修复。永久回归覆盖枚举在途创建、同步后/对账前创建、正常缺席、失败、重启与轮转，执行定向 race 重复和全量配置检查。
+
+## factory · 2026-11-22 11:09
+
+第2/3轮修复 latest review 唯一 P1。Claude Code 提交：aff9a50 合并 origin/main（7223e5a）；26f38df4dcb57dd16ed375ef2efdd81a90311890 实施修复。合并解决 tab_idle、store、测试与文档冲突，保留双方意图；base 既有其他任务变化不作本项新增工作。
+
+实现：beginManagedReconcile 在 CDP 枚举前固定完整 target 候选，reconcileIdleFromLog 显式接收候选，只退役候选中缺席者；启动与 dirty retry 均接入。恢复仍读取当前 managed 集合，避免重新跟踪已退役条目；nil 候选不退役。无额外后台层或跨 CDP 锁，README/AGENTS 说明同步更新。非阻塞 P2/P3 保持未处理，供后续 review 核对。
+
+测试：coder 在合并后、修复前看到既有 TestDirtyResyncWithStaleSnapshotKeepsNewTab 失败；新增回归依赖新 API，采用临时恢复旧缺席判定的变异验证，两个时序、轮转、空库及真实 Session dirty 重试失败，恢复修复后通过。永久回归使用真实 state dir、fake conn 与本地 CDP stub，覆盖新 target 持久身份/idle/重启恢复及旧候选正常退役。coder 定向 daemon -race -count=40，store/state -race -count=20 通过，全量无缓存 race 通过。manager 独立再执行配置 gofmt/vet/go test -race ./... 通过（10个测试包、2个无测试包）；diff --check 通过，工作树干净，保护路径相对原始基线无改动，提交范围仅本项及 main 合并。合并中间提交单独仍有该 P1，最终 HEAD 已修复。
+
+安装：无新增工具或非固定依赖；已有 Go 1.27.4，仅按 go.sum 恢复模块。main 带入的 manifest/lock 变化保留原样，本轮不另改。测试 HOME、Go 缓存与临时产物隔离在 run tmp，结束清理。
+
+未检查：UI、真实非 headless Chrome/CDP、Docker、systemd 均未验证。connectBrowserLocked 候选接线没有专门阻塞时序测试（启动持有 tabMu 阻止 tab_new 交错），分步测试及既有启动测试通过。真实 Session stub 未注入 getTargets 失败，该分支使用 fake conn/syncInitialTargets 覆盖。
+
+状态：分支已推送；new/ → review/，第2/3轮。仅 build，未进行 review、未合并 main、未发布。
