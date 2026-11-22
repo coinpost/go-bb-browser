@@ -115,3 +115,18 @@ Claude Code 完成第 2 轮修复，提交 3576461（合并 origin/main、解决
 - 无新增未 pin 工具/依赖，go.mod/go.sum 未变。偏差：coder 早期 3 次测试在临时 HOME 未指定模块缓存，从代理下载已 pin 模块，违反本轮不访问外网要求；后续红绿、全量及 manager 复验均禁用代理，仅使用已有缓存。
 - 未验：真实 Chrome（仅 fake CDP/stub）、Go 1.26、跨 Chrome 会话 ID 唯一性；超过 1024 次删除和首次登记前销毁仅 registry 层覆盖，未做 daemon 端到端。review 的 P2/P3 notes 未作为额外修复，其中 FT10 带来的退役机制未单独复验原 16 目标场景。无 UI 变更。
 已推送代码，new/ → review/，round 2/3，等待独立审查；未合并到 main、未发布。
+
+
+## factory · review · 2026-11-22 14:21
+head: 91ee3a1bd0475f9a58e5291170169d5bf4da0736
+verdict: fix
+fix:
+- [P1] internal/state/tab_registry.go:179: 重复删除未刷新代数，上轮 P1 仍有遗漏时序：tab_close(A) 确认后，tab_list 取得仍含 A 的快照，随后 targetDestroyed(A) 到达但已有 removedGen 记录而跳过更新；放行快照又登记并列出 A，持 A 旧完整 ID 的 network_clear、console_clear、errors_clear 全返回成功。销毁通知必须刷新最后删除代数，同时保持删除记忆有界，并新增该时序的确定性回归。基线亦能复现，不是本轮新引入，但违反本项失效身份契约。
+notes:
+- [P2] internal/daemon/tab_idle.go:198: 本轮新增回归：1025 次其他目标删除使历史溢出，CDP 仍返回存活受管 A，但 registry 保守过滤该行；恢复对账把“无法验证”当作“确认缺席”写入永久退役，后续新枚举和日志重放也丢失 A。删除发生在请求途中或本次枚举批量清理均可复现，HEAD 失败而 origin/main 两例通过。应区分不确定与确认消失，不确定时保留持久化成员并重试枚举。
+- [P2] cmd/bb-browser/main.go:1250: 上轮 CLI 裁剪不透明 ID 问题仍在，默认焦点、open 输出及适配器新建路径应只检查空串、原样回传；合成带空白 ID 边界，维持原评级。
+- [P3] pkg/daemonclient/README.md:3: 上轮短 ID 文案及 0:abcd 示例仍在，skills/bb-browser-adapter/SKILL.md:127 的 --tab ab12 也应改为创建/列举返回的完整值。
+
+Codex 独立审查 origin/main@e63a15c...HEAD，涵盖完整长 ID 实现、第 2 轮修复及 main 合并冲突处理。全量 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过，Go 1.27.4。上轮原始 8 子用例在修复前 3576461 全失败、HEAD 带 race 重复 20 次全通过；额外临时诊断复现上述遗漏和新回归。FT10 集成检查：16 个受管目标全部 idle 关闭后，无残留 managed_tab_open，重放恢复数为 0，基线和 HEAD 均通过；target 字段日志恢复正常，旧 tab/首轮 target_id 日志保守跳过。上轮恢复与销毁并发 P2 未提级。
+无新增工具或依赖安装；测试隔离 HOME/TMPDIR/GOCACHE，复用已有模块缓存，GOPROXY=off、GOSUMDB=off，无外网访问。未验证真实 Chrome、Go 1.26 或跨 Chrome 进程 ID 唯一性。工作树干净，无代码修改。
+round 2/3，review/ → new/，下一轮修复 fix 列表；未合并 main、未发布。
