@@ -99,3 +99,16 @@ notes:
 未检查：真实非 headless Chrome/CDP 时序、分派暂停及 Fetch.disable 后 Chrome 实际恢复行为，仅本地协议桩；Docker、systemd。无 UI 变更，未启动 Chrome，未操作用户窗口。无关联 issue/PR。
 
 状态：代码已推送，new/ → review/，第 2 轮；本次仅 build，未做独立 review、未合并 main、未发布。
+
+## factory · review · 2026-11-22 12:19
+head: c222eb594dc519e1d409a0979309060ce5258f89
+verdict: pass
+notes:
+- [P2] internal/browser/network_routes.go:497: 同 tab 连续更新时，积压的暂停事件在出队时重新读取最新规则，可能跳过事件入队期间已成功提交的 Abort 规则。本地 WebSocket CDP 桩：worker 阻塞于较早请求，更新 A 加入 Abort 并接收匹配暂停事件，A 成功后更新 B 删除该规则且保留另一规则，释放 worker 后 3/3 次发送 continueRequest 而非 failRequest。建议为更新期间入队的事件绑定该次更新最终确认的不可变规则快照，补充连续更新积压回归。
+- [P3] internal/browser/network_routes.go:188: 清空规则在等待同 target 更新锁时取消，及时退出但 CDPError.Op 错报 Fetch.enable。先确认排队再取消的探针 5/5 次复现；建议使用独立路由更新操作名，或清空操作标记 Fetch.disable。
+
+审查：Codex 对 origin/main@7223e5a...HEAD 只读审查，首轮 P1 已修复，本轮无 P0/P1。真实回环 WebSocket CDP 桩扣住 A 的补偿 disable 回包，B 三次均在 4ms 内成功，A 约 1s 返回原错误，后续暂停请求仍被放行。分支可干净合并 main。未找到 review-code skill，依完整条目、README、AGENTS 执行审查。
+测试：隔离 HOME/GOPATH/GOCACHE/GOMODCACHE/TMPDIR、GOPROXY=off 执行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过，10 个包通过、2 个无测试包；路由定向 -race -count=10 通过；临时 overlay 与协议桩验证上述备注。manager 检查逐包日志、head、diff --check、diff 路径及工作树，均符合只读约束。证据保留于本机 review run evidence/FT22-round2-review/（review.md、config-test.log、routes-race.log、wire.log、probe.log）。临时探针随 run 临时目录清理，日志保留。
+安装：无工具或未 pin 依赖安装，仅只读复制已有模块缓存至隔离目录。实际 Go 1.27.4 darwin/arm64，未验证目标 Go 1.26。
+未检查：真实非 headless Chrome/CDP 时序、Fetch.disable 后实际请求恢复、Docker、systemd；未启动或连接 Chrome、未操作用户窗口。无关联 issue/PR，无需 GitHub 评论。
+状态：第 2/3 轮通过阻塞门槛，review/ → ready/；P2/P3 留作 owner 审阅。仅 review，未合并 main、未发布。
