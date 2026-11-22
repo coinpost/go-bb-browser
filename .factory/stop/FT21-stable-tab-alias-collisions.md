@@ -82,3 +82,10 @@ Codex 独立审查 origin/main...HEAD；配置完整 gofmt/vet/race 测试通过
 安装：无，使用已有 mise Go 1.27.4。测试使用隔离 HOME、缓存和 run 内 TMPDIR，不依赖真实外网。未启动真实 Chrome，未运行 Docker、systemd 或 UI 验证；并发时序由本地替身验证。未发现关联 source 或 owner 显式链接，无 GitHub 评论目标。
 
 round: 1 < max_rounds: 3，review/ → new/；下一轮修复上述 fix 列表并增加永久回归。
+
+## factory · 2026-11-22 09:46
+owner 最新要求：
+> 把 go-bb-browser FT28 的优先级提高，然后以后都使用长 id，不再使用短 id，短 id 碰撞的问题可以不用处理了
+> 对 go-bb-browser FT28 改成移除短 id 的支持，以后只用长 id
+
+按 owner 决定已从 new/ 移至 stop/：停止短 ID 碰撞修复，不继续修复轮次、不合并此分支。FT28 改为全链路移除短 ID 支持、仅用完整 CDP target ID。既有审查记录保留作为身份固定和过期拒绝的参考；停止 FT21 不代表可以跳过 FT28 的完整身份锁、审计、续期及恢复安全边界。
