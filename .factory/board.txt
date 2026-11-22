@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-3 at your gates | 7 with the agent | 11 done | 2 sent back
-Drawn Nov 22, 11:09 | https://github.com/coinpost/go-bb-browser
+4 at your gates | 6 with the agent | 11 done | 2 sent back
+Drawn Nov 22, 11:19 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2    11h  生命周期事件溢出重同步与优雅关停次序
@@ -11,22 +11,21 @@ BACKLOG (5)                                 never built
     FT6    11h  run帮助布尔参数与选项终止符兼容
 
 NEW (6)                                     avg stay 5h
-    FT13    5h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13    6h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon
     FT22    3h  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
     FT25    2h  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败
     FT26    1h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中
-    FT28   54m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+    FT28    1h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容
-    FT7    33m  target释放与观测writer退役同步 (round 2)
+    FT7    43m  target释放与观测writer退役同步 (round 2)
 
-REVIEW (1)                                  avg stay 16m
-    FT10    1m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
-                除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
+REVIEW (0)                                  avg stay 16m
+    Nothing here
 
-READY (3) [!]                               avg stay 1h
+READY (4) [!]                               avg stay 1h
   * FT19    4h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
                 > Check, then ship
@@ -35,6 +34,9 @@ READY (3) [!]                               avg stay 1h
                 > Check, then ship
   * FT27    1h  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
+                > Check, then ship
+  * FT10    1m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+                除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
                 > Check, then ship
 
 DONE (11)
