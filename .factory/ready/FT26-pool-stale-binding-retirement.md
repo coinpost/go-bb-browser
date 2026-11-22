@@ -109,3 +109,18 @@ Codex 审查 origin/main...HEAD，基线 4f86c1c588facd643e4596a40643b88a6906198
 未检查：真实 Chrome/CDP、daemon 空闲回收/手动关闭时序、Docker、systemd；无 UI 变化，未使用 headless Chrome，未操作用户窗口。无链接 issue/PR。
 
 new/ → review/，第 2/3 轮。本次仅 build，未执行正式 review，未合并到 main、未发布。
+
+## factory · review · 2026-11-22 13:31
+head: 7f00fc3518438c3d44399eee8dd31bc592cca06b
+verdict: pass
+notes:
+- [P2] pkg/daemonclient/pool.go:609: 晚到的 TabNew 响应会复活已经确认关闭的绑定。后端已创建 x 但延迟返回，TabList 先观察 x，池内 TabClose 或池外关闭后成功列表返回 []，此时本地 UnknownTabError 正确；放行创建响应后 bind 以当前时刻重新绑定，后续 Eval 再次发出 RPC。应为在途创建跟踪足够的移除证据，避免迟到响应覆盖关闭/权威清理，同时保留并发新建保护。
+- [P2] pkg/daemonclient/pool.go:891: decodeTabList 接受 tabs:[null]、tabs:[{}] 或包含空白 tab ID 的数组，成功对账会错误删除已有绑定。应逐项验证非空 ID，任一非法成员按该后端失败处理并保留原绑定。
+
+Codex 审查 origin/main...HEAD；上一轮 P1 及三个 P2 原始场景均已由永久回归通过。新增两个 P2 由隔离本地 httptest/overlay 连续三次复现；属于补充诊断失败，不是配置测试失败。诊断源码与日志已保存在本 run evidence/FT26-7f00fc3。Coder 总述虽写 fix，但其实际仅有 P2，无 P0/P1；按工厂规则本次 verdict 为 pass，review/ → ready/，供 owner 核对上述剩余风险。
+
+测试：Coder 执行配置命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过，第二轮五组永久回归 -race -count=10 通过。Manager 独立执行同一完整配置命令通过（多数包缓存）。git diff --check 通过，工作树干净，分支与 main 可干净合并。
+
+安装：无未 pin 工具或依赖安装。使用已安装 Go 1.27.4，测试 HOME、缓存及临时产物隔离在本 run TMPDIR。未检查真实 Chrome/CDP、真实 daemon 空闲回收/手动关页时序、Docker、systemd；无 UI 变化，未使用 headless Chrome 或操作用户窗口。无链接 issue/PR，无需 GitHub 评论。
+
+第 2/3 轮审查完成。本次仅 review，未改代码、未合并 main、未发布。
