@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 1
+round: 2
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -101,3 +101,17 @@ notes:
 
 独立审查：Codex，对比 origin/main...HEAD（main@7223e5a）。全量 gofmt/vet/go test -race 通过；前四项另以临时副本对照 HEAD 与基线复现。未新增工具或依赖；使用已安装 Go 1.27.4，测试隔离 HOME/TMPDIR/缓存，不依赖真实外网。未验证 Go 1.26、真实 Chrome 或跨 Chrome 会话 ID 唯一性。审查工作树干净，无代码变更。
 round 1/3，review/ → new/，下一次 build 修复阻塞项；本次仅 review，未开始修复，未合并、发布或启用定时任务。
+
+## factory · plan · 2026-11-22 14:11
+第 2 轮仅修复最新 review 的 P1：删除必须参与枚举代数；删除前发起的迟到快照不能重新登记或列出该目标，三种 clear 操作必须拒绝其旧完整 ID，且不影响同后缀 B。保留新建/重新登记保护和后续当前枚举语义。采用有界删除记忆，避免永久无界墓碑。增加确定性 registry 与 fake CDP 屏障红绿回归，复验全量 gofmt/vet/race；P2/P3 notes 不作为本轮额外任务。
+
+## factory · 2026-11-22 14:11
+Claude Code 完成第 2 轮修复，提交 3576461（合并 origin/main、解决 11 文件冲突）及 91ee3a1（P1 修复，当前 head）。未合并其他 factory 分支。
+- 登记和删除都推进代数；保留最近 1024 次删除，迟到枚举过滤请求后已删除的目标，不重新登记或返回。删除历史溢出时，旧枚举保守拒绝登记无法证明仍存活的目标；后续当前枚举/生命周期事件补充。首次登记前收到销毁也记录，重复销毁不无限占位。
+- 合并 main 时保留 FT10 的 managed_tab_open/managed_tab_retire 生命周期与持久化 target 字段；完整 ID 贯穿恢复，缺完整身份的旧短 ID 日志不认领。此前本分支 target_id 字段名已改为 target，需独立 review 注意迁移兼容边界。
+- 永久回归：4 种枚举入口 × tab_close/销毁事件共 8 个 daemon 子用例，三种 clear 均拒绝 A、B 缓冲和关闭状态不受影响；另有乱序枚举、重新登记、并发与删除记忆有界测试。
+- 红绿：修复前 registry overlay 4 项失败，daemon 8 子用例失败（accepted the id of a closed tab）；修复后通过。2 个依赖新内部结构的测试无独立红证据。相关 race 重复 20 次通过。
+- manager 独立复验：test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过，Go 1.27.4、隔离 HOME/TMPDIR/GOCACHE、GOPROXY=off、GOSUMDB=off。未更改 never 路径；提交仅含本项及 main 合并。
+- 无新增未 pin 工具/依赖，go.mod/go.sum 未变。偏差：coder 早期 3 次测试在临时 HOME 未指定模块缓存，从代理下载已 pin 模块，违反本轮不访问外网要求；后续红绿、全量及 manager 复验均禁用代理，仅使用已有缓存。
+- 未验：真实 Chrome（仅 fake CDP/stub）、Go 1.26、跨 Chrome 会话 ID 唯一性；超过 1024 次删除和首次登记前销毁仅 registry 层覆盖，未做 daemon 端到端。review 的 P2/P3 notes 未作为额外修复，其中 FT10 带来的退役机制未单独复验原 16 目标场景。无 UI 变更。
+已推送代码，new/ → review/，round 2/3，等待独立审查；未合并到 main、未发布。
