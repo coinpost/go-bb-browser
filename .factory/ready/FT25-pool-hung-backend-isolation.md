@@ -130,3 +130,20 @@ notes:
 - 未验：真实 Chrome/CDP、Docker、systemd、真实网络黑洞、其他系统、Go 1.26；未重跑原 30000-tab 计时探针，以确定性锁控和 decoder 控制回归覆盖。无 UI 变更，未启动 Chrome、未操作用户窗口。
 - 已知未修 P2：成功 TabClose 后在途旧 TabList 可能恢复绑定；慢 Body.Close 可能令预算内已解码响应被判超时。下次独立 review 应继续评估，不宣称已修。
 状态：代码已推送，new/ → review/，等待独立审查。本轮仅 build，未合并 main，未发布。
+
+## factory · review · 2026-11-22 15:49
+head: 5a4d5b072e444196b62d33f62289494bd31879ae
+verdict: pass
+notes:
+- [P2] pkg/daemonclient/pool.go:446: 提交时持 p.mu 调用外部 ctx.Err；自定义 Context 若在 Err 中调用 ClientForTab 记录路由会重入锁，阻塞整个池的 tab 操作。两方法 HEAD 各 3/3、main 同探针通过。锁外取得 Done 通道，锁内检查关闭状态，锁外读取错误原因，避免锁内用户回调。
+- [P2] pkg/daemonclient/pool.go:483: 泛型 Call 按静态接口类型暂存，丢失接口预置具体指针；有方法接口解码失败，any 内 *T 则变为 map，uint64 9007199254740993 舍入为 9007199254740992。两方法 HEAD 各 3/3、main 通过；按原动态类型创建独立解码目标。
+- [P2] pkg/daemonclient/pool.go:487: 自定义 UnmarshalJSON 写入自身 strings.Builder 后，反射赋值复制已使用的 Builder，Call 成功但后续追加 panic。两方法 HEAD 各 3/3、main 通过；为地址敏感结果提供指针交付方式并明确支持边界，避免搬动不可复制的已解码对象。
+- [P2] pkg/daemonclient/pool.go:454: 已知旧列表重绑仍在：A 回复后 B 挂起，TabClose 解绑，放行 B 又恢复 A，后续 Eval 发出 RPC。HEAD 3/3、main 保持解绑；提交时按关闭代次过滤旧观察。
+- [P2] pkg/daemonclient/pool.go:547: 已知慢 Body.Close 问题仍在：150ms 预算内约 1ms 已解码，仅 Close 阻塞，两方法仍丢弃成功。各 3/3，main 对照保留；解码完成即记时并发布，随后清理。
+- [P3] pkg/daemonclient/README.md:105: 主动取消“立即返回”未覆盖同步自定义 decoder；回调阻塞时取消后 200ms 仍等待，释放后正确返回 Canceled 且无绑定/输出污染。main 也等待；文档应说明该边界。
+- Codex 独立只读审查 origin/main@e63a15c...HEAD，无 review-code skill。原 P1 触发时序均通过：500ms 挂起首端与健康次端、取消先于成功/已有成功、拒收超预算回复、返回后修改 Client.HTTP、30000 tab 准备阶段取消及两方法等 affinity 锁时取消；各重复 3 次。未沿用已修 finding。
+- HEAD 与导出 main 的配置完整命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 均退出 0，各 11 个测试包通过、1 个无测试包；HEAD 定向 race 重复 5 次通过。新增诊断失败与配置测试失败分开记录。manager 核对完整测试日志、状态文件、报告、提交实现和完整性记录，未另行重复全量。
+- 普通 map 成功整体替换、解码失败保留输出但绑定已观察 tab，符合本轮决定；上述接口/不可复制值为额外兼容性问题。没有 P0/P1，按工厂规则 pass，review/ → ready/，不表示无缺陷；owner 应注意五项 P2 后再决定 ship。
+- 证据保留于本机 review run evidence/FT25-5a4d5b0/：review-report.md、sources/、full.log、full-base.log、focused.log、original-head.log、independent-head/base.log、address-head/base.log、known-head.log、latency-head/base.log、integrity.log；overlay 诊断非永久回归。报告所称同名 .log.status 实际为去掉 .log 的 .status。
+- 使用既有 Go 1.27.4、离线模块缓存、隔离 HOME/TMPDIR/缓存，GOPROXY/GOSUMDB=off，无安装。工作树干净，HEAD 未变，保护路径无差异。未验证真实 Chrome/CDP、真实网络黑洞、Docker、systemd、其他系统或 Go1.26，未操作用户窗口。
+- 无关联 issue/PR，不发 GitHub 评论。第3/3轮，未改代码、未合并 main、未发布。
