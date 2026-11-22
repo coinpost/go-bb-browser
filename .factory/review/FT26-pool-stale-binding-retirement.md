@@ -1,6 +1,6 @@
 ---
 branch: factory/FT26-pool-stale-binding-retirement
-round: 1
+round: 2
 ---
 # [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已消失的 tab 永久留在映射中
 
@@ -81,3 +81,31 @@ Codex 审查 origin/main...HEAD，基线 4f86c1c588facd643e4596a40643b88a6906198
 安装：无。Go 1.27.4，已 pin 模块从本机缓存离线恢复；测试 HOME、缓存和临时产物隔离。未检查真实 Chrome/CDP、Docker、systemd；未使用 headless Chrome 或操作用户窗口。无链接 issue/PR，无需 GitHub 评论。
 
 第 1/3 轮存在 P1，review/ → new/，下一次构建修复 fix 列表；P2 供实现时一并核对。本次仅 review，未改代码、未合并 main、未发布。
+
+## factory · plan · 2026-11-22 13:21
+
+第 2 轮补充计划：
+- Behaviour：区分权威列表发起代次与显式 Close/Forget 生效时刻，较新观察可恢复存活绑定；已采纳较新列表后，旧观察不得新增或保活过期 ID。保留并发 TabNew 保护，只有显式 tabs 数组可作权威集合。
+- Scope：限 FT26 绑定生命周期、必要文档及永久回归；合并 origin/main 保留两边意图，不引入其他未合并 factory 项。
+- Decisions：使用本池逻辑请求代次，不依赖 daemon seq；短锁不跨 I/O；显式移除标记按最早在途观察回收，避免有限请求持续交叠导致累积。
+- Checking：本地 httptest/barrier 永久复现 review 的 P1，核对三个 P2（旧快照覆盖、移除记录累积、缺失/null tabs 误清空），先验证修复前失败，再运行重复 race 与完整配置测试。
+
+## factory · 2026-11-22 13:21
+
+第 2 轮完成：5f78330 合并 origin/main@e63a15c（未 rebase），README 策略表冲突保留 main 的 tab_new 均摊与本项绑定语义；7f00fc3518438c3d44399eee8dd31bc592cca06b 修复 review 的 P1 及三个 P2，已推送原分支 factory/FT26-pool-stale-binding-retirement。
+
+实现：观察绑定使用请求发出代次，每后端记录最新已采纳列表代次，忽略较旧观察的绑定副作用。权威对账不再写显式移除标记，较新 Focus/List 可恢复被较旧列表删除的存活绑定；Close/Forget 仍按生效时刻阻断旧观察复活。显式移除标记按最早在途观察回收。tabs 缺失/null/非数组按该后端失败处理，仅显式 [] 清空。新增 5 组 barrier 永久回归，更新文档及 fake 空数组协议。
+
+修复前证据：P1 的 tab_focus/older-first、tab_list/older-first 均失败 `tab "0:x" must be bound`；旧快照覆盖、持续交叠记录增长、缺失/null/result 非法结构也按预期失败。已通过的 newer-first/非数组类型等仅作守卫，不算修复前失败。原始失败输出保存在本机 run evidence/FT26-round2。
+
+测试：Claude Code 执行全量 gofmt/vet/race（-count=1）通过；交错回归 -race -count=100 通过，Pool 回归 -count=10 通过。Manager 独立执行配置命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过（部分包缓存），五组新回归 -race -count=10 通过。git diff --check 通过；原始起点以来无保护路径变化，提交仅含本项及 main 合并，工作树干净。
+
+中途测试异常：coder 高频重复测试曾耗尽本机 loopback 临时端口，出现 connect: can't assign requested address 并超时；等待后同命令通过，gate 增加提前返回失败保护。未重新人为制造端口耗尽验证保护。
+
+决定与限制：请求发出顺序不是 daemon 实际快照顺序；被忽略的旧响应仍原样返回，可能含未绑定 ID；单个长期挂起观察仍会保留其后显式移除标记，直到该观察结束。已写入文档，交 review 核验。
+
+安装：无未 pin 安装，go.mod/go.sum 未变，已 pin 模块从本机缓存离线恢复；Go 1.27.4，测试 HOME、缓存及临时文件均隔离在本 run TMPDIR。
+
+未检查：真实 Chrome/CDP、daemon 空闲回收/手动关闭时序、Docker、systemd；无 UI 变化，未使用 headless Chrome，未操作用户窗口。无链接 issue/PR。
+
+new/ → review/，第 2/3 轮。本次仅 build，未执行正式 review，未合并到 main、未发布。
