@@ -96,3 +96,18 @@ notes:
 - 安装：无；go.mod/go.sum 未变，使用既有 pin 模块缓存。
 - 未验：真实 Chrome/CDP、Docker、systemd、真实网络黑洞、Go 1.26；无 UI 改动，未启动 Chrome 或操作用户窗口。快照不保证并发修改 Client 配置本身安全，也不深拷贝 *http.Client 内部；长期不响应取消的自定义 Transport 仍可能保留 goroutine，已覆盖最终释放路径。
 状态：代码已推送，new/ → review/，待独立审查。本轮仅 build，未合并 main、未发布。
+
+## factory · review · 2026-11-22 12:50
+head: cd08b54d30a197f7b409284235434a937f89a068
+verdict: fix
+fix:
+- [P1] pkg/daemonclient/pool.go:508: 主动取消的最后检查仍在 fanout 内，后续前缀转换、等待 affinity 锁、绑定和复制结果均不再检查；公开 TabList 探针三次均在 cancel 返回后仍无首个绑定，随后约 184ms 返回 30000 个 tab、nil 错误并写入绑定，锁控探针对 TabFocus 也复现。先暂存结果和整批绑定，在池锁内即将提交前重新检查主动取消，取消则不绑定、不覆盖 result；保留 deadline 到达时的预算内部分成功。
+notes:
+- [P2] pkg/daemonclient/pool.go:375: 后端 A 的旧 TabList 回复已完成、B 仍挂起时，成功 TabClose 删除 A 绑定；B 返回后旧列表又恢复已关闭 ID，后续 Eval 被发到 daemon。HEAD 三次失败、origin/main 三次通过。关闭/forget 时使该 ID 的在途旧观察失效，提交绑定时检查，允许新的有效观察重建。
+- [P2] pkg/daemonclient/pool.go:458: worker 在 target.call 的延迟 Body.Close 返回后才记录完成时间/发布回复；自定义 transport 已在 150ms 预算开始约 1ms 时完成解码，仅阻塞 Close，两种聚合均错误丢弃成功，三次复现。解码完成即记录并发布，之后完成 Close/inFlight 清理。
+- 审查前因 main 前进发生文档冲突，Codex 合并 origin/main@e63a15c，保留 FT13 分发与 FT25 并发语义；merge cd08b54 已由 manager 推送。未 rebase，未改保护路径。随后 Codex 只读审查 origin/main...HEAD，无文件修改/提交，工作树干净，head 未变。
+- 配置完整命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 在 HEAD 与 origin/main 均通过（11 个测试包、1 个无测试包）；manager 再执行完整命令通过（部分测试命中缓存）。定向 race 三次、上一轮探针均通过；原始 500ms 挂起后端场景 HEAD 两方法三次通过，基线三次失败且健康后端零请求。上述新诊断 FAIL 是缺陷证据，不是配置测试失败。
+- 证据：本机 review run evidence/FT25-79dc763/ 下 review-findings.md、review-public-cancel.log、review-head-diagnostics.log、review-baseline-diagnostics.log、review-probe-sources.tgz、review-full.log、review-baseline-full.log、manager-full.log。探针使用 overlay，不写入代码分支。
+- 使用既有 Go 1.27.4、隔离 HOME/TMPDIR/缓存、GOPROXY=off，无安装；离线可选 go mod download 缺 Windows mousetrap 缓存，不影响 macOS 必需测试。未找到 review-code skill。
+- 未验真实 Chrome/CDP、Docker、systemd、真实网络黑洞、其他操作系统、Go 1.26；无 UI 变动，未操作用户窗口。无关联 issue/PR，不发 GitHub 评论。
+- 第 2/3 轮发现 P1，review/ → new/，下轮在原分支修复。未合并 main、未发布。
