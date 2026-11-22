@@ -45,6 +45,14 @@ import (
 //     is done, the walk stops. If every backend fails, the error is
 //     [*AllFailedError]. Failover here never moves an existing tab; tab_new
 //     creates a new tab on the backend that succeeds.
+//   - tab_new spread: tab_new has its own round-robin cursor, so health checks
+//     and other unbound calls made between creates do not shift where tabs
+//     open. The backend is chosen per attempt (fewest in-flight among those
+//     this request has not tried, ties from the cursor) and every attempt
+//     moves the cursor just past the backend it took. A down backend's share
+//     is therefore split across the healthy ones instead of all going to its
+//     ring neighbour, and a create that fails over while others are running
+//     does not re-take or skip their turns.
 //   - tab_list: query every backend concurrently, prefix each id, and merge
 //     in constructor order (not completion order). A down backend is skipped
 //     (its tabs are omitted). If every backend fails, the error is
@@ -73,7 +81,13 @@ type Pool struct {
 	keys     []string
 	byKey    map[string]int
 	inFlight []atomic.Int64
-	rr       atomic.Uint64
+	rr       atomic.Uint64 // tie-break cursor for health checks and other unbound calls
+
+	// createMu guards createNext, the tab_new tie-break cursor (ring position
+	// after the backend most recently handed a create attempt). It is held
+	// only while picking a backend, never across HTTP. See pickCreate.
+	createMu   sync.Mutex
+	createNext int
 
 	fanoutTimeout time.Duration // see defaultFanoutTimeout
 
@@ -272,14 +286,18 @@ func (p *Pool) callCreate(ctx context.Context, method string, params any, result
 		return err
 	}
 	var lastErrs []error
-	for _, i := range p.order() {
+	tried := make([]bool, len(p.clients))
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		i, hold, ok := p.pickCreate(tried)
+		if !ok {
+			break
 		}
 		// Decode internally so bind does not depend on the caller's result pointer
 		// (nil, map, or a typed struct are all valid Client.Call shapes).
 		var raw json.RawMessage
-		hold := p.track(i)
 		err := p.clients[i].Call(ctx, method, params, &raw)
 		hold()
 		if err != nil {
@@ -513,7 +531,7 @@ wait:
 
 func (p *Pool) callUnbound(ctx context.Context, method string, params any, result any) error {
 	var lastErrs []error
-	for _, i := range p.order() {
+	for _, i := range p.order(&p.rr) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -531,7 +549,7 @@ func (p *Pool) callUnbound(ctx context.Context, method string, params any, resul
 
 func (p *Pool) walkUnbound(ctx context.Context, op string, fn func(context.Context, *Client) error) error {
 	var lastErrs []error
-	for _, i := range p.order() {
+	for _, i := range p.order(&p.rr) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -552,11 +570,49 @@ func (p *Pool) track(i int) func() {
 	return func() { p.inFlight[i].Add(-1) }
 }
 
-// order returns backend indexes: least in-flight first, round-robin among ties,
-// then the remaining backends in ring order (failover walk).
-func (p *Pool) order() []int {
+// pickCreate chooses the backend for one tab_new attempt and marks it tried
+// and in flight: among backends this request has not tried, the one with the
+// fewest in-flight calls, ties going to the first at or after the create
+// cursor in ring order. The cursor then moves just past the chosen backend.
+// ok is false once every backend has been tried.
+//
+// The choice is made per attempt, not as a walk fixed when the request starts,
+// and each attempt moves the cursor exactly once whether or not it succeeds.
+// So a failover consumes only the turn it actually takes: a failed backend's
+// share rotates across the healthy ones (sequential creates differ by at most
+// one), and a request that fails over late resumes from wherever concurrent
+// creates left the cursor instead of re-taking or skipping their turns.
+// Selection and the in-flight increment share createMu, so concurrent picks
+// see each other; the returned release must be called when the attempt ends.
+func (p *Pool) pickCreate(tried []bool) (idx int, release func(), ok bool) {
 	n := len(p.clients)
-	start := int(p.rr.Add(1)-1) % n
+	p.createMu.Lock()
+	defer p.createMu.Unlock()
+	best := -1
+	var bestN int64
+	for i := 0; i < n; i++ {
+		c := (p.createNext + i) % n
+		if tried[c] {
+			continue
+		}
+		if v := p.inFlight[c].Load(); best < 0 || v < bestN {
+			best, bestN = c, v
+		}
+	}
+	if best < 0 {
+		return 0, nil, false
+	}
+	tried[best] = true
+	p.createNext = (best + 1) % n
+	return best, p.track(best), true
+}
+
+// order returns backend indexes: least in-flight first, round-robin among ties
+// (rr is the caller's tie-break cursor and advances by one), then the remaining
+// backends in ring order (failover walk).
+func (p *Pool) order(rr *atomic.Uint64) []int {
+	n := len(p.clients)
+	start := int((rr.Add(1) - 1) % uint64(n))
 	best := start
 	bestN := p.inFlight[start].Load()
 	for i := 1; i < n; i++ {
