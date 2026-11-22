@@ -508,6 +508,7 @@ func newScreenshotCmd() *cobra.Command {
 			var env struct {
 				Result struct {
 					Data string `json:"data"`
+					MIME string `json:"mime"`
 				} `json:"result"`
 			}
 			if err := json.Unmarshal(b, &env); err != nil {
@@ -522,7 +523,12 @@ func newScreenshotCmd() *cobra.Command {
 				path = args[0]
 			}
 			if path == "" {
-				path = fmt.Sprintf("screenshot-%d.png", time.Now().Unix())
+				// The response MIME, not the requested format, decides the extension.
+				ext := ".png"
+				if strings.EqualFold(strings.TrimSpace(env.Result.MIME), "image/jpeg") {
+					ext = ".jpg"
+				}
+				path = fmt.Sprintf("screenshot-%d%s", time.Now().Unix(), ext)
 			}
 			return os.WriteFile(path, raw, 0o644)
 		},
