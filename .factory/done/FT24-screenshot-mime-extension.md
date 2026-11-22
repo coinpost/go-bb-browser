@@ -59,3 +59,11 @@ notes:
 Codex 只读审查 origin/main（4f86c1c）...HEAD，未发现 P0/P1。配置完整测试 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0；新增 19 子用例单独重跑均通过，临时基线副本的 4 个 JPEG 默认名断言按预期失败。另用本地 fake daemon 验证了非字符串 MIME 的差异及带格式 JSON 的当前字节保真行为。工作树干净，无代码提交。
 
 安装：无未锁定工具或依赖清单变更。未验证：真实 Chrome/CDP 端到端、Docker、systemd，未在 Go 1.26 上复测（本轮使用 Go 1.27.4）。无关联 GitHub issue/PR，故无需评论。按无 P0/P1 规则从 review/ 移至 ready/；上述两项 P3 供 owner 参考。
+
+## factory · 2026-11-22 09:39
+
+owner 要求：把可以交付的交付掉。已将已审查 head 32aaf227d0b5beef3df28e70651297d014350555 合入 main 并推送，merge: 7223e5aa905a70f2147801625bdece0d8893876d（亦为本次推送后的 main tip）。无合并冲突。同一批仅交付当时 ready 且可干净合入的项；未改代码。
+
+测试：变更包 `go test -race ./cmd/bb-browser` 通过（ok 14.548s）。累计 main 完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0（10 个测试包通过、2 个无测试包）。go.mod/go.sum 未改。保护路径无变更。
+
+按 ship=[merge,push] 未打 tag、未发布、未部署；无关联 issue/PR 需关闭，未删除代码分支 factory/FT24-screenshot-mime-extension。原 review 的非阻断 P3 保留。ready/ → done/。

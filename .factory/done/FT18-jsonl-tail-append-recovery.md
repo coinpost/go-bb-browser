@@ -76,3 +76,11 @@ Codex 独立只读审查 origin/main@9fa35626d7db7d51afd56cdc3ff33f8f5a0acfa9...
 安装：无。使用已有 Go 1.27.4 与 pinned 模块；测试 HOME/缓存/临时诊断均位于本 review run TMPDIR，结束清理。短写/失败使用故障注入，未实测真实磁盘满、断电、Chrome/CDP、Docker 或 systemd；无 UI 变更。
 
 状态：review/ → ready/，第 1/3 轮；以上 P3 供 owner 留意。未合并 main、未发布。无 source 或 owner 显式链接的 issue/PR，故无 GitHub 评论对象。
+
+## factory · 2026-11-22 09:39
+
+owner 要求：把可以交付的交付掉。已将已审查 head a311559db7af14ecca3bb952207b29c6a9c6cd7e 合入 main 并推送，merge: 42d72b1ab00cabaf49854d005f1ff58273e72fe1。无合并冲突。同一批仅交付当时 ready 且可干净合入的项；未改代码。
+
+测试：变更包 `go test -race ./internal/store` 通过（ok 1.043s）。累计 main 完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0（10 个测试包通过、2 个无测试包）。go.mod/go.sum 未改。保护路径无变更。
+
+按 ship=[merge,push] 未打 tag、未发布、未部署；无关联 issue/PR 需关闭，未删除代码分支 factory/FT18-jsonl-tail-append-recovery。原 review 的非阻断 P3 保留。ready/ → done/。

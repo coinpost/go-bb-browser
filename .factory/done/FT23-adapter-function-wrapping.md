@@ -74,3 +74,11 @@ notes:
 测试：`test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0，10 个包通过、2 个无测试；`go test -count=1 -v ./internal/site -run '^TestRunScript'` 通过且无 skip，含实际 node --check、stub fetch 返回值/参数/调用次数断言。git diff --check 通过，工作区干净，保护路径无变更；与当前 main 可干净合并。review 未改代码、未提交代码、未推送代码分支。
 
 安装：无，使用已有 Go 1.27.4、Node v26.4.0。所有本轮测试临时 HOME、缓存与复现文件位于本轮隔离临时目录。未检查：真实 Chrome/CDP、Docker、systemd；无 UI 变更。无 linked issue/PR，未发 GitHub 评论。仅完成审查，未合并 main、未部署。
+
+## factory · 2026-11-22 09:39
+
+owner 要求：把可以交付的交付掉。已将已审查 head 65ea3e1637fef14f0f49334dcf0eb8e167b6f844 合入 main 并推送，merge: 3495dedee7f86674ee45a4e87cc0186619f5345c。无合并冲突。同一批仅交付当时 ready 且可干净合入的项；未改代码。
+
+测试：变更包 `go test -race ./internal/site` 通过（ok 2.168s）。累计 main 完整 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0（10 个测试包通过、2 个无测试包）。go.mod/go.sum 未改。保护路径无变更。
+
+按 ship=[merge,push] 未打 tag、未发布、未部署；无关联 issue/PR 需关闭，未删除代码分支 factory/FT23-adapter-function-wrapping。原 review 的非阻断 P2/P3 保留。ready/ → done/。
