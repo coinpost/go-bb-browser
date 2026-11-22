@@ -15,14 +15,25 @@ import (
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
 
+// tabNewRecord is the lifecycle record that registers tab as managed under the
+// full target id managedTarget(tab). (RPC tab_new audit lines no longer add
+// managed membership, so the boundary tests drive it through lifecycle records.)
 func tabNewRecord(tab string, at time.Time) LogRecord {
 	return LogRecord{
-		Action: protocol.MethodTabNew,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
+		Action: ActionManagedTabOpen,
+		Body:   lifecycleBody,
 		Tab:    tab,
+		Target: managedTarget(tab),
 		OK:     true,
 		Time:   at,
 	}
+}
+
+func managedTarget(tab string) string { return "TARGET-" + tab }
+
+// appendManaged writes the same record as tabNewRecord through the store.
+func appendManaged(s *Store, tab string, at time.Time) error {
+	return s.RegisterManagedTab(tab, managedTarget(tab), at)
 }
 
 func mustMarshalRecord(t *testing.T, rec LogRecord) []byte {
@@ -139,7 +150,7 @@ func TestAppendAfterUnterminatedValidTailKeepsRecords(t *testing.T) {
 
 	s := mustOpenDisk(t, dir)
 	requireManaged(t, s, "aa11")
-	if err := s.AppendRPC(tabNewRecord("bb22", t0.Add(time.Minute))); err != nil {
+	if err := appendManaged(s, "bb22", t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)
@@ -149,7 +160,7 @@ func TestAppendAfterUnterminatedValidTailKeepsRecords(t *testing.T) {
 
 	s2 := mustOpenDisk(t, dir)
 	requireManaged(t, s2, "aa11", "bb22")
-	if err := s2.AppendRPC(tabNewRecord("cc33", t0.Add(2*time.Minute))); err != nil {
+	if err := appendManaged(s2, "cc33", t0.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s2.Close(); err != nil {
@@ -191,7 +202,7 @@ func TestOpenSkipsCorruptMiddleLines(t *testing.T) {
 
 			s := mustOpenDisk(t, dir)
 			requireManaged(t, s, "aa11", "bb22")
-			if err := s.AppendRPC(tabNewRecord("cc33", t0.Add(2*time.Minute))); err != nil {
+			if err := appendManaged(s, "cc33", t0.Add(2*time.Minute)); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Close(); err != nil {
@@ -248,20 +259,20 @@ func TestAppendAfterShortWriteDoesNotGlue(t *testing.T) {
 	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 
 	s := mustOpenDisk(t, dir)
-	if err := s.AppendRPC(tabNewRecord("aa11", t0)); err != nil {
+	if err := appendManaged(s, "aa11", t0); err != nil {
 		t.Fatal(err)
 	}
 
 	setWriteLog(s, shortWriteOnce(syscall.ENOSPC))
-	if err := s.AppendRPC(tabNewRecord("lost", t0.Add(time.Minute))); !errors.Is(err, syscall.ENOSPC) {
+	if err := appendManaged(s, "lost", t0.Add(time.Minute)); !errors.Is(err, syscall.ENOSPC) {
 		t.Fatalf("short write error must propagate, got %v", err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)
 
-	if err := s.AppendRPC(tabNewRecord("bb22", t0.Add(2*time.Minute))); err != nil {
+	if err := appendManaged(s, "bb22", t0.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendRPC(tabNewRecord("cc33", t0.Add(3*time.Minute))); err != nil {
+	if err := appendManaged(s, "cc33", t0.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)
@@ -285,10 +296,10 @@ func TestAppendShortWriteWithoutErrorIsReported(t *testing.T) {
 
 	s := mustOpenDisk(t, dir)
 	setWriteLog(s, shortWriteOnce(nil))
-	if err := s.AppendRPC(tabNewRecord("lost", t0)); !errors.Is(err, io.ErrShortWrite) {
+	if err := appendManaged(s, "lost", t0); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("want io.ErrShortWrite, got %v", err)
 	}
-	if err := s.AppendRPC(tabNewRecord("aa11", t0.Add(time.Minute))); err != nil {
+	if err := appendManaged(s, "aa11", t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)
@@ -307,11 +318,11 @@ func TestAppendRefusedWhileBoundaryRepairFails(t *testing.T) {
 	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 
 	s := mustOpenDisk(t, dir)
-	if err := s.AppendRPC(tabNewRecord("aa11", t0)); err != nil {
+	if err := appendManaged(s, "aa11", t0); err != nil {
 		t.Fatal(err)
 	}
 	setWriteLog(s, shortWriteOnce(syscall.ENOSPC))
-	if err := s.AppendRPC(tabNewRecord("lost", t0.Add(time.Minute))); err == nil {
+	if err := appendManaged(s, "lost", t0.Add(time.Minute)); err == nil {
 		t.Fatal("short write must fail")
 	}
 	before, err := os.ReadFile(logPath)
@@ -326,7 +337,7 @@ func TestAppendRefusedWhileBoundaryRepairFails(t *testing.T) {
 		return 0, syscall.EIO
 	})
 	for i := 0; i < 2; i++ {
-		if err := s.AppendRPC(tabNewRecord("dd44", t0.Add(2*time.Minute))); !errors.Is(err, syscall.EIO) {
+		if err := appendManaged(s, "dd44", t0.Add(2*time.Minute)); !errors.Is(err, syscall.EIO) {
 			t.Fatalf("boundary repair failure must propagate, got %v", err)
 		}
 	}
@@ -351,13 +362,13 @@ func TestAppendRefusedWhileBoundaryRepairFails(t *testing.T) {
 		}
 		return f.Write(p)
 	})
-	if err := s.AppendRPC(tabNewRecord("ee55", t0.Add(3*time.Minute))); !errors.Is(err, syscall.EIO) {
+	if err := appendManaged(s, "ee55", t0.Add(3*time.Minute)); !errors.Is(err, syscall.EIO) {
 		t.Fatalf("record write failure must propagate, got %v", err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)
 
 	setWriteLog(s, nil)
-	if err := s.AppendRPC(tabNewRecord("bb22", t0.Add(4*time.Minute))); err != nil {
+	if err := appendManaged(s, "bb22", t0.Add(4*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)
@@ -381,10 +392,10 @@ func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
 	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 
 	s := mustOpenDisk(t, dir)
-	if err := s.AppendRPC(tabNewRecord("aa11", t0)); err != nil {
+	if err := appendManaged(s, "aa11", t0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendRPC(tabNewRecord("bb22", t0.Add(time.Minute))); err != nil {
+	if err := appendManaged(s, "bb22", t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -421,7 +432,7 @@ func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
 	s.maxLogBytes = defaultMaxLogBytes
 	s.writeLog = nil
 	s.mu.Unlock()
-	if err := s.AppendRPC(tabNewRecord("cc33", t0.Add(3*time.Minute))); err != nil {
+	if err := appendManaged(s, "cc33", t0.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)

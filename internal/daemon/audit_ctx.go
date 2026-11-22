@@ -11,6 +11,8 @@ type auditMeta struct {
 	body     json.RawMessage
 	senderIP string
 	at       time.Time
+	// target is the full CDP target id the request acted on, when resolved.
+	target string
 }
 
 type auditCtxKey struct{}

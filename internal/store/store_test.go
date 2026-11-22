@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,9 @@ func TestOpenDiskMode(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.RegisterManagedTab("ab12", "TARGET-AB12", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +160,8 @@ func TestOpenRebuildsManagedFromFullLog(t *testing.T) {
 
 	t0 := time.Now().UTC().Add(-time.Hour)
 	records := []LogRecord{
-		{Action: protocol.MethodTabNew, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`), Tab: "aa11", OK: true, Time: t0},
-		{Action: protocol.MethodGoto, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`), Tab: "aa11", OK: true, Time: t0.Add(time.Minute)},
+		{Action: ActionManagedTabOpen, Body: lifecycleBody, Tab: "aa11", Target: "TARGET-AA11", OK: true, Time: t0},
+		{Action: protocol.MethodGoto, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`), Tab: "aa11", Target: "TARGET-AA11", OK: true, Time: t0.Add(time.Minute)},
 	}
 	var b strings.Builder
 	for _, rec := range records {
@@ -253,30 +257,23 @@ func TestLogRotationPreservesManaged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newBody := json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`)
-	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabNew, Body: newBody, Tab: "aa11", OK: true, Time: time.Now().UTC(),
-	}); err != nil {
+	liveAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	if err := s.RegisterManagedTab("aa11", "TARGET-AA11", liveAt); err != nil {
 		t.Fatal(err)
 	}
-	// A tab that gets closed must NOT survive rotation.
-	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabNew, Body: newBody, Tab: "bb22", OK: true, Time: time.Now().UTC(),
-	}); err != nil {
+	// A retired tab must NOT survive rotation.
+	if err := s.RegisterManagedTab("bb22", "TARGET-BB22", liveAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabClose,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":"bb22"},"id":2}`),
-		Tab:    "bb22", OK: true, Time: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
+	if retired, err := s.RetireManagedTarget("TARGET-BB22"); err != nil || !retired {
+		t.Fatalf("retire: %v %v", retired, err)
 	}
 
-	gotoBody := json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://example.com/some/long/path"},"id":3}`)
+	// Unmanaged-tab traffic fills the log without touching managed activity.
+	gotoBody := json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"cc33","url":"https://example.com/some/long/path"},"id":3}`)
 	for i := 0; i < 50; i++ {
 		if err := s.AppendRPC(LogRecord{
-			Action: protocol.MethodGoto, Body: gotoBody, Tab: "aa11", OK: true, Time: time.Now().UTC(),
+			Action: protocol.MethodGoto, Body: gotoBody, Tab: "cc33", Target: "TARGET-CC33", OK: true, Time: time.Now().UTC(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -289,57 +286,231 @@ func TestLogRotationPreservesManaged(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	data, err := os.ReadFile(filepath.Join(dir, rpcLogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "TARGET-BB22") || strings.Contains(string(data), `"bb22"`) {
+		t.Fatalf("rotated log reseeded a retired tab:\n%s", data)
+	}
+
 	s2, err := Open(OpenConfig{StateDir: dir, MaxLogBytes: 512})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	managed := s2.ReplayManagedTabActivity()
-	if _, ok := managed["aa11"]; !ok {
-		t.Fatalf("managed tab lost across rotation: %#v", managed)
-	}
-	if _, ok := managed["bb22"]; ok {
-		t.Fatalf("closed tab resurrected by snapshot: %#v", managed)
+	got := s2.ManagedTabs()
+	want := []ManagedTab{{Tab: "aa11", TargetID: "TARGET-AA11", LastActivity: liveAt}}
+	if len(got) != 1 || got[0].Tab != want[0].Tab || got[0].TargetID != want[0].TargetID || !got[0].LastActivity.Equal(liveAt) {
+		t.Fatalf("managed after rotation: %#v want %#v", got, want)
 	}
 }
 
-func TestReplayManagedTabActivity(t *testing.T) {
+func TestApplyManagedUpdate(t *testing.T) {
 	t0 := time.Now().UTC().Add(-10 * time.Minute)
 	t1 := t0.Add(2 * time.Minute)
 	t2 := t1.Add(time.Minute)
+	gotoRec := func(tab, targetID string, ok bool, at time.Time) LogRecord {
+		return LogRecord{
+			Action: protocol.MethodGoto,
+			Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"` + tab + `"},"id":2}`),
+			Tab:    tab, Target: targetID, OK: ok, Time: at,
+		}
+	}
 
-	managed := make(map[string]time.Time)
-	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodTabNew, Tab: "aa11", Seq: 1, OK: true, Time: t0,
-	})
-	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodGoto,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11"},"id":2}`),
-		Tab:    "aa11", Seq: 2, OK: true, Time: t1,
-	})
-	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodTabClose,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_close","params":{"tab":"aa11"},"id":3}`),
-		Tab:    "aa11", Seq: 3, OK: true, Time: t2,
-	})
-	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodTabNew, Tab: "bb22", Seq: 4, OK: true, Time: t1,
-	})
-	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodGoto,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"bb22"},"id":5}`),
-		Tab:    "bb22", Seq: 5, OK: false, Error: "fail", Time: t2,
-	})
-	applyManagedUpdate(managed, LogRecord{
-		Action: protocol.MethodGoto,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"cc33"},"id":6}`),
-		Tab:    "cc33", Seq: 6, OK: true, Time: t2,
-	})
+	managed := make(map[string]managedEntry)
+	for _, rec := range []LogRecord{
+		{Action: ActionManagedTabOpen, Tab: "aa11", Target: "A", OK: true, Time: t0},
+		gotoRec("aa11", "A", true, t1),
+		{Action: ActionManagedTabRetire, Tab: "aa11", Target: "A", OK: true, Time: t2},
+		{Action: ActionManagedTabOpen, Tab: "bb22", Target: "B", OK: true, Time: t1},
+		gotoRec("bb22", "B", false, t2), // failed RPC does not renew
+		gotoRec("cc33", "C", true, t2),  // unmanaged target
+		gotoRec("bb22", "", true, t2),   // alias only: unverifiable
+		gotoRec("bb22", "X", true, t2),  // same alias, different target
+		gotoRec("bb22", "B", true, t0),  // out-of-order older line does not rewind
+		// Audit lines never change membership, with or without identity.
+		{Action: protocol.MethodTabNew, Tab: "dd44", Target: "D", OK: true, Time: t2},
+		{Action: protocol.MethodTabNew, Tab: "ee55", OK: true, Time: t2},
+		{Action: protocol.MethodTabClose, Tab: "bb22", Target: "B", OK: true, Time: t0},
+		{Action: protocol.MethodTabClose, Tab: "bb22", OK: true, Time: t2},
+		// Retiring another target that shares the alias leaves B alone.
+		{Action: ActionManagedTabRetire, Tab: "bb22", Target: "X", OK: true, Time: t2},
+		// Lifecycle records without identity are ignored.
+		{Action: ActionManagedTabOpen, Tab: "ff66", OK: true, Time: t2},
+		{Action: ActionManagedTabRetire, Tab: "bb22", OK: true, Time: t2},
+	} {
+		applyManagedUpdate(managed, rec)
+	}
 
 	if len(managed) != 1 {
 		t.Fatalf("managed: %#v", managed)
 	}
-	if !managed["bb22"].Equal(t1) {
-		t.Fatalf("bb22 last activity: got %v want %v", managed["bb22"], t1)
+	if got := managed["B"]; got.tab != "bb22" || !got.at.Equal(t1) {
+		t.Fatalf("B: got %#v want tab bb22 at %v", got, t1)
+	}
+	applyManagedUpdate(managed, gotoRec("bb22", "B", true, t2))
+	if got := managed["B"]; !got.at.Equal(t2) {
+		t.Fatalf("B activity not renewed: %v want %v", got.at, t2)
+	}
+}
+
+// Records written by versions that only stored the short id cannot be verified
+// against a live target, so they are not restored as managed.
+func TestOpenIgnoresLegacyAliasOnlyRecords(t *testing.T) {
+	dir := t.TempDir()
+	t0 := time.Now().UTC().Add(-time.Hour)
+	var b strings.Builder
+	for _, rec := range []LogRecord{
+		{Action: protocol.MethodTabNew, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`), Tab: "aa11", OK: true, Time: t0},
+		{Action: protocol.MethodGoto, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`), Tab: "aa11", OK: true, Time: t0.Add(time.Minute)},
+	} {
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, rpcLogFile), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(OpenConfig{StateDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got := s.ManagedTabs(); len(got) != 0 {
+		t.Fatalf("legacy records restored as managed: %#v", got)
+	}
+	if got := s.ReplayManagedTabActivity(); len(got) != 0 {
+		t.Fatalf("legacy records restored as managed: %#v", got)
+	}
+}
+
+func TestManagedLifecycleAcrossAliasReuse(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(OpenConfig{StateDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	if err := s.RegisterManagedTab("1234", "OLD-1234", t0); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := s.RetireManagedTarget("OLD-1234"); err != nil || !retired {
+		t.Fatalf("retire: %v %v", retired, err)
+	}
+	// Retiring an unmanaged target is a no-op and writes nothing.
+	before := s.logBytes
+	if retired, err := s.RetireManagedTarget("OLD-1234"); err != nil || retired {
+		t.Fatalf("second retire: %v %v", retired, err)
+	}
+	if retired, err := s.RetireManagedTarget("USER-TAB"); err != nil || retired {
+		t.Fatalf("retire unmanaged: %v %v", retired, err)
+	}
+	if s.logBytes != before {
+		t.Fatal("no-op retirement wrote to the log")
+	}
+
+	newAt := t0.Add(time.Minute)
+	if err := s.RegisterManagedTab("1234", "NEW-1234", newAt); err != nil {
+		t.Fatal(err)
+	}
+	// Delayed audit lines from the old lifecycle arrive after the alias was reused.
+	for _, rec := range []LogRecord{
+		{Action: protocol.MethodTabNew, Tab: "1234", Target: "OLD-1234", OK: true, Time: t0},
+		{Action: protocol.MethodGoto, Tab: "1234", Target: "OLD-1234", OK: true, Time: time.Now().UTC()},
+		{Action: protocol.MethodTabClose, Tab: "1234", Target: "OLD-1234", OK: true, Time: time.Now().UTC()},
+		{Action: protocol.MethodTabClose, Tab: "1234", OK: true, Time: time.Now().UTC()},
+	} {
+		rec.Body = json.RawMessage(`{"jsonrpc":"2.0","method":"` + rec.Action + `","params":{"tab":"1234"},"id":1}`)
+		if err := s.AppendRPC(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(s *Store) {
+		t.Helper()
+		got := s.ManagedTabs()
+		if len(got) != 1 || got[0].TargetID != "NEW-1234" || got[0].Tab != "1234" || !got[0].LastActivity.Equal(newAt) {
+			t.Fatalf("managed: %#v", got)
+		}
+	}
+	check(s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(OpenConfig{StateDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	check(s2)
+}
+
+func TestAppendRPCRejectsLifecycleActions(t *testing.T) {
+	s := openTestStore(t)
+	for _, action := range []string{ActionManagedTabOpen, ActionManagedTabRetire} {
+		if err := s.AppendRPC(LogRecord{Action: action, Body: lifecycleBody, Tab: "aa11", Target: "A", OK: true}); err == nil {
+			t.Fatalf("AppendRPC accepted reserved action %q", action)
+		}
+	}
+	if got := s.ManagedTabs(); len(got) != 0 {
+		t.Fatalf("managed: %#v", got)
+	}
+}
+
+// A retirement that cannot be written is reported to the caller, while the
+// in-memory managed set is still retired.
+func TestRetireManagedTargetReportsWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(OpenConfig{StateDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterManagedTab("aa11", "A", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterManagedTab("bb22", "B", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Break the log file underneath the store.
+	if err := s.logFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := s.RetireManagedTarget("A")
+	if !retired || err == nil {
+		t.Fatalf("retire with broken log: retired=%v err=%v, want true and an error", retired, err)
+	}
+	if got := s.ManagedTabs(); len(got) != 1 || got[0].TargetID != "B" {
+		t.Fatalf("in-memory managed set not retired: %#v", got)
+	}
+	if err := s.RegisterManagedTab("cc33", "C", time.Now().UTC()); err == nil {
+		t.Fatal("register with broken log returned no error")
+	}
+
+	_ = s.Close()
+	if _, err := s.RetireManagedTarget("B"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("retire after Close: %v, want ErrClosed", err)
+	}
+}
+
+func TestManagedLifecycleInMemory(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.RegisterManagedTab("aa11", "A", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterManagedTab("", "", time.Now().UTC()); err == nil {
+		t.Fatal("empty target id accepted")
+	}
+	if got := s.ReplayManagedTabActivity(); len(got) != 1 || got["aa11"].IsZero() {
+		t.Fatalf("managed: %#v", got)
+	}
+	if retired, err := s.RetireManagedTarget("A"); err != nil || !retired {
+		t.Fatalf("retire: %v %v", retired, err)
+	}
+	if got := s.ManagedTabs(); len(got) != 0 {
+		t.Fatalf("managed: %#v", got)
 	}
 }
