@@ -1,26 +1,25 @@
 go-bb-browser - factory board
 =============================
-6 at your gates | 4 with the agent | 11 done | 4 sent back
-Drawn Nov 22, 12:19 | https://github.com/coinpost/go-bb-browser
+6 at your gates | 4 with the agent | 11 done | 5 sent back
+Drawn Nov 22, 12:30 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
-    FT2    12h  生命周期事件溢出重同步与优雅关停次序
-    FT3    12h  创建在途关停收尾与唯一释放记账
-    FT4    12h  日志尾行、轮转恢复与安全可写探测
-    FT5    12h  快照ref作用域与脱离节点清理
-    FT6    12h  run帮助布尔参数与选项终止符兼容
+    FT2    13h  生命周期事件溢出重同步与优雅关停次序
+    FT3    13h  创建在途关停收尾与唯一释放记账
+    FT4    13h  日志尾行、轮转恢复与安全可写探测
+    FT5    13h  快照ref作用域与脱离节点清理
+    FT6    13h  run帮助布尔参数与选项终止符兼容
 
-NEW (4)                                     avg stay 5h
-    FT25    3h  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
-                的 daemon 使整个调用失败
+NEW (3)                                     avg stay 5h
     FT26    2h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中
     FT28    2h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容
     FT7     1h  target释放与观测writer退役同步 (round 2)
 
-REVIEW (0)                                  avg stay 16m
-    Nothing here
+REVIEW (1)                                  avg stay 16m
+    FT25    1m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+                的 daemon 使整个调用失败 (round 2)
 
 READY (6) [!]                               avg stay 1h
   * FT19    5h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
@@ -35,10 +34,10 @@ READY (6) [!]                               avg stay 1h
   * FT10    1h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
                 > Check, then ship
-  * FT13   33m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+  * FT13   44m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon (round 2)
                 > Check, then ship
-  * FT22    1m  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
+  * FT22   11m  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
                 (round 2)
                 > Check, then ship
 
