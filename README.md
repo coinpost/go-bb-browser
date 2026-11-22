@@ -187,6 +187,8 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 | `--tab` | — | 短 tab id；省略则用 `tab_list` 返回的 daemon 焦点 tab |
 | `-v` / `--version` | — | 打印版本并退出 |
 
+**超时预算**：daemon 对每个 JSON-RPC（`eval`、`fetch`、`snapshot`、`screenshot`、`goto` 等）的 CDP 工作上限是 60 秒；CLI 的每条命令（含 `run`，其中选 tab、开 tab 与 `eval` 累计计时）使用同一个 60 秒预算，不会比 daemon 等得更久。两者来自同一常量 `internal/timeout.Operation`，超时错误会写明该上限；更长的任务请拆成多条命令。
+
 ---
 
 ### `health`

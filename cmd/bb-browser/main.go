@@ -19,6 +19,7 @@ import (
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/spf13/cobra"
 	"github.com/yiplee/go-bb-browser/internal/site"
+	"github.com/yiplee/go-bb-browser/internal/timeout"
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
 
@@ -32,6 +33,21 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
+
+// commandTimeout is the budget of one whole command, including every RPC it
+// sends. It equals the daemon's per-RPC limit: the daemon ends any single RPC
+// at timeout.Operation, so waiting longer could never succeed.
+const commandTimeout = timeout.Operation
+
+// timeoutError names the limit when a command runs out of its budget. Earlier
+// caller cancellation and every other error pass through unchanged.
+func timeoutError(err error) error {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w (a bb-browser command and each daemon RPC are limited to %ds; split longer work into several commands)",
+		err, timeout.OperationSeconds)
+}
 
 func versionString(name string) string {
 	return fmt.Sprintf("%s %s (commit %s, built %s)", name, version, commit, date)
@@ -100,7 +116,7 @@ func newHealthCmd() *cobra.Command {
 		Use:   "health",
 		Short: "GET /health (daemon + Chrome CDP connectivity)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			return cmdHealth(ctx, baseURL, jsonOut)
 		},
@@ -116,7 +132,7 @@ func newOpenCmd() *cobra.Command {
 		Short: "Open URL in a new tab (or navigate in the current tab)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			rawURL, err := normalizeURL(args[0])
 			if err != nil {
@@ -190,7 +206,7 @@ func newTabCmd() *cobra.Command {
 		Use:   "list",
 		Short: "JSON-RPC tab_list",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			return cmdRPC(ctx, baseURL, jsonOut, protocol.MethodTabList, map[string]any{})
 		},
@@ -202,7 +218,7 @@ func newTabCmd() *cobra.Command {
 		Short: "JSON-RPC tab_new",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			u := "about:blank"
 			if len(args) > 0 {
@@ -227,7 +243,7 @@ func newTabCmd() *cobra.Command {
 		Use:   "select",
 		Short: "Switch daemon focused tab (--id short id or --index 1-based)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			if cmd.Flags().Changed("id") {
 				id := strings.TrimSpace(selID)
@@ -255,7 +271,7 @@ func newTabCmd() *cobra.Command {
 		Use:   "close",
 		Short: "JSON-RPC tab_close",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			var tab string
 			var err error
@@ -294,7 +310,7 @@ func newSnapshotCmd() *cobra.Command {
 		Use:   "snapshot",
 		Short: "Compact page tree with @ref → CSS selectors (snapshot JSON-RPC)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -325,7 +341,7 @@ func newEvalCmd() *cobra.Command {
 		Short: "JSON-RPC eval",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -343,7 +359,7 @@ func newClickCmd() *cobra.Command {
 		Short: "JSON-RPC click (CSS selector or @N from snapshot)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -367,7 +383,7 @@ func newFillCmd() *cobra.Command {
 		Short: "JSON-RPC fill / SetValue",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -393,7 +409,7 @@ func newFetchCmd() *cobra.Command {
 		Short: "In-page fetch() with credentials (fetch JSON-RPC)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			rawURL, err := normalizeURL(args[0])
 			if err != nil {
@@ -485,7 +501,7 @@ func newScreenshotCmd() *cobra.Command {
 		Use:   "screenshot [path.png]",
 		Short: "JSON-RPC screenshot (optional file path)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -577,7 +593,7 @@ Print document.documentElement as HTML via eval. With --visible-only, rebuild th
 
 Markdown output (--format markdown) is converted locally in the CLI after eval.`),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			outFormat := strings.ToLower(strings.TrimSpace(format))
 			if outFormat != "html" && outFormat != "markdown" {
@@ -636,7 +652,7 @@ Markdown output (--format markdown) is converted locally in the CLI after eval.`
 }
 
 func runReload(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 	defer cancel()
 	tab, err := effectiveTab(ctx, baseURL, tabFlag)
 	if err != nil {
@@ -667,7 +683,7 @@ func newCloseCmd() *cobra.Command {
 		Use:   "close",
 		Short: "JSON-RPC tab_close (current/focused tab)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -684,7 +700,7 @@ func newGotoCmd() *cobra.Command {
 		Short: "JSON-RPC goto",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			rawURL, err := normalizeURL(args[0])
 			if err != nil {
@@ -709,7 +725,7 @@ func newObsCmd(use, method, clearMethod, short string) *cobra.Command {
 		Use:   use + " [filter]",
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -793,7 +809,7 @@ func newNetworkCmd() *cobra.Command {
 		Short: "Buffered network activity (optional URL substring filter)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			tab, err := effectiveTab(ctx, baseURL, tabFlag)
 			if err != nil {
@@ -964,7 +980,7 @@ the command fails with "flag --name needs a value".`),
 			if help {
 				return cmd.Help()
 			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 180*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			raw, meta, err := site.ReadAdapterFile(strings.TrimSpace(parsed.script))
 			if err != nil {
@@ -1183,12 +1199,12 @@ func postRPC(ctx context.Context, base string, method string, params map[string]
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, timeoutError(err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, timeoutError(err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))

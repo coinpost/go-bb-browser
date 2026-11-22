@@ -169,7 +169,7 @@ const posts = walk(fiber);
 
 ## 模式 4：分页 & 长任务的“每次一页”
 
-`bb-browser run` 单次超时 180s。想抓 10 页 × 50 条不要在一次 run 里全拿：
+`bb-browser run` 整条命令的预算是 60s，daemon 对其中每个 RPC（含 adapter 的那次 `eval`）的上限也是 60s。想抓 10 页 × 50 条不要在一次 run 里全拿：
 
 ```javascript
 /* @meta { "name": "example/list", "domain": "www.example.com",
@@ -222,7 +222,7 @@ async function(args) {
 }
 ```
 
-> 不要无限重试；180s 预算耗尽就回 `{ error }` 让上层决定是否再 run。
+> 不要无限重试；脚本自己留出余量，在 60s 预算耗尽前就回 `{ error }` 让上层决定是否再 run——到点后 daemon 会直接中断 `eval`，脚本来不及返回。
 
 ---
 

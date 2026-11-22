@@ -15,7 +15,7 @@ allowed-tools: Bash(bb-browser:*)
 - **adapter = 一个 `.js` 文件**，顶部可选 `/* @meta { … } */`，主体为 **匿名** async 函数：`async function(args) { … }`。
 - **`bb-browser run ./path.js` 由 daemon 在目标页面上下文里 eval**（async IIFE 包装），因此你写的代码等同于在该站的 DevTools Console 里运行：**能直接用页面 Cookie / 登录态**，相对 URL 相对当前页面。
 - 输出要求：**可 JSON 序列化**。错误用 `{ error, hint }` 对象。
-- 单次 `run` 超时 **约 180 秒**（`cmd/bb-browser/main.go`）；长任务需要拆步或先改实现。
+- 整条 `run` 命令的预算是 **60 秒**（选 tab、必要时开 tab 并等待加载、再 `eval`，累计计时）；daemon 对单个 RPC 的上限同样是 60 秒，所以一次 `eval` 不可能跑得更久。两者来自同一常量 `internal/timeout.Operation`；长任务需要拆成多次 `run`。
 - 脚本**不是注册到命名空间的 site**，而是**文件系统路径**。没有 `bb-browser site list/search/update` 这类命令；纯粹是“把这个文件在那个 tab 上跑一次”。
 
 ## 开发工作流（5 步）
@@ -231,7 +231,7 @@ async function(args) {
 
 ## 常见坑（Go 实现特有）
 
-- **超时 180s**：大页循环抓、翻页、滚动加载别在一次 `run` 里做完；分多条调用或回退到 `fetch` 直接打分页接口。
+- **超时 60s**：整条 `run` 与 daemon 的单个 RPC 都是这个上限，超过即失败（`context deadline exceeded`，错误信息会写明上限）。大页循环抓、翻页、滚动加载别在一次 `run` 里做完；分多条调用或回退到 `fetch` 直接打分页接口。
 - **`args.*` 都是字符串**：命名参数没有类型；在脚本里 `parseInt` / `parseFloat` / `JSON.parse`。
 - **没有 `--flag` 布尔**：`--dry` 报错，写成 `--dry true` 并 `args.dry === 'true'`。
 - **`@meta` JSON 必须合法**：正则用非贪婪 `\{.*?\}` 匹配，字符串里出现 `}` 会误截断；把模板放到 adapter 主体里，`@meta` 里只写元信息。
