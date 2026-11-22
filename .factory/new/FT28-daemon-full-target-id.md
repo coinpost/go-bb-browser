@@ -87,3 +87,17 @@ owner 最新要求（覆盖上文保留短 ID 兼容的设计与验收）：
 - manager 独立复验：test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过。无新增未 pin 工具或依赖安装。
 - 未验：真实 Chrome（全部 fake CDP/stub）、跨 Chrome 进程 ID 唯一性、未合并 FT10/FT26 的跨分支集成。解析后目标消失以 fake CDP 模拟错误；不承诺跨浏览器会话永不复用。
 已推送代码，new/ → review/，等待独立 review；未合并 main、未发布、未启用定时任务。
+
+## factory · review · 2026-11-22 10:15
+head: 42cc475ac164a6c138777e48e1793061a3bf7e50
+verdict: fix
+fix:
+- [P1] internal/state/tab_registry.go:123: 迟到的枚举重新登记已关闭的完整 ID。tab_list 取得含 A 的快照后，tab_close(A) 成功，再放行枚举，持 A 旧完整 ID 的 network_clear、console_clear、errors_clear 均返回成功。Codex 在同后缀双 tab 基线对照中验证三者原先均拒绝。枚举代数必须覆盖删除，过滤请求发起后已删除的目标，避免重新登记或列出过期目标。
+notes:
+- [P2] internal/store/store.go:341: idle 自动关闭不从恢复集合移除，完整 ID 不复用后轮转快照随历史创建次数增长。16 个目标全部自动关闭后 HEAD 留 16 条合成 tab_new，基线 1 条。确认移除后按完整身份清理恢复集合，并保持审计写入顺序。
+- [P2] internal/daemon/tab_idle.go:116: 枚举后、日志恢复前目标销毁，恢复凭旧快照又将其标为受管；应将当前登记状态检查/恢复与目标移除同步。
+- [P2] cmd/bb-browser/main.go:1234: CLI 裁剪不透明 ID（另见 172、1131 行），fake CDP 的 X 与带首尾空格的 X 可导致默认 close 操作错目标；应仅检查空串，原样传递。此项为合成 ID 边界，不是真实 Chrome 已验证行为。
+- [P3] pkg/daemonclient/README.md:3: 迁移文档残留短 tab id 和 0:abcd 示例；skills/bb-browser-adapter/SKILL.md:127 仍传 --tab ab12，应统一为创建/列举返回的完整值。
+
+独立审查：Codex，对比 origin/main...HEAD（main@7223e5a）。全量 gofmt/vet/go test -race 通过；前四项另以临时副本对照 HEAD 与基线复现。未新增工具或依赖；使用已安装 Go 1.27.4，测试隔离 HOME/TMPDIR/缓存，不依赖真实外网。未验证 Go 1.26、真实 Chrome 或跨 Chrome 会话 ID 唯一性。审查工作树干净，无代码变更。
+round 1/3，review/ → new/，下一次 build 修复阻塞项；本次仅 review，未开始修复，未合并、发布或启用定时任务。
