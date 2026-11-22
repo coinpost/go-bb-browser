@@ -145,3 +145,25 @@ Claude Code 完成第 3/3 轮，提交 a7bbb077d6f2987a6e7128d54bd32687d17027b2�
 - 未验：真实 Chrome/CDP（仅 fake CDP/stub）、Go 1.26、Docker/systemd 真实运行、跨 Chrome 会话 ID 唯一性。无 UI 变更，未启动浏览器或操作用户窗口。
 - 最新 review 的 P2/P3（删除历史溢出导致不确定目标被持久退役、CLI 裁剪不透明 ID、残留文档示例）未作为本轮额外修复，仍待 owner/独立 review 注意。
 状态：代码已推送，new/ → review/，round 3/3，待独立审查；本轮仅 build，未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 15:36
+head: a7bbb077d6f2987a6e7128d54bd32687d17027b2
+verdict: fix
+fix:
+- [P1] internal/daemon/v1.go:485: 迟到的 tab_new 回复重新登记已关闭且已处理 targetDestroyed 的 A，三种 clear 全成功，idle 跟踪及磁盘重放受管记录也复活。创建请求前捕获生命周期代数，让创建登记、受管记录与删除有一致先后顺序。HEAD/main 均复现，非本轮新引入，但违反完整身份失效契约。
+- [P1] internal/state/tab_registry.go:126: close(A) 后挂起含 A/B 的旧列表，较新列表已确认仅 B，放行旧列表仍重新登记并列出 A，三种 clear 全成功。较新枚举确认的缺席必须约束更早回复，包括已注销 ID，并保留并发新建保护。HEAD/main 均复现。
+notes:
+- [P2] internal/daemon/browser_reconnect.go:121: 生命周期队列满触发重新枚举确认只剩 B 后，排队更早的 targetInfoChanged(A) 又登记 A，三种 clear 成功。事件排序应与对账代数一致，淘汰快照之前的陈旧事件。真实 chromedp + 回环 WebSocket stub，HEAD/main 各 3/3。
+- [P2] internal/daemon/tab_idle.go:198: 保留上轮评级。1025 个其他 ID 删除导致保守过滤存活 A，恢复对账将不确定当作确认缺席并持久退役，后续枚举/重放无法恢复。HEAD 失败、main 通过；区分无法验证与明确消失。
+- [P2] internal/daemon/tab_idle.go:231: 显式关闭收到明确 No target with given id found 后未清理登记/受管状态，三种 clear 仍成功。明确目标消失应清理该身份，同时保留关闭错误响应。HEAD/main 均复现。
+- [P2] internal/daemon/v1.go:437: tab_select 绕过同目标锁，idle 清理已持锁进入 CloseTarget 时仍成功并刷新 idle，随后目标被关闭。选择应参与同一锁、获锁后检查存活。HEAD/main 均复现。
+- [P2] cmd/bb-browser/main.go:1250: 保留上轮合成不透明字符串边界：open/默认 close 裁剪带首尾空白的完整 ID，错关 X 而非焦点的带空白 ID。第 188、1147、1250–1252 行仅检查空串并原样传递。HEAD 失败、main 通过，非真实 Chrome 验证。
+- [P2] pkg/daemonclient/pool.go:337: 双后端测试中池外关闭后 Eval 正确路由原后端，但明确 unknown tab id 返回 RPCError，不能 errors.As 为要求的 UnknownTabError。应保留底层错误并提供 UnknownTabError 语义；绑定回收仍属 FT26。HEAD/main 相同。
+- [P3] pkg/daemonclient/README.md:3: 残留短 tab id、0:abcd 示例，skills/bb-browser-adapter/SKILL.md:127 仍用 --tab ab12，应使用创建/列举返回的完整值。
+
+Codex 独立只读审查 origin/main@e63a15c...HEAD 全部 47 文件；未找到可用 review-code skill，按请求与计划审查。上轮 P1 原始 close → 旧快照 → destroyed → 放行调度已修复：91ee3a1 四入口均失败，HEAD 四入口各 -race 重复 20 次通过；首轮八子用例亦各通过 20 次。上述为新增遗漏调度，不是沿用已修复 finding。
+配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过，11 个测试包、1 个无测试包，Go 1.27.4。定向覆盖18方法、同后缀、等待锁消失、未知锁回收、审计/旧短日志跳过及双后端；16 个受管目标 idle 关闭、轮转后重放为0，原枚举后销毁再恢复调度通过。配置通过不覆盖新增诊断缺陷。manager 核对全量日志、诊断源码说明和 HEAD 失败日志，工作树干净，未另行重复全量。
+证据保留本机 review run evidence/FT28-a7bbb07/：reproduce.txt、review_*_test.go、probe-current/main.log、queue-current/main.log、retire-current/main.log、pool-current/main.log、cli.log、cli-main.log、p1-previous.log、p1-head-counts.log、full.log。诊断为工作树外导出副本测试，未提交为永久回归。
+无安装、清单或依赖变更。测试隔离 HOME/TMPDIR/缓存，复用已有模块，GOPROXY=off/GOSUMDB=off，无真实外网。未验 Go1.26、真实 Chrome、跨浏览器会话 ID 唯一性；未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
+第3/3轮发现P1，已达 max_rounds，留在 review/ 等 owner 决定；如需修复请添加说明并移至 new/。未改代码、未合并 main、未发布。
