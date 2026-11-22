@@ -265,6 +265,66 @@ func TestSessionCloseRetiresWritersWithoutCancellingTabs(t *testing.T) {
 	obs.cleanup.cancel()
 }
 
+// Close called from several goroutines at once: every call is a release in its
+// own right and returns only after the Record that was in flight has finished,
+// whichever of them took the observer out of the table. Run under -race.
+func TestConcurrentSessionCloseWaitsForInFlightRecord(t *testing.T) {
+	const tid = target.ID("TAB-LIVE")
+	obsStore := state.NewTabObsStore()
+	rec := &barrierRecorder{obs: obsStore, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	s := newSession(context.Background(), func() {})
+	obsStore.RegisterTarget(tid)
+	obs := newRetireTestObserver(s, tid, rec)
+	for i := range 3 {
+		obs.queue <- queuedObservation{kind: ObservationNetwork, seq: uint64(i + 1), payload: map[string]any{"n": i}}
+	}
+	writerDone := runRetireTestWriter(obs)
+	awaitRetireTest(t, rec.entered, "the writer to reach Record")
+
+	const closers = 4
+	var returned atomic.Int32
+	allClosed := make(chan struct{})
+	var wg sync.WaitGroup
+	for range closers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.Close()
+			returned.Add(1)
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(allClosed)
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !obs.retired.Load(); {
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not retire the observer")
+		}
+		goruntime.Gosched()
+	}
+	select {
+	case <-allClosed:
+	case <-time.After(100 * time.Millisecond):
+	}
+	if n := returned.Load(); n != 0 {
+		t.Errorf("%d of %d Close calls returned while the writer was still inside Record", n, closers)
+	}
+	close(rec.release)
+	awaitRetireTest(t, allClosed, "every Close after the in-flight Record finished")
+	awaitRetireTest(t, writerDone, "the retired writer to exit")
+	if got := rec.calls.Load(); got != 1 {
+		t.Errorf("Record calls = %d, want only the one already in flight", got)
+	}
+	obsStore.ClearTarget(tid)
+	obs.record(queuedObservation{kind: ObservationNetwork, seq: 9, payload: map[string]any{}})
+	assertObservationStoreEmpty(t, obsStore, tid)
+	if err := s.EnsureObservation(context.Background(), tid, ObservationNetwork, rec, nil); err == nil {
+		t.Error("closed session accepted a new observation")
+	}
+	obs.cleanup.cancel()
+}
+
 // Tabs with a live event stream are opened and released over and over, with
 // the release racing the listener and the writer. Run under -race.
 func TestObserverStartStopChurnLeavesNoBuckets(t *testing.T) {
@@ -351,6 +411,9 @@ type parkedAttach struct {
 	ctx     context.Context // the context chromedp.Run was called with
 	aborted chan struct{}
 	release chan struct{}
+	// answer, when closed, makes the attach return (with an error) although its
+	// Run was not ended: the browser's late reply.
+	answer chan struct{}
 }
 
 type parkedAttachAllocator struct {
@@ -358,9 +421,13 @@ type parkedAttachAllocator struct {
 }
 
 func (a *parkedAttachAllocator) Allocate(ctx context.Context, _ ...chromedp.BrowserOption) (*chromedp.Browser, error) {
-	attempt := &parkedAttach{ctx: ctx, aborted: make(chan struct{}), release: make(chan struct{})}
+	attempt := &parkedAttach{ctx: ctx, aborted: make(chan struct{}), release: make(chan struct{}), answer: make(chan struct{})}
 	a.attempts <- attempt
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-attempt.answer:
+		return nil, errors.New("attach refused late")
+	}
 	close(attempt.aborted)
 	<-attempt.release
 	return nil, ctx.Err()
@@ -378,9 +445,12 @@ func attachKinds(t *testing.T, run func(t *testing.T, s *Session, allocator *par
 		t.Run(name, func(t *testing.T) {
 			const id target.ID = "TAB"
 			allocator := &parkedAttachAllocator{attempts: make(chan *parkedAttach, 4)}
-			parent, cancel := chromedp.NewContext(context.Background(), func(c *chromedp.Context) { c.Allocator = allocator })
+			// Cancelling base is how the session's own context ends, as it does
+			// when the browser connection is lost.
+			base, endSession := context.WithCancel(context.Background())
+			parent, cancel := chromedp.NewContext(base, func(c *chromedp.Context) { c.Allocator = allocator })
 			t.Cleanup(cancel)
-			s := newSession(parent, func() {})
+			s := newSession(parent, endSession)
 			rec := &barrierRecorder{obs: state.NewTabObsStore()}
 			attach := func(ctx context.Context) error {
 				if observer {
@@ -466,15 +536,16 @@ func TestForgetTargetDuringAttachCancelsChildOnlyAfterAttachReturns(t *testing.T
 	})
 }
 
-// An attach the browser never answers fails its callers at the bound, is ended
-// after the late-reply grace, releases its child context and does not stick:
-// the next call starts a fresh one.
+// An attach the browser does not answer fails its callers at the bound and
+// does not stick: the next call starts a fresh one. The timed-out attach itself
+// is not ended by any timer, because ending it would drop the browser's late
+// reply and with it the only handle on the session that reply announces. It
+// stays in flight until the browser answers or the session's connection ends,
+// and its child context is released then.
 func TestAttachIsBounded(t *testing.T) {
 	orig := attachTimeout
 	attachTimeout = 30 * time.Millisecond
-	origGrace := lateAttachGrace
-	lateAttachGrace = 30 * time.Millisecond
-	t.Cleanup(func() { attachTimeout, lateAttachGrace = orig, origGrace })
+	t.Cleanup(func() { attachTimeout = orig })
 	attachKinds(t, func(t *testing.T, s *Session, allocator *parkedAttachAllocator, attach func(context.Context) error, child func() context.Context) {
 		result := make(chan error, 1)
 		go func() { result <- attach(context.Background()) }()
@@ -485,7 +556,6 @@ func TestAttachIsBounded(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) || ErrorKindOf(err) != ErrorTimeout {
 			t.Fatalf("error = %v, want an attach timeout", err)
 		}
-		awaitAttachValue(t, childCtx.Done())
 		if child() != nil {
 			t.Error("timed-out attach stayed in the table")
 		}
@@ -499,7 +569,33 @@ func TestAttachIsBounded(t *testing.T) {
 		if err := awaitAttachValue(t, result); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("retry error = %v, want a fresh attach timeout", err)
 		}
-		awaitAttachValue(t, retry.ctx.Done()) // ended after the grace as well
+
+		// Well past the callers' bound both attaches are still waiting for the
+		// browser: nothing ended their Run or cancelled their child.
+		select {
+		case <-attempt.aborted:
+			t.Fatal("timed-out attach was ended before the browser answered; a late reply would be lost")
+		case <-retry.aborted:
+			t.Fatal("timed-out retry was ended before the browser answered; a late reply would be lost")
+		case <-time.After(150 * time.Millisecond):
+		}
+		if childCtx.Err() != nil {
+			t.Fatal("child context of the timed-out attach was cancelled before the browser answered")
+		}
+
+		// The browser answers the first attach late: its child is released.
+		close(attempt.answer)
+		awaitAttachValue(t, childCtx.Done())
+		select {
+		case <-attempt.aborted:
+			t.Error("answered attach was reported as ended")
+		default:
+		}
+
+		// The session's connection ends: the attach still waiting ends with it.
+		s.cancel()
+		awaitAttachValue(t, retry.aborted)
+		awaitAttachValue(t, retry.ctx.Done())
 	})
 }
 

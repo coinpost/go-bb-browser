@@ -81,6 +81,10 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		return
 	}
 	tid := reg.TargetID
+	if meta := auditMetaFrom(ctx); meta != nil {
+		// The answer is this registration's whatever its short id names later.
+		meta.pinned = string(tid)
+	}
 	s.obsStep(obsStepResolved, tid)
 	bucket, err := s.enableObservation(ctx, conn, reg, kind)
 	if err != nil {
@@ -103,6 +107,7 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		staleTab()
 		return
 	}
+	s.obsStep(obsStepRead, tid)
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
@@ -130,6 +135,7 @@ const (
 	obsStepResolved   = "resolved"   // the short id was resolved, nothing registered yet
 	obsStepRegistered = "registered" // the buffers are registered, the attach has not started
 	obsStepAttached   = "attached"   // the observer attach returned, outcome not yet committed
+	obsStepRead       = "read"       // the ring was read, the reply not yet written
 )
 
 func (s *Server) obsStep(step string, tid target.ID) {

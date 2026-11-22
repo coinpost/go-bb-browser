@@ -39,10 +39,6 @@ func browserExecutor(ctx context.Context) cdp.Executor {
 // attach context; Session.SetAttachTimeout overrides it per session.
 var attachTimeout = timeout.Operation
 
-// lateAttachGrace bounds how long an attach that outlived attachTimeout is
-// still left running so that the browser's late reply can be cleaned up.
-var lateAttachGrace = 5 * time.Minute
-
 // attachCancellation owns every cancellation of an attach context.
 //
 // chromedp stores Context.Target from inside the first Run and its cancel
@@ -183,21 +179,17 @@ func (a *attachCancellation) run(ctx context.Context) error {
 }
 
 // awaitLateAttach returns once no attach Run is in flight. A Run that outlived
-// its bound is given lateAttachGrace to hear from the browser and is ended
-// after that; a cancellation ends it at once.
+// its bound is not ended by a timer: only the browser's reply names the session
+// it attached, so ending the Run early would leave that session on the page for
+// good. The Run ends when the browser answers, when the attach is cancelled or
+// aborted, or when the session's context ends (the browser connection is lost
+// and no reply can arrive), whichever comes first. Until then it costs this
+// goroutine and the unanswered request, nothing a caller waits for.
 func (a *attachCancellation) awaitLateAttach() {
 	a.mu.Lock()
-	abort, done := a.abortAttach, a.attachDone
+	done := a.attachDone
 	a.mu.Unlock()
-	if done == nil {
-		return
-	}
-	grace := time.NewTimer(lateAttachGrace)
-	defer grace.Stop()
-	select {
-	case <-done:
-	case <-grace.C:
-		abort()
+	if done != nil {
 		<-done
 	}
 }
@@ -224,17 +216,21 @@ func releaseFailedAttach(ctx context.Context, cleanup *attachCancellation, ex cd
 	}
 	cleanup.mu.Unlock()
 	if c != nil {
+		var detachErr error
 		if id != "" && ex != nil {
 			// Cleanup is bounded and can finish if the attach context expires.
 			cleanupCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-			_ = target.DetachFromTarget().WithSessionID(id).Do(cdp.WithExecutor(cleanupCtx, ex))
+			detachErr = target.DetachFromTarget().WithSessionID(id).Do(cdp.WithExecutor(cleanupCtx, ex))
 			stop()
 		}
 		cleanup.mu.Lock()
-		if !cleanup.cancelled {
+		if !cleanup.cancelled && detachErr == nil {
 			// The session is detached; leave chromedp's cancel watcher nothing to do.
 			// If cancellation occurred during detach, the watcher may already be
 			// reading Target, so leave it alone in that case.
+			// A refused or unanswered detach keeps Target, and with it the session
+			// id: the deferred cancel blanks the target id, so the watcher detaches
+			// that session once more and still cannot close the page.
 			chromedp.FromContext(ctx).Target = nil
 		}
 		cleanup.mu.Unlock()
@@ -244,8 +240,11 @@ func releaseFailedAttach(ctx context.Context, cleanup *attachCancellation, ex cd
 // Session wraps a chromedp remote allocator + browser context for tab-scoped CDP APIs.
 // Only NewRemoteAllocator is used — the daemon never launches Chrome.
 type Session struct {
-	ctx    context.Context
-	cancel context.CancelFunc // cancels chromedp context then allocator
+	ctx context.Context
+	// cancel would cancel the chromedp context and then the allocator. It is
+	// kept for reference only: nothing invokes it and nothing writes it after
+	// newSession, so concurrent Close calls share no unsynchronized state.
+	cancel context.CancelFunc
 
 	// routeMu protects access to routeState; allocate it only in newSession.
 	routeMu    sync.RWMutex
@@ -578,8 +577,10 @@ func (s *Session) endObserverRetirement(id target.ID, done chan struct{}) {
 // this process exits.
 //
 // When Close returns, no observer of this session can record any more: it
-// waits for every writer it retires and for every retirement ForgetTarget had
-// already started, so the caller may clear or hand over the buffers.
+// waits for every writer it retires and for every retirement ForgetTarget or
+// another Close had already started, so the caller may clear or hand over the
+// buffers. Close may be called more than once and concurrently; every call
+// gives the same guarantee.
 func (s *Session) Close() {
 	if s == nil {
 		return
@@ -630,10 +631,6 @@ func (s *Session) Close() {
 	for _, ent := range entries {
 		ent.cleanup.stop()
 		ent.cleanup.abort()
-	}
-
-	if s.cancel != nil {
-		s.cancel = nil
 	}
 }
 

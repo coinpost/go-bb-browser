@@ -236,6 +236,13 @@ func (s *Server) touchSuccessfulRPC(ctx context.Context, result any) {
 	case protocol.MethodTabNew, protocol.MethodTabClose, protocol.MethodTabList:
 		return
 	}
+	if meta.pinned != "" {
+		// Touching a target that was released meanwhile is a no-op, and an audit
+		// line naming it renews nothing.
+		meta.target = meta.pinned
+		s.touchTabActivity(target.ID(meta.pinned))
+		return
+	}
 	tab := store.TabFromRequestBody(meta.body)
 	if tab == "" && meta.action == protocol.MethodTabFocus {
 		if focus, ok := result.(protocol.TabFocusResult); ok {
