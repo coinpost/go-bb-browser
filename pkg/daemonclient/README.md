@@ -99,11 +99,21 @@ _, err = pool.Eval(ctx, protocol.EvalParams{Tab: out.Tab, Script: "document.titl
 |------|------|
 | **启动** | `NewPool` **不**探测后端。部分 daemon 当时不可用也可以构造成功。 |
 | **无 tab 的请求** | `Health` / `Ready` / `Live`、`tab_new`：选 **in-flight 最少**的后端（并列时 round-robin），失败则试下一个；全部失败返回 `*AllFailedError`。`tab_new` 的 failover 只表示「新 tab 开在另一个 daemon」，**不会**把已有 tab 挪走。 |
-| **tab_list** | **查询每一个后端**（构造顺序），把各端短 id 加上前缀后合并。某端失败则 **跳过**（该端 tab 不会出现在结果里），其余端仍返回；全部失败才是 `*AllFailedError`。列出的 id 会写入映射，可直接用于后续 tab 操作。Pool 没有跨 daemon 的焦点：`tab` / `focus` 取构造顺序上第一个非空值。`seq` 为成功端中的最大值。 |
-| **tab_focus** | 构造顺序上 **第一个成功**的后端（跳过失败端），返回前缀化的 `tab` / `focus` 并绑定。不是池级焦点。全部失败返回 `*AllFailedError`。 |
-| **有 tab 的请求** | **硬性**：必须打到 **该前缀对应的同一个 daemon**（含 `tab_select`）。池对外 id 为 `<backendKey>:<daemonShortId>`（`TabNew` / `TabList` / `TabFocus` 成功时写入映射，`TabClose` 成功后删除）；发给 daemon 时去掉前缀。对端失败 **不会**改道到其它 daemon，也不做跨 daemon 转发。未知（未创建/未列出/已关闭）tab 返回 `*UnknownTabError`；格式错误或未知前缀返回 `*InvalidTabIDError`。省略 `tab` 会得到 `ErrTabRequired`。 |
+| **tab_list** | **查询每一个后端**（构造顺序），把各端短 id 加上前缀后合并。某端失败则 **跳过**（该端 tab 不会出现在结果里），其余端仍返回；全部失败才是 `*AllFailedError`。列出的 id 会写入映射，可直接用于后续 tab 操作。某端 **成功**返回的 `tabs` 即该端的权威集合：该端不在其中的旧绑定会被移除（见下「绑定生命周期」）；失败的后端不对账。Pool 没有跨 daemon 的焦点：`tab` / `focus` 取构造顺序上第一个非空值。`seq` 为成功端中的最大值。 |
+| **tab_focus** | 构造顺序上 **第一个成功**的后端（跳过失败端），返回前缀化的 `tab` / `focus` 并绑定。不是池级焦点。只是局部观察：只新增绑定，**不**据此移除其它绑定。全部失败返回 `*AllFailedError`。 |
+| **有 tab 的请求** | **硬性**：必须打到 **该前缀对应的同一个 daemon**（含 `tab_select`）。池对外 id 为 `<backendKey>:<daemonShortId>`（`TabNew` / `TabList` / `TabFocus` 成功时写入映射；`TabClose` 成功、`ForgetTab`、或该端之后成功的 `TabList` 不再列出时删除）；发给 daemon 时去掉前缀。对端失败 **不会**改道到其它 daemon，也不做跨 daemon 转发。未知（未创建/未列出/已关闭/已被列表对账移除）tab 返回 `*UnknownTabError`；格式错误或未知前缀返回 `*InvalidTabIDError`。省略 `tab` 会得到 `ErrTabRequired`。 |
 
 `Pool.Clients()` 可拿到各 `*Client`（每端独立 URL / `Headers`）。`TabClose` 成功后解除亲和；daemon 空闲关 tab 时可用 `ForgetTab`。`BackendKeys()` 返回构造顺序下的前缀。
+
+### 绑定生命周期
+
+映射不是只增不减：池外关闭的 tab（空闲回收、用户手动关闭、其它客户端 `tab_close`）会在该后端下一次成功的 `TabList` 时被移除，之后对旧 id 的调用在本地返回 `*UnknownTabError`，不再发 RPC。
+
+- **权威集合只有 `tabs` 数组**。列表结果里的 `tab` / `focus` 元数据既不新增绑定，也不能让已不在 `tabs` 中的 tab 继续存活；空 `tabs` 会清空该后端的旧绑定。
+- **失败不对账**：某端 `tab_list` 失败时保留该端全部绑定；各后端互不影响。`TabFocus` 永不移除绑定。
+- **并发**：每个绑定与每次观察（`tab_list` / `tab_focus`）都带池内逻辑时刻，只在短锁内读写，锁从不跨网络 I/O。一次列表只移除「在它发出之前最后确认」的绑定，所以它在途期间由 `TabNew`、`TabFocus` 或另一次列表建立/确认的绑定不会被误删。在途观察也不会把它发出之后被 `TabClose` / `ForgetTab` / 另一次列表移除的 id 重新绑回；这些移除标记只在该后端有在途观察时存在，最后一个返回后即清空。
+- **限制**：先后按本池「发出请求」的顺序判定，而不是 daemon 取快照的顺序，Pool 也无法比较两份重叠快照的新旧。因此 (1) 重叠的两次列表中任一次列出的 tab 都会保留，从未绑定过的 id 也可能由较旧快照绑定进来，即使它已经消失；(2) 池外关闭的 tab、以及列表持续失败的后端上的 tab，会一直保留到该端下一次成功列表。两者都由下一次不重叠的成功列表纠正，期间对这类 id 的调用会发到 daemon 并得到 daemon 的 RPC 错误。
+- `ForgetTab` 之后若 daemon 仍列出该 tab，**之后发起**的 `TabList` / `TabFocus` 会把它重新绑定。
 
 每个 backend 的 `WithAPIToken` 独立生效，Pool 不共享 token；后续 tab 操作仍发送到原 backend。
 
