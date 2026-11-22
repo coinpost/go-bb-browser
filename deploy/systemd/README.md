@@ -101,7 +101,10 @@ sudo loginctl enable-linger "$USER"
 
   Tab-related RPC log lines live in `rpc.jsonl` under `{StateDir}`, so idle cleanup can be rebuilt after daemon
   restarts by intersecting live CDP tabs with the log's per-tab activity. The log auto-rotates past ~8 MiB into
-  `rpc.jsonl.1`… backups (3 kept). The unit's `ReadWritePaths=` already
+  `rpc.jsonl.1`… backups (3 kept). Because the log keeps request bodies (which may
+  contain passwords or tokens), the state directory is owner-only (`0700`) and the log and
+  its backups are `0600`; wider modes left by older versions are tightened on startup, and
+  startup fails if they cannot be. The unit's `ReadWritePaths=` already
   allows `%h/.local/state/bb-daemon`; you may also set `StateDirectory=bb-daemon`
   under `[Service]` for systemd-managed state layout.
 
