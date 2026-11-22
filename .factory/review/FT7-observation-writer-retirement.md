@@ -205,3 +205,26 @@ notes:
 未检查/待 review：真实非 headless Chrome/CDP、真实 loadingFailed、Docker、运行中 systemd 均未验证，未启动 Chrome或操作用户窗口。读环复核没有独立 RPC barrier，仅 state 测试和路径覆盖。最新 review 六项 P2 均未处理：超宽限期 attach、旧清理路由、Close 后 attach、detach 错误重试、Close 后域启用、并发 Close race。旧释放仍按 target ID 调用 ForgetTarget/forgetTabManaged，同 ID 接替页在旧释放期间建立的 pool/路由/managed 标记仍有相邻风险；targetDestroyed 仅含 ID，仍按处理时当前登记释放；eval/click/*_clear 等其他 RPC 未绑定登记。重点审查身份/桶/observer 所有权边界，不能把测试通过等同 review 通过。
 
 状态：仅 build，等待独立 review；未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 17:41
+head: 9dfe0a406ec4339e09f9d8fd54c9439267990eac
+verdict: fix
+fix:
+- [P1] internal/daemon/rpc_observation.go:182: 旧请求迟到安装的 observer 未绑定登记/具体桶；B 的 Record 暂停后 B 退役，C 同完整 ID 登记并复用该 observer，放行后 C 的真实 network RPC 读出仅在 B 发送的事件。observer、域租约、recorder 应绑定登记与桶句柄，退役按 observer 实例回收，写入条件验证所有权，不能因同 ID 有新桶就视为接管。HEAD/main 均 3/3。
+- [P1] internal/daemon/v1.go:478: 生命周期消费被无关页 detach 阻塞时，A 销毁但通知未处理，tab_new 创建同完整 ID 的新页继承旧登记/缓冲，首次 network 返回 A 的旧事件；迟到旧销毁通知还会删除新页状态。统一创建/销毁/回包排序，新创建隔离旧登记；无法归属的旧销毁先重新枚举核对登记再清理。纯本地协议桩、无生产调度钩子亦复现，HEAD/main 均 3/3。
+- [P1] internal/daemon/tab_idle.go:326: 解析原登记后、CDP closeTarget 发出前换为同完整 ID 接替页，旧 tab_close 真正关掉接替页；idle 回收亦能关闭从未受管的新页。回包后条件删除不足；发送前取得并校验原登记专属会话，关页只送原会话，失效即 stale，不对复用裸 ID 重发。HEAD/main 均 3/3。
+- [P1] internal/daemon/v1.go:1175: network_clear 解析旧别名后换页，随后无条件按 target ID 清桶，擦除接替页已读到的新事件；console_clear:1101、errors_clear:1138 同样。捕获 TabRegistration，生命周期锁下核对并对具体桶清域，过期返回 unknown tab id；保留活页未建桶空清理行为。HEAD/main 均 3/3。
+- [P1] internal/daemon/v1.go:747: 已解析 eval 在执行前换页，按复用完整 ID 首次 attach 接替页执行脚本，却将成功结果标为旧别名。页面操作需取得并验证原登记所属会话句柄，不得按 ID 重新取得新 executor。HEAD/main 均 3/3，相邻 RPC 的基线缺陷。
+notes:
+- [P2] internal/browser/session.go:996: 旧 close 回包拆掉接替页正在 eval 的 pool 会话并清空其新路由；按原 pool entry/路由代次条件清理，或交原登记释放方。HEAD/main 均复现。
+- [P2] internal/daemon/tab_idle.go:160: 旧释放在 forgetTabManaged 前暂停，新 tab_new 已登记受管身份，放行又删去新 managed 成员；成员 open/retire 需共享登记身份并条件删除，或新提交等待旧退役。HEAD/main 均复现。
+- [P2] internal/daemon/tab_idle.go:210: A 的旧 close 回包等待 B 的释放屏障，直到 B 结束才应答；释放完成信号应按登记保存，另保留按 ID 的建桶屏障。HEAD/修复前失败，main 3/3 通过。
+- [P2] internal/daemon/v1.go:245: 成功读环后二次解析短 ID 将旧 RPC 审计 target 和 idle 续期归给另一受管页；首次解析时固定审计身份，按原 managed 登记续期。HEAD/main 均复现。
+- 前轮六项 P2 当前均重测、保持原级：session.go:200 超 5 分钟宽限期 attach 泄漏、:663 旧退役清新路由、:612 Close 后 attach 漏 detach、:230 detach 失败丢清理句柄、observer.go:124 Close 后继续启用域、session.go:635 并发 Close 的 cancel 指针 race。365 秒诊断保留生产 60 秒超时和 5 分钟宽限期，HEAD 重试后两个 session、main 一个；其余两边均复现。修法分别为保留回包所有权至 session ID/断连、路由代次条件清理、Close 后仍处理已发请求回包、detach 非终态失败保留 ID 重试、域动作关联退役取消、同步或移除 cancel 字段写入。
+
+Codex 独立只读审查 origin/main@2be49f8...HEAD，无可用 review-code skill。第4轮原三个 P1 原始调度在 HEAD 各 3/3 通过，修复前对照失败；额外读环屏障 HEAD 3/3 拒绝旧读取、main/修复前失败；选定永久回归 -race -count=5 通过。上述是新遗漏，不是重复已修调度；五项 P1 均在 main 存在，协议桩刻意复用完整 target ID，真实 Chrome 发生频率未验。
+HEAD 工作树与导出 main 均通过配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...，Go 1.27.4，各11个有测试包、1个无测试包。manager 核对配置日志及诊断源码，独立 -race -count=3 重跑五项 P1 主要场景（包括三种 clear、显式/idle close、旧 writer、无钩子队列、eval）全部按正确断言失败；没有另行重复全量。完整配置通过不覆盖诊断缺陷。
+证据保留本机 review run evidence/FT7-9dfe0a4/：REPORT.md、KNOWN-P2.md、source/、reproduce.sh、configured.log、configured-main.log、prior-*.log、adjacent-*.log、writer-*.log、dispatch-*.log、p2-*.log、grace-*.log、manager-diagnostics.log。复跑脚本仅用本地提交和模块缓存；诊断为工作树外 overlay，尚非永久回归。
+无安装、依赖清单或工作树改动；隔离 HOME/TMPDIR/缓存，GOPROXY=off、GOSUMDB=off。未验证真实非 headless Chrome/CDP、真实 loadingFailed、实际 ID 复用频率、Docker、运行中 systemd；click/fill 等未逐项做换页注入。未启动 Chrome、未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
+round=4，已超过配置 max_rounds=3；本次追加构建由 owner「再来一轮」授权，不自动追加后续修复。发现 P1，留在 review/ 等 owner 决定；需继续请追加说明并移至 new/。未改代码、未合并 main、未发布。
