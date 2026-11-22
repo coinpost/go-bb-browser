@@ -64,3 +64,18 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：真实非 headless Chrome/CDP、Docker、systemd、真实 SYN 网络黑洞、自定义不响应 context 取消的 Transport；只用本地 httptest 假 daemon，未启动 Chrome、无 UI 变更、未操作用户窗口。
 
 状态：分支已推送，new/ → review/，第 1 轮。本次仅 build，未做 review，未合并 main，未发布。
+
+## factory · review · 2026-11-22 08:46
+head: 82cd6f7f46b1a232ed2decf3d53d66d0f4093092
+verdict: fix
+fix:
+- [P1] pkg/daemonclient/pool.go:423: TabFocus 提前返回后，后台 goroutine 仍可读取公开 Client 配置；调用方在调用已返回后顺序修改另一后端的 Client.HTTP，-race 复现读写竞争，基线同一探针通过。启动 goroutine 前快照每个请求所需 HTTP 客户端、URL 和请求头，并保留原客户端原子请求 ID 计数器。
+- [P1] pkg/daemonclient/pool.go:445: 主动取消与响应同时就绪时，select 可选响应并提前返回成功，绕过取消检查；探针先 cancel 再成功响应仍返回 nil 并写入绑定。提交成功结果和绑定前统一检查主动取消，取消时丢弃整批结果。基线 TabFocus 亦可复现，但本任务计划明确要求取消不写绑定，尚未满足。
+- [P1] pkg/daemonclient/pool.go:459: 截止排空通道及普通接收未区分预算内与截止后完成的响应；唯一成功后端等待请求 context 截止后才返回时，TabList/TabFocus 仍成功并建立绑定。记录每个请求完成时间，并在普通接收和截止排空时统一过滤超预算成功响应。基线 TabFocus 亦接受迟到响应，TabList 返回截止错误却留下绑定；本任务预算内成功语义未满足。
+notes:
+- Codex 只读审查 origin/main...HEAD；未修改文件、未提交，分支 HEAD 未变，工作树干净。与 origin/main 可干净合并，无需冲突修复。
+- HEAD 和 origin/main 均执行完整 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...，退出 0，各 10 个测试包通过、2 个包无测试。FT25 定向 -race -count=3 通过；两个 500ms 挂起后端回归在基线按预期失败，健康端请求数为 0。
+- 额外只读探针复现上述三项失败；已返回后才释放的迟到响应不改结果/绑定、inFlight 最终归零，以及首个非空 tab/focus 与最大 seq 检查通过。探针使用 Go overlay，未向代码分支写入测试文件。诊断与日志保留在本机 review run evidence/FT25-82cd6f7/。
+- 使用现有 Go 1.27.4、隔离 HOME、TMPDIR 与离线缓存；无安装。未找到 review-code skill。git diff --check 通过。
+- 未验证真实非 headless Chrome/CDP、Docker、systemd、真实网络黑洞；未操作用户浏览器。无关联 issue/PR，未发 GitHub 评论。
+- 第 1/3 轮发现 P1，review/ → new/，下次 build 在原分支修复；未合并 main、未发布。
