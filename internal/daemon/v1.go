@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -272,7 +271,7 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	targets, err := pageTargets(ctx, conn)
+	snaps, err := s.enumerateTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_list targets failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
@@ -281,7 +280,6 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 		})
 		return
 	}
-	snaps := s.syncTabsFromTargets(targets)
 	sort.Slice(snaps, func(i, j int) bool {
 		return snaps[i].ShortID < snaps[j].ShortID
 	})
@@ -320,7 +318,7 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	targets, err := pageTargets(ctx, conn)
+	snaps, err := s.enumerateTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_focus targets failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
@@ -329,7 +327,6 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		})
 		return
 	}
-	snaps := s.syncTabsFromTargets(targets)
 	if len(snaps) == 0 {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "no focused tab", &protocol.ErrData{
 			Error:  "no page tabs",
@@ -431,7 +428,7 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	targets, err := pageTargets(ctx, conn)
+	_, err := s.enumerateTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_select targets failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
@@ -440,7 +437,6 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		})
 		return
 	}
-	s.syncTabsFromTargets(targets)
 
 	if !s.tabs.Select(tab) {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
@@ -773,8 +769,7 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
-		ref = strings.TrimPrefix(ref, "@")
-		sel = fmt.Sprintf(`[__bb_snap_ref="%s"]`, strings.ReplaceAll(ref, `"`, `\"`))
+		sel = browser.SnapshotRefSelector(ref)
 	}
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -1195,8 +1190,7 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
-		ref = strings.TrimPrefix(ref, "@")
-		sel = fmt.Sprintf(`[__bb_snap_ref="%s"]`, strings.ReplaceAll(ref, `"`, `\"`))
+		sel = browser.SnapshotRefSelector(ref)
 	}
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -1252,8 +1246,7 @@ func (s *Server) resolveTab(ctx context.Context, conn tabConn, tab string) (targ
 	if ok {
 		return tid, true
 	}
-	if targets, err := pageTargets(ctx, conn); err == nil {
-		s.syncTabsFromTargets(targets)
+	if _, err := s.enumerateTabs(ctx, conn); err == nil {
 		if tid, ok := s.tabs.Lookup(tab); ok {
 			return tid, true
 		}

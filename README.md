@@ -117,7 +117,7 @@ bb-browser tab list
 
 **daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl`：只有**完整 target id 完全一致**且仍存活的 tab 才恢复 idle 跟踪并沿用其最后活跃时间；短 tab id 只是别名，仅短 id 相同的其他 tab（例如用户自己打开的 tab）绝不会被当成受管 tab，也不会被 idle 清理关闭；记录中已不存在的 target 会被退役。重启后有约 30s grace。**旧版本兼容**：旧版本写入的记录只有短 id、没有 target 身份，无法验证，升级后一律不恢复（启动时打印一条 warn 说明数量）；这些由旧版本创建且仍打开的 tab 将不再被自动 idle 关闭，需要时请手动 `tab_close`。生命周期记录写盘失败时内存状态仍会更新并打印 warn，不视为已持久化：未写入的 `managed_tab_open` 表示该 tab 重启后不再受管；未写入的 `managed_tab_retire` 表示陈旧条目会留在 `rpc.jsonl` 直到下次轮转或重启对账（恢复要求 target 精确一致，陈旧条目不会导致误关其他 tab）。
 
-全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前仍受管 tab 的快照（每个 tab 一条 `managed_tab_open`，含完整 target id 与最后活跃时间；已退役的 tab 不会写入），因此恢复只需读当前文件即可保持完整。
+全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前仍受管 tab 的快照（每个 tab 一条 `managed_tab_open`，含完整 target id 与最后活跃时间；已退役的 tab 不会写入），因此恢复只需读当前文件即可保持完整。回放按物理换行逐行解析：中间损坏的行告警并跳过（保留在文件中），其后的合法记录照常恢复；末尾缺换行的完整记录正常回放，后续追加前先补换行；末尾不完整的记录被截断。写入失败或短写后，下一次写入同样先补换行，避免与残片粘连。
 
 **Docker Compose 示例**（需挂载 volume 才能跨容器重建保留 state）：
 
@@ -146,7 +146,13 @@ volumes:
   bb-state:
 ```
 
-镜像内默认用户为 `nonroot`（uid 65532）；bind mount 时需确保目录可写，或使用 named volume。
+镜像内默认用户为 `nonroot`（uid/gid 65532），并预置了归该用户所有的 `/var/lib/bb-daemon`。**全新的空 named volume** 首次挂载到该路径时由 Docker 复制镜像目录的属主，无需额外设置。以下情况不会自动处理，属主不对时 daemon 会以 `state dir … is not writable` 退出：
+
+- **已有卷**：Docker 不会改动已存在的卷；例如用旧镜像（未预置该目录）创建的卷通常是 root 属主，可能需要校正（属主本来正确的卷不受影响）；
+- **bind mount**：属主取决于宿主机目录；
+- **`volume.nocopy: true`**，或挂载到 `/var/lib/bb-daemon` 以外、镜像内不存在的路径。
+
+需要校正时请原地改属主而不是删卷（需要时先备份）。Compose 创建的卷名带项目前缀（如 `<project>_bb-state`），先用 `docker volume ls` 或 `docker volume inspect` 确认实际卷名，再执行 `docker run --rm -v <实际卷名>:/state busybox chown -R 65532:65532 /state`；直接写 `bb-state` 只会新建并修改一个无关的卷，修不到 compose 实际使用的卷。bind mount 在宿主机执行 `chown -R 65532:65532 <目录>`。镜像不以 root 启动，也不在运行时 chown。
 
 **HTTP API 摘要**：`GET /live` 是纯 HTTP liveness，不访问 CDP；`GET /ready` 读取 supervisor 缓存，`suspect` / `failed` 返回 503；兼容的 `GET /health` 在 `ready` / `suspect` 返回 connected/200，仅 confirmed failed 返回 disconnected/503。进程存活探针使用 `/live`，接流量前使用 `/ready`。`POST /v1` 体为 JSON-RPC：`jsonrpc`、`method`、`params`、`id`。成功时 `result`；失败时 `error`（`code`、`message`、可选 `data`）。业务成功响应在适用处带 **`tab`** 与 **`seq`**；网络/控制台/错误等观测类结果带 **`cursor`** / **`events`** 等。非 POST 访问 `/v1` 返回 **405**。
 
@@ -242,6 +248,7 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 
 - **作用**：页面树快照 JSON-RPC（含 `@ref` → 选择器映射）。
 - **选项**：`-i` / `--interactive`、`-c` / `--compact`、`-d` / `--depth`、`-s` / `--scope`（CSS 根范围）。
+- **ref 生命周期**：每次 `snapshot` 使此前所有 `@ref` 失效（旧 ref 报错而不是指向别的元素）；编号为纯数字，同一文档内递增不复用，导航 / 刷新后从 `@1` 重新开始。
 
 ---
 
@@ -336,7 +343,30 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 ### `run SCRIPT.js [args…]`
 
 - **作用**：读取适配器 JS 文件，组装参数后 `eval` 在页面执行（见 `internal/site`、`skills/bb-browser/references/script-system.md`）。
-- **首参**：磁盘上的 `.js` 路径；其余为 CLI 参数（含 `--name value`）。
+- **首参**：磁盘上的 `.js` 路径（第一个位置参数）；其余为传给脚本的参数。
+- **位置参数**：按出现次序映射到 `@meta.args` 的键，并总是写入 `arg1`、`arg2`…
+- **命名参数**：`--name value` 或 `--name=value` → `args.name`，值原样作为字符串传入。
+- **输出与退出码**：适配器返回值以缩进 JSON 打印到 stdout，退出码 `0`。适配器返回 `error` 为非空字符串的对象（如 `{ error: 'HTTP 401', hint: 'please log in' }`）时视为失败：stderr 打印 `[error] …`（及可选的 `Hint:` 和登录提示），stdout 不输出结果，退出码非 `0`，不打印 usage。`--json` 下 stdout 仍输出完整 JSON-RPC 包络，stderr 与退出码同上——JSON-RPC 成功不代表适配器成功。空字符串或非字符串的 `error` 按普通返回值处理。
+
+```bash
+bb-browser run ./x.js hello --count 20        # args = { query: "hello", arg1: "hello", count: "20" }
+bb-browser run ./x.js hello --count=20 --json # 同上，并输出原始 JSON-RPC
+bb-browser run ./x.js --tab ab12 -- hello --tab x   # 全局 tab=ab12；脚本得到 args.tab = "x"
+```
+
+参数规则（`run` 自行解析参数，不交给 Cobra，因此未知的 `--name` 不会被拒绝）：
+
+| 写法 | 结果 |
+|------|------|
+| `--url` / `--api-token` / `--json` / `--tab` / `--help`（`-h`） | 保留名，始终是全局选项；可写在 `run` 之前、之后或与脚本参数穿插，支持 `--json=false`、`--tab=ID` |
+| `--`（第一个） | 分隔符：其后的 `--name` 全部归脚本，包括上述保留名；本身不传给脚本 |
+| `--name=`、`--name ""` | 空字符串 |
+| `--name=a=b` | 只在第一个 `=` 处切分，值为 `a=b` |
+| 同名多次 | 保留最后一次的值 |
+| `-5`、`--offset -3` | 单横线开头的 token 是普通值（位置参数或命名参数的值） |
+| `--name` 后无值，或下一个 token 以 `--` 开头 | 报错 `flag --name needs a value`；值以 `--` 开头时请写 `--name=--x` |
+
+不支持无值布尔开关和以 `--` 开头的位置参数。缺少脚本路径、命名参数缺值、全局选项取值非法（如 `--json=maybe`）都会在向 daemon 发请求之前报错。
 
 ---
 

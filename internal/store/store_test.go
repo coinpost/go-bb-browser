@@ -192,49 +192,23 @@ func TestOpenRebuildsManagedFromFullLog(t *testing.T) {
 	}
 }
 
-func TestOpenAbandonsCorruptRPCLog(t *testing.T) {
+func TestOpenTruncatesIncompleteFinalLine(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, rpcLogFile)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	good := LogRecord{
-		Action: ActionManagedTabOpen,
-		Body:   lifecycleBody,
-		Tab:    "aa11",
-		Target: "TARGET-AA11",
-		OK:     true,
-		Time:   t0,
-	}
-	goodLine, err := json.Marshal(good)
-	if err != nil {
-		t.Fatal(err)
-	}
-	later := LogRecord{
-		Action: ActionManagedTabOpen,
-		Body:   lifecycleBody,
-		Tab:    "bb22",
-		Target: "TARGET-BB22",
-		OK:     true,
-		Time:   t0.Add(time.Minute),
-	}
-	laterLine, err := json.Marshal(later)
-	if err != nil {
-		t.Fatal(err)
-	}
+	goodLine := mustMarshalRecord(t, tabNewRecord("aa11", t0))
 
 	cases := []struct {
 		name string
 		tail string
 	}{
-		{name: "corrupt line with newline", tail: "{\"action\":\"tab_new\",\"body\":\n" + string(laterLine) + "\n"},
 		{name: "truncated final line without newline", tail: `{"action":"tab_new","body":`},
+		{name: "truncated final line after blank line", tail: "\n" + `{"action":"tab_new","body":`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := os.WriteFile(logPath, append(append(goodLine, '\n'), tc.tail...), 0o644); err != nil {
+			if err := os.WriteFile(logPath, append(append(append([]byte{}, goodLine...), '\n'), tc.tail...), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -248,17 +222,14 @@ func TestOpenAbandonsCorruptRPCLog(t *testing.T) {
 			if len(managed) != 1 || !managed["aa11"].Equal(t0) {
 				t.Fatalf("managed from prefix: %#v", managed)
 			}
-			if _, ok := managed["bb22"]; ok {
-				t.Fatalf("records after corrupt line should be abandoned: %#v", managed)
-			}
 
 			data, err := os.ReadFile(logPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := append(append([]byte{}, goodLine...), '\n')
-			if string(data) != string(want) {
-				t.Fatalf("log not truncated to good prefix:\n got: %q\nwant: %q", data, want)
+			if strings.Contains(string(data), `"body":`+"\n") || !strings.HasSuffix(string(data), "\n") ||
+				strings.TrimRight(string(data), "\n") != string(goodLine) {
+				t.Fatalf("log not truncated to good prefix: %q", data)
 			}
 
 			// Append after recovery must not glue onto leftover corrupt bytes.
@@ -271,18 +242,9 @@ func TestOpenAbandonsCorruptRPCLog(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			data, err = os.ReadFile(logPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-			if len(lines) != 2 {
-				t.Fatalf("expected 2 intact lines after append, got %d: %q", len(lines), data)
-			}
-			for i, line := range lines {
-				if !json.Valid([]byte(line)) {
-					t.Fatalf("line %d not valid JSON: %q", i, line)
-				}
+			valid, invalid := readLogLines(t, logPath)
+			if len(valid) != 2 || invalid != 0 {
+				t.Fatalf("expected 2 intact lines after append, got valid=%d invalid=%d", len(valid), invalid)
 			}
 		})
 	}

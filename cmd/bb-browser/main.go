@@ -39,7 +39,11 @@ func versionString(name string) string {
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// run has already written the [error] diagnostics for an adapter failure.
+		var adapterErr *adapterError
+		if !errors.As(err, &adapterErr) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }
@@ -504,6 +508,7 @@ func newScreenshotCmd() *cobra.Command {
 			var env struct {
 				Result struct {
 					Data string `json:"data"`
+					MIME string `json:"mime"`
 				} `json:"result"`
 			}
 			if err := json.Unmarshal(b, &env); err != nil {
@@ -518,7 +523,12 @@ func newScreenshotCmd() *cobra.Command {
 				path = args[0]
 			}
 			if path == "" {
-				path = fmt.Sprintf("screenshot-%d.png", time.Now().Unix())
+				// The response MIME, not the requested format, decides the extension.
+				ext := ".png"
+				if strings.EqualFold(strings.TrimSpace(env.Result.MIME), "image/jpeg") {
+					ext = ".jpg"
+				}
+				path = fmt.Sprintf("screenshot-%d%s", time.Now().Unix(), ext)
 			}
 			return os.WriteFile(path, raw, 0o644)
 		},
@@ -941,43 +951,33 @@ func newRunCmd() *cobra.Command {
 		Long: strings.TrimSpace(`
 First argument is a path to a .js file. Remaining tokens are passed to the script:
 positional arguments map to @meta "args" keys in JSON source order, then arg1, arg2, …;
-use --name value or --name=value for named flags (see references/script-system.md).`),
-		Args: cobra.MinimumNArgs(1),
+use --name value or --name=value for named flags (see references/script-system.md).
+
+Global flags (--url, --api-token, --json, --tab, --help) keep their meaning anywhere before
+a bare "--"; after "--" every --name belongs to the script, including those names.
+Values are passed verbatim as strings: --name= is an empty string, --name=a=b is "a=b",
+a repeated name keeps the last value, single-dash tokens such as -5 are plain values.
+"--name value" needs a value that does not start with "--" (use --name=--x), otherwise
+the command fails with "flag --name needs a value".`),
+		// Adapter flags are arbitrary, so Cobra must not parse (and reject) them:
+		// parseRunCommand handles the global flags and keeps every other token.
+		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			parsed, help, err := parseRunCommand(cmd, args)
+			if err != nil {
+				return err
+			}
+			if help {
+				return cmd.Help()
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 180*time.Second)
 			defer cancel()
-			scriptPath := strings.TrimSpace(args[0])
-			raw, meta, err := site.ReadAdapterFile(scriptPath)
+			raw, meta, err := site.ReadAdapterFile(strings.TrimSpace(parsed.script))
 			if err != nil {
 				return err
 			}
 
-			positional := []string{}
-			named := map[string]string{}
-			rest := args[1:]
-			for i := 0; i < len(rest); i++ {
-				a := rest[i]
-				if strings.HasPrefix(a, "--") {
-					part := strings.TrimPrefix(a, "--")
-					idx := strings.IndexByte(part, '=')
-					if idx >= 0 {
-						named[strings.TrimSpace(part[:idx])] = strings.TrimSpace(part[idx+1:])
-						continue
-					}
-					key := strings.TrimSpace(part)
-					if key == "" {
-						continue
-					}
-					if i+1 < len(rest) && !strings.HasPrefix(rest[i+1], "--") {
-						named[key] = rest[i+1]
-						i++
-						continue
-					}
-					return fmt.Errorf("flag --%s needs a value", key)
-				}
-				positional = append(positional, a)
-			}
-			argsJSON, err := site.ArgsObject(positional, named, site.ArgKeysFromAdapterSource(raw))
+			argsJSON, err := site.ArgsObject(parsed.positional, parsed.named, site.ArgKeysFromAdapterSource(raw))
 			if err != nil {
 				return err
 			}
@@ -995,7 +995,6 @@ use --name value or --name=value for named flags (see references/script-system.m
 			}
 			if jsonOut {
 				fmt.Println(string(b))
-				return rpcEnvelopeError(b)
 			}
 			if err := rpcEnvelopeError(b); err != nil {
 				return err
@@ -1006,41 +1005,76 @@ use --name value or --name=value for named flags (see references/script-system.m
 			if err := json.Unmarshal(b, &env); err != nil {
 				return err
 			}
-			printSiteResult(env.Result.Result)
-			return nil
+			var adapterErr *adapterError
+			if jsonOut {
+				// stdout keeps the raw envelope; a JSON-RPC success is still an
+				// adapter failure when the adapter returned { error }.
+				adapterErr = reportAdapterError(env.Result.Result)
+			} else {
+				adapterErr = printSiteResult(env.Result.Result)
+			}
+			if adapterErr == nil {
+				return nil
+			}
+			// Already reported on stderr: keep Cobra from adding "Error: …" and usage.
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return adapterErr
 		},
 	}
 }
 
+// adapterError reports that an adapter ran but returned { error: "…" }.
+// Its diagnostics are already on stderr, so callers must not print it again.
+type adapterError struct{ msg string }
+
+func (e *adapterError) Error() string { return "adapter error: " + e.msg }
+
 var loginHintRe = regexp.MustCompile(`(?i)401|403|unauthorized|forbidden|not\s*logged|login\s*required|sign\s*in|auth`)
 
-func printSiteResult(raw json.RawMessage) {
+// reportAdapterError writes the [error] diagnostics to stderr when the adapter
+// result is an object whose "error" is a non-empty string, and returns nil for
+// every other value.
+func reportAdapterError(raw json.RawMessage) *adapterError {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	errStr, ok := obj["error"].(string)
+	if !ok || errStr == "" {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[error] %s\n", errStr)
+	combined := errStr
+	if h, ok := obj["hint"].(string); ok {
+		combined += " " + h
+		fmt.Fprintf(os.Stderr, "  Hint: %s\n", h)
+	}
+	if loginHintRe.MatchString(combined) {
+		fmt.Fprintln(os.Stderr, "  (Log in to the site in Chrome for this profile, then retry.)")
+	}
+	return &adapterError{msg: errStr}
+}
+
+// printSiteResult pretty-prints the adapter result to stdout, or reports an
+// adapter { error } on stderr and returns it.
+func printSiteResult(raw json.RawMessage) *adapterError {
+	if adapterErr := reportAdapterError(raw); adapterErr != nil {
+		return adapterErr
+	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		fmt.Println(string(raw))
-		return
-	}
-	if obj, ok := v.(map[string]any); ok {
-		if errStr, ok := obj["error"].(string); ok && errStr != "" {
-			fmt.Fprintf(os.Stderr, "[error] %s\n", errStr)
-			combined := errStr
-			if h, ok := obj["hint"].(string); ok {
-				combined += " " + h
-				fmt.Fprintf(os.Stderr, "  Hint: %s\n", h)
-			}
-			if loginHintRe.MatchString(combined) {
-				fmt.Fprintln(os.Stderr, "  (Log in to the site in Chrome for this profile, then retry.)")
-			}
-			return
-		}
+		return nil
 	}
 	// json.Indent preserves \uXXXX from CDP; round-trip through MarshalIndent prints UTF-8.
 	pretty, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		fmt.Println(string(raw))
-		return
+		return nil
 	}
 	fmt.Println(string(pretty))
+	return nil
 }
 
 func pickTabForSite(ctx context.Context, domain string) (string, error) {

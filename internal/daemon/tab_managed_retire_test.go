@@ -50,7 +50,7 @@ func restartIdleServer(t *testing.T, old *Server, fc *fakeConn, stateDir string)
 	}
 	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
 	t.Cleanup(func() { _ = srv.closeAudit() })
-	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(fc.infos))
+	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(srv.beginTargetEnumeration(), fc.infos))
 	return srv
 }
 
@@ -131,7 +131,7 @@ func TestEnumerationDisappearanceRetiresPersistedManagedTab(t *testing.T) {
 	// The lifecycle event was lost; a later successful enumeration no longer
 	// lists the target.
 	fc.infos = nil
-	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(nil))
+	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(srv.beginTargetEnumeration(), nil))
 	drainRPCLog(t, srv)
 	if _, ok := srv.store.ReplayManagedTabActivity()[short]; ok {
 		t.Errorf("vanished tab %q still in the persisted managed set", short)
@@ -216,7 +216,7 @@ func TestRestartDoesNotAdoptLegacyAliasOnlyRecord(t *testing.T) {
 	fc := &fakeConn{infos: []*target.Info{{TargetID: userTargetC, Type: "page"}}}
 	srv := newIdleTestServerWithState(fc, time.Minute, dir)
 	t.Cleanup(func() { _ = srv.closeAudit() })
-	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(fc.infos))
+	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(srv.beginTargetEnumeration(), fc.infos))
 	if got := srv.tabIdle.Snapshot(); len(got) != 0 {
 		t.Fatalf("legacy alias-only record adopted a tab: %#v", got)
 	}
@@ -229,7 +229,7 @@ func TestFirstRunEmptyStateAdoptsNothing(t *testing.T) {
 	fc := &fakeConn{infos: []*target.Info{{TargetID: userTargetC, Type: "page"}}}
 	srv := newIdleTestServerWithState(fc, time.Minute, t.TempDir())
 	t.Cleanup(func() { _ = srv.closeAudit() })
-	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(fc.infos))
+	srv.reconcileIdleFromLog(srv.syncTabsFromTargets(srv.beginTargetEnumeration(), fc.infos))
 	if got := srv.tabIdle.Snapshot(); len(got) != 0 {
 		t.Fatalf("empty state adopted tabs: %#v", got)
 	}
@@ -277,7 +277,7 @@ func TestTransientCloseFailureKeepsPersistedMembership(t *testing.T) {
 func TestFailedEnumerationKeepsPersistedMembership(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, short := newManagedTabServer(t, dir)
-	srv.syncInitialTargets(noopDirtyMarker{}, nil, errors.New("Target.getTargets: timeout"))
+	srv.syncInitialTargets(noopDirtyMarker{}, srv.beginTargetEnumeration(), nil, errors.New("Target.getTargets: timeout"))
 	if _, ok := srv.store.ReplayManagedTabActivity()[short]; !ok {
 		t.Fatal("failed enumeration retired a managed tab")
 	}

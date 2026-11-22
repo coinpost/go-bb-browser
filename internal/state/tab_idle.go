@@ -77,6 +77,9 @@ func (t *TabIdleTracker) Forget(id target.ID) {
 }
 
 // SyncPresent removes managed entries whose target id is no longer present in the browser.
+// present must be authoritative at call time. Do not feed it a Target.getTargets
+// snapshot that tab creation can overlap: the daemon instead forgets tabs only
+// for removals reported by TabRegistry.ApplyEnumeration.
 func (t *TabIdleTracker) SyncPresent(present map[target.ID]struct{}) {
 	t.SyncPresentReturnRemoved(present)
 }

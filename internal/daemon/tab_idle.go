@@ -77,48 +77,56 @@ func (s *Server) logManagedPersistFailure(msg, short string, tid target.ID, err 
 	s.logger.Warn(msg, "tab", short, "target", string(tid), "err", err)
 }
 
-func (s *Server) syncTabsFromTargets(infos []*target.Info) []state.TabSnapshot {
-	snaps, removed := s.tabs.SyncPageTargetsDetailed(infos)
-	for _, tab := range removed {
-		s.clearRemovedTarget(tab.TargetID, tab.ShortID)
+// beginTargetEnumeration must run before the browser is asked for its targets;
+// the token keeps the (possibly stale) reply from removing tabs registered
+// while the request was in flight.
+func (s *Server) beginTargetEnumeration() state.EnumerationToken {
+	return s.tabs.BeginEnumeration()
+}
+
+// enumerateTabs is the single request path for a full Target.getTargets
+// alignment: token first, browser round trip second, apply last. On error the
+// daemon state is left untouched.
+func (s *Server) enumerateTabs(ctx context.Context, conn tabConn) ([]state.TabSnapshot, error) {
+	tok := s.beginTargetEnumeration()
+	targets, err := pageTargets(ctx, conn)
+	if err != nil {
+		return nil, err
 	}
-	s.syncTabIdlePresence(snaps)
+	return s.syncTabsFromTargets(tok, targets), nil
+}
+
+// syncTabsFromTargets applies a target snapshot requested at tok. All
+// target-scoped cleanup (idle tracking, observation buffers, keyed locks,
+// Session resources) is driven only by the removals the registry reports, so a
+// tab protected from a stale snapshot keeps every one of them. Idle tracking is
+// deliberately not intersected with the snapshot: that set is as stale as the
+// snapshot and would drop a tab the registry just protected.
+func (s *Server) syncTabsFromTargets(tok state.EnumerationToken, infos []*target.Info) []state.TabSnapshot {
+	snaps, removed := s.tabs.ApplyEnumeration(tok, infos)
+	for _, tab := range removed {
+		s.clearRemovedTarget(tab.TargetID)
+	}
 	return snaps
 }
 
-func (s *Server) clearRemovedTarget(tid target.ID, short string) {
+// clearRemovedTarget drops per-target state. The keyed operation lock needs no
+// cleanup here: lockTab reclaims its entry when the last reference exits.
+func (s *Server) clearRemovedTarget(tid target.ID) {
 	if s.obsStore != nil {
 		s.obsStore.ClearTarget(tid)
 	}
 	s.forgetTabManaged(tid)
-	s.forgetTabLock(short)
 	if sess, ok := s.tabConn().(*browser.Session); ok {
 		sess.ForgetTarget(tid)
 	}
 }
 
 func (s *Server) removeTargetState(tid target.ID) {
-	short, ok := s.tabs.RemoveTarget(tid)
-	if !ok {
+	if _, ok := s.tabs.RemoveTarget(tid); !ok {
 		return
 	}
-	s.clearRemovedTarget(tid, short)
-}
-
-func (s *Server) syncTabIdlePresence(snaps []state.TabSnapshot) {
-	if s.tabIdle == nil {
-		return
-	}
-	present := make(map[target.ID]struct{}, len(snaps))
-	for _, sn := range snaps {
-		if sn.TargetID == "" {
-			continue
-		}
-		present[sn.TargetID] = struct{}{}
-	}
-	for _, tid := range s.tabIdle.SyncPresentReturnRemoved(present) {
-		s.retireManagedTarget(tid)
-	}
+	s.clearRemovedTarget(tid)
 }
 
 // reconcileIdleFromLog restores idle tracking for persisted managed tabs after
@@ -185,8 +193,7 @@ func (s *Server) closeTabByShort(ctx context.Context, tab string) error {
 func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab string) error {
 	tid, ok := s.tabs.Lookup(tab)
 	if !ok {
-		if targets, err := pageTargets(ctx, conn); err == nil {
-			s.syncTabsFromTargets(targets)
+		if _, err := s.enumerateTabs(ctx, conn); err == nil {
 			tid, ok = s.tabs.Lookup(tab)
 		}
 	}

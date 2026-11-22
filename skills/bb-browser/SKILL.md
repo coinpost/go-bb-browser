@@ -86,7 +86,7 @@ bb-browser snapshot
 bb-browser snapshot -i -c -d 5 -s ".main"
 ```
 
-`snapshot` 会给节点打上 `__bb_snap_ref`，`click`/`fill` 可使用 **`@N`**（或 JSON-RPC 里传 `ref`）。
+`snapshot` 会给节点打上 `__bb_snap_ref`，`click`/`fill` 可使用 **`@N`**（或 JSON-RPC 里传 `ref`）。每次 `snapshot` 都会使此前的 ref 全部失效，编号在同一页面内递增不复用——只用最近一次输出里的 `@N`。
 
 详见 [references/snapshot-refs.md](references/snapshot-refs.md)。
 
