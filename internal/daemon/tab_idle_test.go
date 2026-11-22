@@ -385,7 +385,7 @@ func TestTabIdleRepeatedReconcileDoesNotRenew(t *testing.T) {
 	// idle. Reconciliation must not reset the already-tracked idle timer.
 	deadline := time.Now().Add(timeout + 40*time.Millisecond)
 	for time.Now().Before(deadline) {
-		srv.reconcileIdleFromLog(srv.syncTabsFromTargets(srv.beginTargetEnumeration(), fc.infos))
+		reconcileFresh(srv, fc.infos)
 		time.Sleep(15 * time.Millisecond)
 	}
 
@@ -439,8 +439,7 @@ func TestTabIdleRestartRestoresManagedTab(t *testing.T) {
 		},
 	}}
 	srvB := newIdleTestServerWithState(fcB, timeout, stateDir)
-	snaps := srvB.syncTabsFromTargets(srvB.beginTargetEnumeration(), fcB.infos)
-	srvB.reconcileIdleFromLog(snaps)
+	reconcileFresh(srvB, fcB.infos)
 
 	time.Sleep(60 * time.Millisecond)
 	srvB.closeExpiredTabs(context.Background())
@@ -494,8 +493,7 @@ func TestTabIdleRestartGraceDelaysClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.tabHook = fc
-	snaps := srv.syncTabsFromTargets(srv.beginTargetEnumeration(), fc.infos)
-	srv.reconcileIdleFromLog(snaps)
+	reconcileFresh(srv, fc.infos)
 
 	srv.closeExpiredTabs(context.Background())
 	if len(fc.infos) != 1 {

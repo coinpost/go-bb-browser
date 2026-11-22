@@ -129,6 +129,30 @@ func (s *Server) removeTargetState(tid target.ID) {
 	s.clearRemovedTarget(tid)
 }
 
+// managedRetireCandidates is the set of persisted managed targets one target
+// enumeration is allowed to retire. It is fixed BEFORE the browser is asked for
+// its targets: every member was registered before the request, so the reply
+// must list it unless it is really gone. A managed tab registered later (a
+// tab_new overlapping the request, or completing before the reply is
+// reconciled) is not a member, and its absence from that reply proves nothing.
+// The nil value retires nothing.
+type managedRetireCandidates map[target.ID]struct{}
+
+// beginManagedReconcile fixes the retirement candidates for the enumeration the
+// caller is about to request (see managedRetireCandidates). Like
+// beginTargetEnumeration it must run before the browser round trip.
+func (s *Server) beginManagedReconcile() managedRetireCandidates {
+	if s.tabIdle == nil || s.store == nil {
+		return nil
+	}
+	managed := s.store.ManagedTabs()
+	candidates := make(managedRetireCandidates, len(managed))
+	for _, mt := range managed {
+		candidates[target.ID(mt.TargetID)] = struct{}{}
+	}
+	return candidates
+}
+
 // reconcileIdleFromLog restores idle tracking for persisted managed tabs after
 // a successful target enumeration (snaps). A persisted tab is recovered only
 // when a live target has exactly the same full CDP target id; a tab that merely
@@ -136,9 +160,14 @@ func (s *Server) removeTargetState(tid target.ID) {
 // from the enumeration are confirmed gone and retired, which keeps the
 // persisted set bounded by the live managed tabs.
 //
+// Only targets in candidates, fixed by beginManagedReconcile before snaps was
+// requested, can be retired here. The managed set is read again now, so it may
+// hold tabs registered after the request; snaps is older than those and must
+// not be taken as proof that they vanished.
+//
 // Callers must not invoke it when enumeration failed: an empty snaps would then
 // retire tabs that are still alive.
-func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
+func (s *Server) reconcileIdleFromLog(candidates managedRetireCandidates, snaps []state.TabSnapshot) {
 	if s.tabIdle == nil || s.store == nil {
 		return
 	}
@@ -165,7 +194,9 @@ func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {
 	for _, mt := range loaded {
 		tid := target.ID(mt.TargetID)
 		if _, ok := present[tid]; !ok {
-			s.forgetTabManaged(tid)
+			if _, retirable := candidates[tid]; retirable {
+				s.forgetTabManaged(tid)
+			}
 			continue
 		}
 		effective := mt.LastActivity
