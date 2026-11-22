@@ -228,3 +228,25 @@ HEAD 工作树与导出 main 均通过配置 test -z "$(gofmt -l .)" && go vet .
 证据保留本机 review run evidence/FT7-9dfe0a4/：REPORT.md、KNOWN-P2.md、source/、reproduce.sh、configured.log、configured-main.log、prior-*.log、adjacent-*.log、writer-*.log、dispatch-*.log、p2-*.log、grace-*.log、manager-diagnostics.log。复跑脚本仅用本地提交和模块缓存；诊断为工作树外 overlay，尚非永久回归。
 无安装、依赖清单或工作树改动；隔离 HOME/TMPDIR/缓存，GOPROXY=off、GOSUMDB=off。未验证真实非 headless Chrome/CDP、真实 loadingFailed、实际 ID 复用频率、Docker、运行中 systemd；click/fill 等未逐项做换页注入。未启动 Chrome、未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
 round=4，已超过配置 max_rounds=3；本次追加构建由 owner「再来一轮」授权，不自动追加后续修复。发现 P1，留在 review/ 等 owner 决定；需继续请追加说明并移至 new/。未改代码、未合并 main、未发布。
+
+
+## factory · 2026-11-22 17:58
+owner 本次明确要求：「补充合理边界，把任务移回 new 再来一轮」。本节记录本次授权与验收范围；不修改历史计划、审查或全局 max_rounds。
+
+合理边界（本轮及后续 FT7 验收以此为准）：
+- 使用场景为关闭旧 tab 后创建新 tab，完整 CDP target ID 在该 daemon 生命周期内不复用。此为本任务的工作假设，不宣称已通过真实 Chrome 证明其全局唯一性。复用活 tab 导航不等于销毁后复用完整 target ID；短 alias 碰撞也不等于完整 ID 复用。
+- 核心契约：tab_close、空闲回收、用户关闭及枚举发现消失后，旧 observer/writer 必须退役；清理完成后 network/console/errors 缓冲为空、store 不再有该 target 的桶，迟到事件、迟到查询/初始化不得重新建桶；持续开关不同完整 ID 的 tab 不得积累旧桶。
+- 初始化与关闭并发、重复清理、Close/Forget 交错、在途 Record、关闭完成应答、清理失败及取消路径仍在范围内；不能因完整 ID 不复用而忽略仍能发生的 race、死锁、提前应答或旧桶残留。
+- 活页正常观测和单域 clear 应继续有效；不同完整 target ID（含短 alias 冲突）之间不得串数据、误清理或误关页。公开 RPC 行为不扩张。
+- 不为人为复用同一完整 target ID 的接替页增加跨所有 RPC 的代次/会话隔离系统。不扩展到 eval/click/fill 等通用页面操作重构。已有可工作的保护和永久回归保留，除非证明不必要且安全，不为收窄范围盲目回滚。
+
+最新审查的处理：
+- 2026-11-22 17:41 的五项 P1 原始复现场景均依赖完整 target ID 被复用，且 main 亦复现。本轮将其列为范围外的条件性发现，不再仅凭这些调度阻塞 FT7；保留历史证据，不声称已经修复，也不批量改写历史等级。
+- 若其中任一缺陷能在完整 ID 各不相同的正常创建/关闭场景复现，按实际影响重新定级并修复。P2 同样逐项判断，不自动全部升级，也不自动全部排除；特别关注并发 Close race 等不依赖 ID 复用的问题。
+
+第 5 轮补充计划：
+- Behaviour/Scope：先核实上述收窄契约是否已满足，只修复边界内缺口；清理无关复杂化须有证据，禁止继续把任务扩大为全系统生命周期重构。
+- Decisions：沿用现有 factory/FT7-observation-writer-retirement 分支；如 main 已前进先 merge，不 rebase；无需为获得提交而做无意义代码修改，若只需文档/测试澄清，应如实记录。
+- Checking：永久 barrier 覆盖已取出待 Record 的事件与释放并发、三域清空和桶数归零、迟到查询/attach 不重建已释放 ID、重复释放及 Close/Forget；-race 反复创建/关闭不同完整 ID 的 tab，区分相同完整 ID 的范围外压力测试。执行配置完整 gofmt/vet/race，并如实报告未验证的真实 Chrome/CDP、loadingFailed、Docker/systemd。
+
+状态：按 owner 要求 review/ → new/，授权额外一次构建（下一轮为第 5 轮）；header round 保留 4，待实际构建完成再递增。全局 max_rounds=3 不变，不授权无限重试、不自动 ship。
