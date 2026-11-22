@@ -100,3 +100,17 @@ notes:
 未检查：真实Chrome/CDP、Docker、systemd；未启动浏览器或操作用户窗口，无UI改动。取消路径未加专门回归，依赖既有全量测试。任意并发负载不保证严格差≤1，严格验收涵盖顺序和上述确定性交错。review 应检查调度边界及已有main关停flaky记录。
 
 状态：分支已推送，new/ → review/，round=2；本次仅build，未执行独立review、未合并main或发布。分支首次push因credential helper缺仓库路径失败，按命令添加credential.useHttpPath=true后重试成功，未修改持久设置。
+
+
+## factory · review · 2026-11-22 11:45
+head: 5793946443b7855f87324a76bfe7a3d8ec2c72af
+verdict: pass
+notes:
+- [P3] pkg/daemonclient/pool_test.go:434: 并发回归中，A阻塞于故障后端时若B提前报错，t.Fatalf跳过释放A，httptest.Server.Close会卡住直到测试超时。工作树外故障注入令B返回context canceled后复现3秒超时；建议handler通道等待加入退出信号，并在关闭测试服务器前触发。仅测试失败清理问题，不阻断本次通过。
+- Codex独立只读审查origin/main...HEAD，基线7223e5aa905a70f2147801625bdece0d8893876d；无P0/P1，无修改或提交，工作树干净。与origin/main合并检查无冲突，远端分支head与本次审查一致。
+- 上轮P1已修复：每次选择和在途预留在短锁内完成，HTTP在锁外；重试仅选未尝试后端，无完成后的skipped补偿。独立overlay加载旧实现，两入口复现[0,20,0]；HEAD加强逐对断言后均为[0,10,10]。
+- 配置完整命令test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...退出0，10个包通过、2个包无测试；已知main关停flaky本次未出现。
+- 创建/并发创建定向race重复30轮通过，保留交错探活和逐后端503均摊；独立取消/全失败overlay诊断race重复20轮通过，两入口均覆盖预取消零请求、首次/末次尝试取消、在途预留释放、四端各一次及AllFailedError四项错误。git diff --check通过。
+- 安装：无；已有Go 1.27.4及固定依赖，无清单或锁文件变更。测试HOME、缓存和诊断文件隔离于本run TMPDIR，仅本地服务；证据保留于本run evidence/FT13-round2-review。
+- 未检查：真实Chrome/CDP、Docker、systemd；未启动浏览器或操作用户窗口，无UI改动。严格并发均摊仅覆盖上述确定性交错，不保证任意并发负载差≤1。
+- 状态：第2/3轮，review/ → ready/；owner可查看分支及非阻断P3。未合并main、未发布。
