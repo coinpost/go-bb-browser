@@ -147,3 +147,17 @@ notes:
 - 证据保留于本机 review run evidence/FT25-5a4d5b0/：review-report.md、sources/、full.log、full-base.log、focused.log、original-head.log、independent-head/base.log、address-head/base.log、known-head.log、latency-head/base.log、integrity.log；overlay 诊断非永久回归。报告所称同名 .log.status 实际为去掉 .log 的 .status。
 - 使用既有 Go 1.27.4、离线模块缓存、隔离 HOME/TMPDIR/缓存，GOPROXY/GOSUMDB=off，无安装。工作树干净，HEAD 未变，保护路径无差异。未验证真实 Chrome/CDP、真实网络黑洞、Docker、systemd、其他系统或 Go1.26，未操作用户窗口。
 - 无关联 issue/PR，不发 GitHub 评论。第3/3轮，未改代码、未合并 main、未发布。
+
+
+## factory · 2026-11-22 16:52
+owner 本次明确要求：“对 coinpost/go-bb-browser，先把 FT 25 26 ship 掉”。本次仅 ship FT25、FT26。
+
+合并提交：39ecb270bb32e1506adc46c597f21107b5bda5a6；最终 main@2be49f8a70d6040937838426eea54bd65199067c 已推送。按配置 ship=["merge", "push"]，未打 tag、未触发 tag 发布，也未部署。ready/ → done/。
+
+FT25 先合并并通过包级无缓存 race；FT26 与 FT25 在 AGENTS.md、pkg/daemonclient/README.md、pkg/daemonclient/pool.go 冲突，由 Codex 保留两边语义完成 merge：并发有限预算和配置快照、构造顺序、锁内最终取消检查与整批提交，以及请求代次、权威列表清理、显式移除标记和观察回收。添加最小合并交互回归。
+
+测试：Codex 完整 gofmt/vet/无缓存 race 通过，定向交互回归重复5次通过。manager 独立完整 test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./... 全部通过（11个测试包，1个无测试包）；diff --check 通过，工作树干净，保护路径无变化。Go1.27.4，隔离 HOME/TMPDIR/缓存，离线 pin 模块；无安装。证据：ship run evidence/FT25-FT26/ 的 conflict-report.md、codex-resolve.log、FT25-tests.log、manager-full.log、merge-resolution.diff。
+
+关联 issue/PR：无，未关闭任何 issue/PR。未配置 clean，factory 分支保留不删。首次 main push 因 credential 未携带仓库路径失败，单命令添加 credential.useHttpPath=true 后推送成功，未修改全局设置。
+
+此前 review 的非阻塞 P2/P3 不宣称均已修复；两项合并的交互改变部分已知场景，以现有永久回归与本次测试结果为准，未做新的完整独立审查。真实 Chrome/CDP、真实网络黑洞、Docker、systemd、其他系统和 Go1.26 未验证；无 UI 变更，未操作用户窗口。FT7/FT28 保持不动。
