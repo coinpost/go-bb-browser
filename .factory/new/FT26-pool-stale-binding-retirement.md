@@ -64,3 +64,20 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：真实非 headless Chrome/CDP、真实 daemon 空闲回收/手动关页时序、Docker、systemd；无 UI 变化，未操作用户窗口，未使用 headless Chrome。
 
 运行说明：首次 coder 包装调用 120 秒超时取消，确认无改动且无 coder 进程后直接调用 Claude Code 完成。无链接 issue/PR。new/ → review/，第 1 轮；仅 build，未 review、未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 09:32
+head: b0f442ebb5a74043ade4c1a87fd0c101751f8dd5
+verdict: fix
+fix:
+- [P1] pkg/daemonclient/pool.go:569: 旧 TabList 的清理以响应完成时刻写入 removed，阻断请求代次更新的 TabFocus/TabList 确认。确定性交错：TabNew 绑定 x；旧列表返回空，较新观察已看到 x；两响应按发起顺序完成，较新观察虽成功返回 0:x，ClientForTab 仍为 false，立即调用得到 UnknownTabError。必须区分权威列表删除的请求代次与显式 Close/Forget 的生效时刻，让较新观察恢复仍存活绑定，并添加永久 barrier 回归。
+notes:
+- [P2] pkg/daemonclient/pool.go:575: 交叠列表按完成时刻刷新 epoch；旧列表含 x、新列表为空，顺序完成仍保留 x；新列表先完成而 x 从未绑定时，晚到旧列表也会重新新增。按后端维护已采纳权威列表代次，避免旧快照覆盖新结果，同时保护并发 TabNew/TabFocus。
+- [P2] pkg/daemonclient/pool.go:547: removed 仅在 observing 归零时释放；持续交叠的有限时长轮询也可无界累积，不仅是单个挂起请求。诊断完成 1024 次请求后 observing=1、live=2、removed=1022。应按最早在途观察代次回收失效标记。
+- [P2] pkg/daemonclient/pool.go:401: 缺失/null tabs 的成功 JSON 被归一化为空数组并清空绑定。应先验证 tabs 是数组，只有显式 [] 才作权威清空；非法响应按失败处理，不清理。
+
+Codex 审查 origin/main...HEAD，基线 4f86c1c588facd643e4596a40643b88a69061982；无合并冲突。Coder 和 manager 分别执行配置全量命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 均通过；现有测试通过不代表新诊断通过。Manager 独立复跑 `go test -race -count=1 -overlay <隔离诊断覆盖配置> -run '^TestFT26Review' ./pkg/daemonclient`，五个诊断用例均复现预期缺陷，其中 NewerObservation 的 tab_focus/tab_list 两子用例均失败：`tab "0:x" must be bound`。临时诊断未修改工作树，原始诊断保存在本 run evidence/FT26-b0f442e 中；交由下一轮转换为永久回归。git diff --check 通过，代码工作树干净。
+
+安装：无。Go 1.27.4，已 pin 模块从本机缓存离线恢复；测试 HOME、缓存和临时产物隔离。未检查真实 Chrome/CDP、Docker、systemd；未使用 headless Chrome 或操作用户窗口。无链接 issue/PR，无需 GitHub 评论。
+
+第 1/3 轮存在 P1，review/ → new/，下一次构建修复 fix 列表；P2 供实现时一并核对。本次仅 review，未改代码、未合并 main、未发布。
