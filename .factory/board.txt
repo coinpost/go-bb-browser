@@ -1,18 +1,16 @@
 go-bb-browser - factory board
 =============================
 5 at your gates | 9 with the agent | 8 done
-Drawn Nov 22, 08:17 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 22, 08:29 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
-    FT2     8h  生命周期事件溢出重同步与优雅关停次序
-    FT3     8h  创建在途关停收尾与唯一释放记账
-    FT4     8h  日志尾行、轮转恢复与安全可写探测
-    FT5     8h  快照ref作用域与脱离节点清理
-    FT6     8h  run帮助布尔参数与选项终止符兼容
+    FT2     9h  生命周期事件溢出重同步与优雅关停次序
+    FT3     9h  创建在途关停收尾与唯一释放记账
+    FT4     9h  日志尾行、轮转恢复与安全可写探测
+    FT5     9h  快照ref作用域与脱离节点清理
+    FT6     9h  run帮助布尔参数与选项终止符兼容
 
-NEW (9)                                     avg stay 4h
-    FT25    7h  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
-                的 daemon 使整个调用失败
+NEW (8)                                     avg stay 4h
     FT26    7h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中
     FT27    7h  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
@@ -24,12 +22,13 @@ NEW (9)                                     avg stay 4h
                 顺序调用方的 tab 会全部落到同一个 daemon
     FT28    1h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容
-    FT21   58m  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
+    FT21    1h  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
                 向另一个 tab
-    FT22   45m  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
+    FT22   58m  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
 
-REVIEW (0)                                  avg stay 17m
-    Nothing here
+REVIEW (1)                                  avg stay 17m
+    FT25    1m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+                的 daemon 使整个调用失败
 
 READY (5) [!]                               avg stay 1h
   * FT18    1h  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
@@ -41,10 +40,10 @@ READY (5) [!]                               avg stay 1h
   * FT20    1h  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
                 其他用户可读取 fill 文本与 fetch 头中的凭据
                 > Check, then ship
-  * FT23   32m  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
+  * FT23   44m  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
                 adapter 被截断成永不执行的脚本
                 > Check, then ship
-  * FT24    1m  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
+  * FT24   12m  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
                 screenshot-<ts>.png
                 > Check, then ship
 
