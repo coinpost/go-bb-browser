@@ -1,6 +1,6 @@
 ---
 branch: factory/FT25-pool-hung-backend-isolation
-round: 2
+round: 3
 ---
 # [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起的 daemon 使整个调用失败
 
@@ -111,3 +111,22 @@ notes:
 - 使用既有 Go 1.27.4、隔离 HOME/TMPDIR/缓存、GOPROXY=off，无安装；离线可选 go mod download 缺 Windows mousetrap 缓存，不影响 macOS 必需测试。未找到 review-code skill。
 - 未验真实 Chrome/CDP、Docker、systemd、真实网络黑洞、其他操作系统、Go 1.26；无 UI 变动，未操作用户窗口。无关联 issue/PR，不发 GitHub 评论。
 - 第 2/3 轮发现 P1，review/ → new/，下轮在原分支修复。未合并 main、未发布。
+
+
+## factory · plan · 2026-11-22 15:31
+第 3 轮补充计划：
+- Behaviour：TabList/TabFocus 在前缀转换与结果准备期间不写绑定或调用者结果；暂存整批绑定与输出，在 affinity 锁内即将提交前重新检查主动取消。取消则返回 context.Canceled、不建立绑定且不覆盖 result；deadline 到达仍保留预算内成功。
+- Scope：最新 review 的唯一 P1、最小内部提交 helper、永久回归及相关文档；两项 P2（关闭后旧观察重绑、Body.Close 延迟影响完成时间）本轮不处理。
+- Decisions：昂贵准备和用户 decoder 在锁外完成，锁内检查后整批绑定；最终检查后取消不保证生效。结果暂存到新值，成功时整体替换，解码失败不改调用者结果；普通赋值在释放池锁后执行，不运行用户回调。
+- Checking：TabList/TabFocus 与泛型 Call 的确定性锁控取消回归、准备期间取消、原绑定与 sentinel 结果不变、无取消成功、deadline 部分成功；先红后绿、重复 race、完整配置检查。
+
+## factory · 2026-11-22 15:31
+第 3/3 轮构建完成：提交 5a4d5b0。复用原分支，先快进到 review 合并提交 cd08b54；origin/main@e63a15c 已在分支内，无需再次合并。未合并其他 factory 分支。
+- 修复：聚合结果与整批观察绑定先暂存，Pool.commitObserved 在池锁内最终检查主动取消，再批量提交；取消发生在准备/等锁阶段不写绑定、不覆盖 typed/map/any/nil/generic Call 结果。deadline 仍允许预算内成功。
+- 边界与兼容性决定：最终锁内检查后的取消视为太晚，普通结果赋值在锁释放后完成。成功结果整体替换，不再保留预填结构中缺省字段或 map 旧键；解码失败不再部分写结果，但保持旧语义：观察到的 tabs 仍绑定后返回解码错误。此行为变更需 review 特别检查。
+- 回归红证据：锁控取消 8 子项在旧实现均错误返回 nil；准备阶段取消两方法在旧实现均已污染绑定。修复后新回归 19 子项通过，定向 fanout -race -count=20 通过（210s）；无取消、deadline、custom decoder、解码失败用例为保留性检查，不算红证据。
+- 测试：coder 完整配置通过；manager 独立隔离 HOME/GOCACHE/TMPDIR、GOPROXY=off 执行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./...` 全部通过，11 个测试包、1 个无测试包，Go 1.27.4。diff --check 通过，保护路径未变，工作树干净。证据保留在 build run evidence/FT25-round3/ 的 red.log、green.log、focused-race-x20.log、full.log、manager-full.log。
+- 安装：无；go.mod/go.sum 不变，使用既有 pin 模块缓存。coder 报告一次早期 go vet 未套隔离环境、用了默认构建缓存并编译失败；后续所有测试已使用隔离环境。
+- 未验：真实 Chrome/CDP、Docker、systemd、真实网络黑洞、其他系统、Go 1.26；未重跑原 30000-tab 计时探针，以确定性锁控和 decoder 控制回归覆盖。无 UI 变更，未启动 Chrome、未操作用户窗口。
+- 已知未修 P2：成功 TabClose 后在途旧 TabList 可能恢复绑定；慢 Body.Close 可能令预算内已解码响应被判超时。下次独立 review 应继续评估，不宣称已修。
+状态：代码已推送，new/ → review/，等待独立审查。本轮仅 build，未合并 main，未发布。
