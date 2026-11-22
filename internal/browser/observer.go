@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -57,12 +58,17 @@ type tabObserver struct {
 	ready   chan struct{}
 	initErr error
 
+	// sessionClosed (guarded by Session.obsMu) is set when Session.Close dropped
+	// this observer; an initializer still running then releases the child.
+	sessionClosed bool
+
 	// stop ends the writer without cancelling ctx, which would close a live tab.
 	stop chan struct{}
 	// recordMu serializes every Record call with retirement: retire returns only
 	// after an in-flight Record has finished, and none can start afterwards.
 	recordMu sync.Mutex
 	retired  atomic.Bool
+	stopOnce sync.Once
 
 	domainsDisabled bool
 
@@ -86,6 +92,10 @@ func (s *Session) EnsureObservation(ctx context.Context, tid target.ID, kind Obs
 		ctx = context.Background()
 	}
 	s.obsMu.Lock()
+	if s.closed.Load() {
+		s.obsMu.Unlock()
+		return wrapCDPError("Target.attachObserver", tid, errSessionClosed)
+	}
 	if s.observers == nil {
 		s.observers = make(map[target.ID]*tabObserver)
 	}
@@ -122,14 +132,26 @@ var disableObservationDomains = func(tabCtx, requestCtx context.Context) error {
 func (s *Session) initializeObserver(o *tabObserver) {
 	// Bind chromedp's Target.run to the observer's long-lived context, never to a
 	// request timeout child. Cancelling the latter would otherwise kill the session.
-	err := chromedp.Run(o.ctx)
+	// The Run is bounded and can be cut short by a release or by Close; neither
+	// cancels o.ctx while it is in flight.
+	err := o.cleanup.run(o.ctx)
+	s.obsMu.Lock()
+	current := s.observers[o.tid] == o
+	switch {
+	case err != nil:
+	case o.sessionClosed:
+		err = errSessionClosed
+	case !current:
+		err = &CDPError{Kind: ErrorTargetGone, Op: "Target.attachObserver", Target: o.tid, Err: fmt.Errorf("target removed while attaching")}
+	}
 	if err != nil {
-		s.obsMu.Lock()
 		o.initErr = wrapCDPError("Target.attachObserver", o.tid, err)
-		release := s.observers[o.tid] == o
-		if release {
+		if current {
 			delete(s.observers, o.tid) // retry with a fresh context on the next call
 		}
+		// ForgetTarget took the entry: its cancel owns the child from here on.
+		// Otherwise (plain failure, or Close, which never cancels) it is ours.
+		release := current || o.sessionClosed
 		s.obsMu.Unlock()
 		if o.logger != nil {
 			o.logger.Debug("observer target initialization ended", "target", o.tid, "err", o.initErr)
@@ -140,8 +162,9 @@ func (s *Session) initializeObserver(o *tabObserver) {
 		}
 		return
 	}
-	// A target released during initialization has already retired this observer;
-	// the writer then exits at once without recording.
+	s.obsMu.Unlock()
+	// A release from here on retires the observer; the writer then exits at
+	// once without recording.
 	go o.runWriter()
 	close(o.ready)
 }
@@ -277,19 +300,22 @@ func storeAtomicMax(dst *atomic.Uint64, value uint64) {
 	}
 }
 
-// retire permanently stops this observer from recording. It waits for a Record
-// call that is already in flight, so once it returns the caller may clear the
-// target's buffers knowing this observer can never write to them again. Events
-// still queued are discarded. It is idempotent and safe before the writer starts.
+// retire permanently stops this observer from recording. Writing is disabled
+// at once; retire then waits for a Record call that is already in flight, so
+// once it returns the caller may clear the target's buffers knowing this
+// observer can never write to them again. Events still queued are discarded.
+// It is safe before the writer starts, and every call, including one that
+// overlaps another, returns only after that in-flight Record has finished.
 func (o *tabObserver) retire() {
+	o.retired.Store(true)
+	o.stopOnce.Do(func() {
+		if o.stop != nil {
+			close(o.stop)
+		}
+	})
+	// Nothing to do under the lock: acquiring it is the wait.
 	o.recordMu.Lock()
-	defer o.recordMu.Unlock()
-	if o.retired.Swap(true) {
-		return
-	}
-	if o.stop != nil {
-		close(o.stop)
-	}
+	o.recordMu.Unlock()
 }
 
 func (o *tabObserver) stopped() bool {

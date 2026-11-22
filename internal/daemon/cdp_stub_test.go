@@ -35,6 +35,16 @@ type cdpStub struct {
 	getTargets  int
 	holdTargets []chan struct{} // one entry per upcoming Target.getTargets call
 	arrived     chan int        // call number of every Target.getTargets request
+	holds       map[string][]*cdpStubHold
+	failures    map[string]int         // upcoming commands per method answered with an error
+	sessions    map[target.ID][]string // flat sessions attached per target, oldest first
+}
+
+// cdpStubHold parks one upcoming command of a given method: arrived is closed
+// when the command reaches the stub, and it is handled once release is closed.
+type cdpStubHold struct {
+	arrived chan struct{}
+	release chan struct{}
 }
 
 type cdpStubMessage struct {
@@ -77,6 +87,15 @@ func (st *cdpStub) close() {
 	for _, h := range holds {
 		closeOnce(h)
 	}
+	st.mu.Lock()
+	methodHolds := st.holds
+	st.holds = nil
+	st.mu.Unlock()
+	for _, list := range methodHolds {
+		for _, h := range list {
+			closeOnce(h.release)
+		}
+	}
 	st.writeMu.Lock()
 	if st.conn != nil {
 		_ = st.conn.Close()
@@ -98,6 +117,65 @@ func (st *cdpStub) holdNextGetTargets() chan struct{} {
 	st.holdTargets = append(st.holdTargets, gate)
 	st.mu.Unlock()
 	return gate
+}
+
+// holdNext parks the next not-yet-parked command named method. The returned
+// release function is idempotent.
+func (st *cdpStub) holdNext(method string) (arrived <-chan struct{}, release func()) {
+	h := &cdpStubHold{arrived: make(chan struct{}), release: make(chan struct{})}
+	st.mu.Lock()
+	if st.holds == nil {
+		st.holds = make(map[string][]*cdpStubHold)
+	}
+	st.holds[method] = append(st.holds[method], h)
+	st.mu.Unlock()
+	return h.arrived, func() { closeOnce(h.release) }
+}
+
+// failNext answers the next command named method with a protocol error.
+func (st *cdpStub) failNext(method string) {
+	st.mu.Lock()
+	if st.failures == nil {
+		st.failures = make(map[string]int)
+	}
+	st.failures[method]++
+	st.mu.Unlock()
+}
+
+// sessionFor returns the most recent flat session attached to id.
+func (st *cdpStub) sessionFor(id target.ID) (string, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	list := st.sessions[id]
+	if len(list) == 0 {
+		return "", false
+	}
+	return list[len(list)-1], true
+}
+
+func (st *cdpStub) sessionCount(id target.ID) int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return len(st.sessions[id])
+}
+
+// emitSession delivers a target-scoped event on a flat session.
+func (st *cdpStub) emitSession(sessionID, method string, params any) {
+	st.write(map[string]any{"method": method, "params": params, "sessionId": sessionID})
+}
+
+// destroyPage makes a page vanish as if the user closed it, and announces it.
+func (st *cdpStub) destroyPage(id target.ID) {
+	st.mu.Lock()
+	kept := st.pages[:0]
+	for _, p := range st.pages {
+		if p != id {
+			kept = append(kept, p)
+		}
+	}
+	st.pages = kept
+	st.mu.Unlock()
+	st.emit("Target.targetDestroyed", map[string]any{"targetId": string(id)})
 }
 
 func (st *cdpStub) queueCreateID(id target.ID) {
@@ -191,6 +269,40 @@ func (st *cdpStub) serveWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (st *cdpStub) handle(msg cdpStubMessage) {
+	st.mu.Lock()
+	var hold *cdpStubHold
+	if list := st.holds[msg.Method]; len(list) > 0 {
+		hold = list[0]
+		st.holds[msg.Method] = list[1:]
+	}
+	st.mu.Unlock()
+	if hold == nil {
+		st.dispatch(msg)
+		return
+	}
+	close(hold.arrived)
+	// Handle out of band so the read loop keeps serving other commands.
+	go func() {
+		<-hold.release
+		st.dispatch(msg)
+	}()
+}
+
+func (st *cdpStub) dispatch(msg cdpStubMessage) {
+	st.mu.Lock()
+	fail := st.failures[msg.Method] > 0
+	if fail {
+		st.failures[msg.Method]--
+	}
+	st.mu.Unlock()
+	if fail {
+		out := map[string]any{"id": msg.ID, "error": map[string]any{"code": -32000, "message": "stub: " + msg.Method + " refused"}}
+		if msg.SessionID != "" {
+			out["sessionId"] = msg.SessionID
+		}
+		st.write(out)
+		return
+	}
 	switch msg.Method {
 	case "Target.getTargets":
 		st.mu.Lock()
@@ -233,9 +345,17 @@ func (st *cdpStub) handle(msg cdpStubMessage) {
 		st.mu.Unlock()
 		st.reply(msg, map[string]any{"targetId": string(id)})
 	case "Target.attachToTarget":
+		var p struct {
+			TargetID target.ID `json:"targetId"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
 		st.mu.Lock()
 		st.sessionSeq++
 		sid := fmt.Sprintf("stub-session-%d", st.sessionSeq)
+		if st.sessions == nil {
+			st.sessions = make(map[target.ID][]string)
+		}
+		st.sessions[p.TargetID] = append(st.sessions[p.TargetID], sid)
 		st.mu.Unlock()
 		st.reply(msg, map[string]any{"sessionId": sid})
 	case "Target.closeTarget":

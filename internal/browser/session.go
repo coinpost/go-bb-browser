@@ -3,9 +3,11 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,24 +35,34 @@ func browserExecutor(ctx context.Context) cdp.Executor {
 	return c.Browser
 }
 
+// attachTimeout bounds the first chromedp.Run of an attach context.
+var attachTimeout = timeout.Operation
+
 // attachCancellation owns every cancellation of an attach context so Target can
 // be cleared before chromedp's cancel watcher starts reading it.
+//
+// chromedp stores Context.Target from inside the first Run and its cancel
+// watcher reads the field, unsynchronized, as soon as the child context is
+// done. The child is therefore never cancelled while that Run is in flight:
+// a cancellation arriving meanwhile ends only the Run (through a context
+// derived for it), waits for it to return, and cancels the child afterwards.
 type attachCancellation struct {
 	mu          sync.Mutex
 	cancelled   bool
 	cancelChild context.CancelFunc
 	stopParent  func() bool
+
+	// attachDone is non-nil while the first Run is in flight and is closed when
+	// it has returned; abortAttach ends that Run without touching the child.
+	abortAttach context.CancelFunc
+	attachDone  chan struct{}
+	aborted     bool
 }
 
 func newAttachContext(parent context.Context, id target.ID) (context.Context, *attachCancellation) {
 	ctx, cancel := chromedp.NewContext(context.WithoutCancel(parent), chromedp.WithTargetID(id))
 	a := &attachCancellation{cancelChild: cancel}
-	a.stopParent = context.AfterFunc(parent, func() {
-		a.mu.Lock()
-		a.cancelled = true
-		a.mu.Unlock()
-		cancel()
-	})
+	a.stopParent = context.AfterFunc(parent, func() { a.cancelWith(cancel) })
 	return ctx, a
 }
 
@@ -60,12 +72,74 @@ func (a *attachCancellation) stop() {
 	}
 }
 
+// cancel cancels the child context. If its attach is still in flight, cancel
+// first ends that attach and returns only after the child was cancelled too.
 func (a *attachCancellation) cancel() {
 	a.stop()
+	a.cancelWith(a.cancelChild)
+}
+
+func (a *attachCancellation) cancelWith(cancelChild context.CancelFunc) {
 	a.mu.Lock()
 	a.cancelled = true
+	abort, done := a.abortAttach, a.attachDone
 	a.mu.Unlock()
-	a.cancelChild()
+	if done != nil {
+		abort()
+		<-done
+	}
+	cancelChild()
+}
+
+// abort ends an attach that is still in flight and leaves the child context
+// alone; the initializer then decides what to do with it.
+func (a *attachCancellation) abort() {
+	a.mu.Lock()
+	abort, inFlight := a.abortAttach, a.attachDone != nil
+	if inFlight {
+		a.aborted = true
+	}
+	a.mu.Unlock()
+	if inFlight {
+		abort()
+	}
+}
+
+// run performs the first chromedp.Run of ctx, the one that attaches to the
+// target. It is bounded by attachTimeout and reports an error whenever the
+// attach was cut short, even if chromedp had just completed it.
+//
+// chromedp binds the target's event loop to the context of this Run, so the
+// derived context lives as long as ctx unless the attach is aborted.
+func (a *attachCancellation) run(ctx context.Context) error {
+	runCtx, abort := context.WithCancel(ctx)
+	done := make(chan struct{})
+	a.mu.Lock()
+	if a.cancelled {
+		a.mu.Unlock()
+		abort()
+		return context.Canceled
+	}
+	a.abortAttach, a.attachDone = abort, done
+	a.mu.Unlock()
+
+	timer := time.AfterFunc(attachTimeout, abort)
+	err := chromedp.Run(runCtx)
+	timedOut := !timer.Stop()
+
+	a.mu.Lock()
+	a.attachDone = nil
+	cut := a.cancelled || a.aborted
+	a.mu.Unlock()
+	close(done)
+	switch {
+	case timedOut:
+		abort()
+		return fmt.Errorf("attach timed out after %s: %w", attachTimeout, context.DeadlineExceeded)
+	case err == nil && cut:
+		return context.Canceled
+	}
+	return err
 }
 
 // releaseFailedAttach releases a child context without closing the user's tab.
@@ -113,8 +187,15 @@ type Session struct {
 	routeMu    sync.RWMutex
 	routeState *routeState
 
+	// closed is set by Close before it empties the tables below; attaches check
+	// it under the table lock, so none can be added to a closed session.
+	closed atomic.Bool
+
 	obsMu     sync.Mutex
 	observers map[target.ID]*tabObserver
+	// obsRetiring holds one channel per observer that ForgetTarget has taken out
+	// of observers and is still retiring; it is closed when that is complete.
+	obsRetiring map[target.ID][]chan struct{}
 
 	// tabPool holds one chromedp child context per page/tab target. Cancelling that child
 	// (as chromedp.NewContext's cancel does) runs CloseTarget — so we must NOT defer-cancel
@@ -146,7 +227,11 @@ type tabPoolEntry struct {
 	cleanup *attachCancellation
 	ready   chan struct{}
 	err     error
+	// sessionClosed (guarded by poolMu) hands the child to the initializer.
+	sessionClosed bool
 }
+
+var errSessionClosed = errors.New("browser session closed")
 
 func runCDP(ctx context.Context, actions ...chromedp.Action) error {
 	return runCDPWithContext(ctx, context.Background(), actions...)
@@ -389,22 +474,37 @@ func (s *Session) Close() {
 	if s == nil {
 		return
 	}
+	s.closed.Store(true)
 	s.obsMu.Lock()
+	observers := make([]*tabObserver, 0, len(s.observers))
 	for _, obs := range s.observers {
+		obs.sessionClosed = true
+		observers = append(observers, obs)
+	}
+	s.observers = nil
+	s.obsMu.Unlock()
+	for _, obs := range observers {
 		obs.cleanup.stop()
+		// An attach still in flight ends now; its initializer keeps ownership of
+		// the child and releases it without closing the tab.
+		obs.cleanup.abort()
 		// Stop the writer too: an observer of a closed session must not keep
 		// writing into buffers that a later session may own.
 		obs.retire()
 	}
-	s.observers = nil
-	s.obsMu.Unlock()
 
 	s.poolMu.Lock()
+	entries := make([]*tabPoolEntry, 0, len(s.tabPool))
 	for _, ent := range s.tabPool {
-		ent.cleanup.stop()
+		ent.sessionClosed = true
+		entries = append(entries, ent)
 	}
 	s.tabPool = nil
 	s.poolMu.Unlock()
+	for _, ent := range entries {
+		ent.cleanup.stop()
+		ent.cleanup.abort()
+	}
 
 	if s.cancel != nil {
 		s.cancel = nil
@@ -412,34 +512,62 @@ func (s *Session) Close() {
 }
 
 // ForgetTarget drops daemon-owned resources after Chrome has already removed a target.
-// When it returns, the target's observer has stopped recording for good.
+// When it returns, every observer the target ever had on this session has
+// stopped recording for good and its child context is released; a call that
+// overlaps another release of the same target waits for that one as well.
 // Cancelling a live chromedp child closes its tab, so this must only be called from an
 // authoritative target-removal path.
 func (s *Session) ForgetTarget(id target.ID) {
 	if s == nil || id == "" {
 		return
 	}
-	var cancel context.CancelFunc
 	s.poolMu.Lock()
-	if ent := s.tabPool[id]; ent != nil {
-		delete(s.tabPool, id)
-		cancel = ent.cleanup.cancel
-	}
+	ent := s.tabPool[id]
+	delete(s.tabPool, id)
 	s.poolMu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
+
 	s.obsMu.Lock()
 	obs := s.observers[id]
 	delete(s.observers, id)
+	var done chan struct{}
+	if obs != nil {
+		done = make(chan struct{})
+		if s.obsRetiring == nil {
+			s.obsRetiring = make(map[target.ID][]chan struct{})
+		}
+		s.obsRetiring[id] = append(s.obsRetiring[id], done)
+	}
+	// Retirements already under way are not finished just because the table
+	// entry is gone: wait for them below, outside the lock.
+	pending := slices.Clone(s.obsRetiring[id])
 	s.obsMu.Unlock()
+
+	if obs != nil {
+		// Writes are disabled first; this also waits out an in-flight Record, so
+		// the caller can clear the target's observation buffers afterwards.
+		obs.retire()
+	}
+	if ent != nil {
+		ent.cleanup.cancel()
+	}
 	if obs != nil {
 		if obs.cleanup != nil {
+			// Safe during initialization: cancel ends a pending attach and takes
+			// the child over only once the initializer's Run has returned.
 			obs.cleanup.cancel()
 		}
-		// Wait out an in-flight Record so the caller can clear the target's
-		// observation buffers without the old writer recreating them.
-		obs.retire()
+		s.obsMu.Lock()
+		left := slices.DeleteFunc(s.obsRetiring[id], func(ch chan struct{}) bool { return ch == done })
+		if len(left) == 0 {
+			delete(s.obsRetiring, id)
+		} else {
+			s.obsRetiring[id] = left
+		}
+		s.obsMu.Unlock()
+		close(done)
+	}
+	for _, ch := range pending {
+		<-ch
 	}
 	s.ClearRoutesForTarget(id)
 }
@@ -618,6 +746,10 @@ func (s *Session) tabChromeCtxContext(requestCtx context.Context, tabID target.I
 		requestCtx = context.Background()
 	}
 	s.poolMu.Lock()
+	if s.closed.Load() {
+		s.poolMu.Unlock()
+		return nil, wrapCDPError("Target.attachToTarget", tabID, errSessionClosed)
+	}
 	if s.tabPool == nil {
 		s.tabPool = make(map[target.ID]*tabPoolEntry)
 	}
@@ -649,12 +781,19 @@ func (s *Session) tabChromeCtxContext(requestCtx context.Context, tabID target.I
 // on a request timeout child would bind Target.run to that child and kill the cached
 // executor as soon as the request returned.
 func (s *Session) initializeTabPoolEntry(tabID target.ID, ent *tabPoolEntry) {
-	err := chromedp.Run(ent.ctx)
+	err := ent.cleanup.run(ent.ctx)
 	s.poolMu.Lock()
 	release := false
-	if s.tabPool[tabID] != ent {
+	switch {
+	case ent.sessionClosed:
+		// Close dropped the entry without cancelling it (that would close the
+		// tab), so the child is still this initializer's to release.
+		ent.err = wrapCDPError("Target.attachToTarget", tabID, errSessionClosed)
+		release = true
+	case s.tabPool[tabID] != ent:
+		// Removed by ForgetTarget / CloseTarget, whose cancel owns the child.
 		ent.err = &CDPError{Kind: ErrorTargetGone, Op: "Target.attachToTarget", Target: tabID, Err: fmt.Errorf("target removed while attaching")}
-	} else if err != nil {
+	case err != nil:
 		delete(s.tabPool, tabID) // the next call can retry with a fresh context
 		ent.err = wrapCDPError("Target.attachToTarget", tabID, err)
 		release = true

@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	goruntime "runtime"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
+	"github.com/chromedp/chromedp"
 	"github.com/yiplee/go-bb-browser/internal/state"
 )
 
@@ -129,7 +131,13 @@ func TestForgetTargetSynchronizesWithInFlightWriter(t *testing.T) {
 		s.ForgetTarget(tid)
 		obsStore.ClearTarget(tid)
 	}()
-	awaitRetireTest(t, obs.ctx.Done(), "ForgetTarget to cancel the observer")
+	// Retirement disables writing before it waits for the in-flight Record.
+	for deadline := time.Now().Add(5 * time.Second); !obs.retired.Load(); {
+		if time.Now().After(deadline) {
+			t.Fatal("ForgetTarget did not retire the observer")
+		}
+		goruntime.Gosched()
+	}
 	select {
 	case <-cleaned:
 		t.Error("target release returned while the writer still held a dequeued event before Record")
@@ -138,6 +146,9 @@ func TestForgetTargetSynchronizesWithInFlightWriter(t *testing.T) {
 	close(rec.release)
 	awaitRetireTest(t, cleaned, "target release after the in-flight Record finished")
 	awaitRetireTest(t, writerDone, "the retired writer to exit")
+	if obs.ctx.Err() == nil {
+		t.Error("ForgetTarget did not cancel the observer's child context")
+	}
 	if got := rec.calls.Load(); got != 1 {
 		t.Errorf("Record calls = %d, want only the one already in flight; queued events must be discarded", got)
 	}
@@ -331,4 +342,192 @@ func TestObserverStartStopChurnLeavesNoBuckets(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("%d observer(s) left registered", left)
 	}
+}
+
+// parkedAttachAllocator blocks the first Run of an attach inside Allocate, with
+// no Chrome involved. Once the Run's context ends it reports so and then stays
+// inside the attach until the test lets it return.
+type parkedAttach struct {
+	ctx     context.Context // the context chromedp.Run was called with
+	aborted chan struct{}
+	release chan struct{}
+}
+
+type parkedAttachAllocator struct {
+	attempts chan *parkedAttach
+}
+
+func (a *parkedAttachAllocator) Allocate(ctx context.Context, _ ...chromedp.BrowserOption) (*chromedp.Browser, error) {
+	attempt := &parkedAttach{ctx: ctx, aborted: make(chan struct{}), release: make(chan struct{})}
+	a.attempts <- attempt
+	<-ctx.Done()
+	close(attempt.aborted)
+	<-attempt.release
+	return nil, ctx.Err()
+}
+
+func (*parkedAttachAllocator) Wait() {}
+
+// attachKinds runs a test against both kinds of attached child context.
+func attachKinds(t *testing.T, run func(t *testing.T, s *Session, allocator *parkedAttachAllocator, attach func(context.Context) error, child func() context.Context)) {
+	for _, observer := range []bool{true, false} {
+		name := "pool"
+		if observer {
+			name = "observer"
+		}
+		t.Run(name, func(t *testing.T) {
+			const id target.ID = "TAB"
+			allocator := &parkedAttachAllocator{attempts: make(chan *parkedAttach, 4)}
+			parent, cancel := chromedp.NewContext(context.Background(), func(c *chromedp.Context) { c.Allocator = allocator })
+			t.Cleanup(cancel)
+			s := newSession(parent, func() {})
+			rec := &barrierRecorder{obs: state.NewTabObsStore()}
+			attach := func(ctx context.Context) error {
+				if observer {
+					return s.EnsureObservation(ctx, id, ObservationNetwork, rec, nil)
+				}
+				_, err := s.tabChromeCtxContext(ctx, id)
+				return err
+			}
+			child := func() context.Context {
+				if observer {
+					s.obsMu.Lock()
+					defer s.obsMu.Unlock()
+					if obs := s.observers[id]; obs != nil {
+						return obs.ctx
+					}
+					return nil
+				}
+				s.poolMu.Lock()
+				defer s.poolMu.Unlock()
+				if ent := s.tabPool[id]; ent != nil {
+					return ent.ctx
+				}
+				return nil
+			}
+			run(t, s, allocator, attach, child)
+		})
+	}
+}
+
+// Review P1: a target released while its child context is still attaching.
+// chromedp's cancel watcher reads Context.Target as soon as the child is done,
+// and the attach writes it, so the release may end the attach but must leave
+// the child alone until the attach has returned, and wait for exactly that.
+func TestForgetTargetDuringAttachCancelsChildOnlyAfterAttachReturns(t *testing.T) {
+	attachKinds(t, func(t *testing.T, s *Session, allocator *parkedAttachAllocator, attach func(context.Context) error, child func() context.Context) {
+		result := make(chan error, 1)
+		go func() { result <- attach(context.Background()) }()
+		attempt := awaitAttachValue(t, allocator.attempts)
+		released := false
+		release := func() {
+			if !released {
+				released = true
+				close(attempt.release)
+			}
+		}
+		defer release()
+		childCtx := child()
+		if childCtx == nil {
+			t.Fatal("no child context registered while attaching")
+		}
+
+		forgot := make(chan struct{})
+		go func() {
+			defer close(forgot)
+			s.ForgetTarget("TAB")
+		}()
+		awaitAttachValue(t, attempt.aborted)
+		// The attach has been told to stop but is still running.
+		if childCtx.Err() != nil {
+			t.Error("child context cancelled while its attach was still in flight")
+		}
+		select {
+		case <-forgot:
+			t.Error("ForgetTarget returned before the attach it interrupted had returned")
+		case <-time.After(100 * time.Millisecond):
+		}
+		if childCtx.Err() != nil {
+			t.Error("child context cancelled while its attach was still in flight")
+		}
+
+		release()
+		awaitAttachValue(t, forgot)
+		if childCtx.Err() == nil {
+			t.Error("released target kept its child context alive")
+		}
+		if err := awaitAttachValue(t, result); err == nil {
+			t.Error("attach of a released target reported success")
+		}
+		if child() != nil {
+			t.Error("released target is still in the table")
+		}
+		s.ForgetTarget("TAB") // releasing again is a no-op
+	})
+}
+
+// An attach the browser never answers ends by itself, releases its child
+// context and does not stick: the next call starts a fresh one.
+func TestAttachIsBounded(t *testing.T) {
+	orig := attachTimeout
+	attachTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { attachTimeout = orig })
+	attachKinds(t, func(t *testing.T, s *Session, allocator *parkedAttachAllocator, attach func(context.Context) error, child func() context.Context) {
+		result := make(chan error, 1)
+		go func() { result <- attach(context.Background()) }()
+		attempt := awaitAttachValue(t, allocator.attempts)
+		close(attempt.release) // return as soon as the bound ends the Run
+		childCtx := child()
+		err := awaitAttachValue(t, result)
+		if !errors.Is(err, context.DeadlineExceeded) || ErrorKindOf(err) != ErrorTimeout {
+			t.Fatalf("error = %v, want an attach timeout", err)
+		}
+		awaitAttachValue(t, childCtx.Done())
+		if child() != nil {
+			t.Error("timed-out attach stayed in the table")
+		}
+
+		go func() { result <- attach(context.Background()) }()
+		retry := awaitAttachValue(t, allocator.attempts)
+		close(retry.release)
+		if retry.ctx == attempt.ctx {
+			t.Error("retry reused the timed-out attach")
+		}
+		if err := awaitAttachValue(t, result); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("retry error = %v, want a fresh attach timeout", err)
+		}
+	})
+}
+
+// Review note: Close while an attach is in flight. The attach must not report
+// success afterwards, its child context is released by the initializer (Close
+// never cancels children: that would close tabs), and the closed session
+// refuses to attach anything new.
+func TestSessionCloseDuringAttach(t *testing.T) {
+	attachKinds(t, func(t *testing.T, s *Session, allocator *parkedAttachAllocator, attach func(context.Context) error, child func() context.Context) {
+		result := make(chan error, 1)
+		go func() { result <- attach(context.Background()) }()
+		attempt := awaitAttachValue(t, allocator.attempts)
+		childCtx := child()
+
+		s.Close()
+		awaitAttachValue(t, attempt.aborted)
+		if childCtx.Err() != nil {
+			t.Error("Close cancelled a child context")
+		}
+		close(attempt.release)
+		if err := awaitAttachValue(t, result); !errors.Is(err, errSessionClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("attach interrupted by Close returned %v", err)
+		}
+		awaitAttachValue(t, childCtx.Done()) // released by the initializer
+
+		if err := attach(context.Background()); !errors.Is(err, errSessionClosed) {
+			t.Fatalf("attach on a closed session returned %v, want errSessionClosed", err)
+		}
+		select {
+		case <-allocator.attempts:
+			t.Error("closed session started a new attach")
+		default:
+		}
+	})
 }

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/state"
 	"github.com/yiplee/go-bb-browser/internal/store"
 	"github.com/yiplee/go-bb-browser/internal/timeout"
@@ -46,6 +47,13 @@ type Server struct {
 	obsStore *state.TabObsStore
 	obsSink  *obsSink
 	tabIdle  *state.TabIdleTracker
+
+	// obsLifeMu orders target releases against observation registration. It is
+	// held only for map/registry updates, never across CDP or a release.
+	obsLifeMu sync.Mutex
+	// targetReleases has an entry per target id for as long as any release of
+	// that id is still running (see beginTargetReleaseLocked).
+	targetReleases map[target.ID]*targetRelease
 
 	tabMuOps    sync.Mutex
 	tabCDPLocks map[string]*tabLockEntry

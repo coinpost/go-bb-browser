@@ -61,11 +61,55 @@ func (s *Server) enumerateTabs(ctx context.Context, conn tabConn) ([]state.TabSn
 // deliberately not intersected with the snapshot: that set is as stale as the
 // snapshot and would drop a tab the registry just protected.
 func (s *Server) syncTabsFromTargets(tok state.EnumerationToken, infos []*target.Info) []state.TabSnapshot {
+	s.obsLifeMu.Lock()
 	snaps, removed := s.tabs.ApplyEnumeration(tok, infos)
 	for _, tab := range removed {
+		s.beginTargetReleaseLocked(tab.TargetID)
+	}
+	s.obsLifeMu.Unlock()
+	for _, tab := range removed {
 		s.clearRemovedTarget(tab.TargetID)
+		s.endTargetRelease(tab.TargetID)
 	}
 	return snaps
+}
+
+// targetRelease is the completion barrier of every release of one target id
+// that is currently running: done is closed when the last of them has finished.
+type targetRelease struct {
+	running int
+	done    chan struct{}
+}
+
+// beginTargetReleaseLocked announces a release of tid. The caller holds
+// obsLifeMu and makes the announcement in the same critical section as the
+// registry removal that causes it, so there is no moment at which the target is
+// gone from the registry while its release is not yet visible. From here until
+// endTargetRelease the id cannot start a new observation lifecycle: the old
+// buffers stay unreadable to it, and the old release cannot clear new ones.
+func (s *Server) beginTargetReleaseLocked(tid target.ID) {
+	if s.targetReleases == nil {
+		s.targetReleases = make(map[target.ID]*targetRelease)
+	}
+	r := s.targetReleases[tid]
+	if r == nil {
+		r = &targetRelease{done: make(chan struct{})}
+		s.targetReleases[tid] = r
+	}
+	r.running++
+}
+
+func (s *Server) endTargetRelease(tid target.ID) {
+	s.obsLifeMu.Lock()
+	defer s.obsLifeMu.Unlock()
+	r := s.targetReleases[tid]
+	if r == nil {
+		return
+	}
+	if r.running--; r.running == 0 {
+		delete(s.targetReleases, tid)
+		close(r.done)
+	}
 }
 
 // clearRemovedTarget drops per-target state. The keyed operation lock needs no
@@ -88,11 +132,26 @@ func (s *Server) retireTargetObservation(tid target.ID) {
 	}
 }
 
+// removeTargetState releases everything the daemon holds for tid and returns
+// only once that is complete. A missing registry entry does not mean so: the
+// release may have been started by another path (a Target.targetDestroyed event
+// overtaking the reply to Target.closeTarget) and still be running, in which
+// case this call waits for it.
 func (s *Server) removeTargetState(tid target.ID) {
-	if _, ok := s.tabs.RemoveTarget(tid); !ok {
-		return
+	s.obsLifeMu.Lock()
+	_, removed := s.tabs.RemoveTarget(tid)
+	if removed {
+		s.beginTargetReleaseLocked(tid)
 	}
-	s.clearRemovedTarget(tid)
+	running := s.targetReleases[tid]
+	s.obsLifeMu.Unlock()
+	if removed {
+		s.clearRemovedTarget(tid)
+		s.endTargetRelease(tid)
+	}
+	if running != nil {
+		<-running.done
+	}
 }
 
 func (s *Server) reconcileIdleFromLog(snaps []state.TabSnapshot) {

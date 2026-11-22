@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -104,24 +105,67 @@ var errObservationTargetGone = errors.New("target released while enabling observ
 
 // enableObservation starts the target's observation lifecycle: it registers the
 // buffers explicitly (events for unregistered targets are rejected) and then
-// attaches the observer.
+// attaches the observer. The caller holds the tab's keyed lock, so at most one
+// call runs per target.
 //
 // Target removal does not take the keyed tab lock, so it can run concurrently.
-// Removal drops the registry entry before retiring observation, and this
-// function registers before checking the registry; whichever side runs second
-// therefore still sees the other's state and retires it, leaving no buffers or
-// observer behind for a released target.
+// Registration first waits for every release of the same target id that is
+// still running, so a reused id never sees the buffers of its previous
+// lifecycle and that release never clears the new ones. Afterwards the
+// lifecycle is confirmed: if the target left the registry, or a release took
+// the buffers, while the observer was attaching, whatever this call set up is
+// retired again, leaving no buffers or observer behind for a released target.
 func (s *Server) enableObservation(ctx context.Context, conn tabConn, tid target.ID, kind browser.ObservationKind) error {
-	if s.obsStore != nil {
-		s.obsStore.RegisterTarget(tid)
+	created, err := s.registerObservation(ctx, tid)
+	if err != nil {
+		return err
 	}
-	var err error
 	if sess, ok := conn.(*browser.Session); ok && s.obsSink != nil {
 		err = sess.EnsureObservation(ctx, tid, kind, s.obsSink, s.logger)
 	}
-	if _, present := s.tabs.ShortForTarget(tid); !present {
+	s.obsLifeMu.Lock()
+	_, live := s.tabs.ShortForTarget(tid)
+	if live && s.targetReleases[tid] != nil {
+		live = false
+	}
+	if live && s.obsStore != nil && !s.obsStore.HasTarget(tid) {
+		live = false
+	}
+	switch {
+	case !live:
+		s.beginTargetReleaseLocked(tid)
+	case err != nil && created:
+		// The first attach failed: take back the registration this call made.
+		// Buffers that existed before belong to a working observation.
+		s.obsStore.ClearTarget(tid)
+	}
+	s.obsLifeMu.Unlock()
+	if !live {
 		s.retireTargetObservation(tid)
+		s.endTargetRelease(tid)
 		return errObservationTargetGone
 	}
 	return err
+}
+
+// registerObservation registers tid's buffers once no release of that id is
+// running, and reports whether it created them.
+func (s *Server) registerObservation(ctx context.Context, tid target.ID) (created bool, err error) {
+	for {
+		s.obsLifeMu.Lock()
+		running := s.targetReleases[tid]
+		if running == nil {
+			if s.obsStore != nil {
+				created = s.obsStore.RegisterTarget(tid)
+			}
+			s.obsLifeMu.Unlock()
+			return created, nil
+		}
+		s.obsLifeMu.Unlock()
+		select {
+		case <-running.done:
+		case <-ctx.Done():
+			return false, fmt.Errorf("waiting for the target's previous release: %w", ctx.Err())
+		}
+	}
 }

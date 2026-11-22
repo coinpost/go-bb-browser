@@ -138,3 +138,30 @@ func TestObsStoreSingleDomainClearKeepsLiveTarget(t *testing.T) {
 		t.Fatalf("buckets = %d, want 1", n)
 	}
 }
+
+// RegisterTarget tells a new lifecycle from an existing one, so a caller can
+// take back only the registration it made.
+func TestRegisterTargetReportsNewLifecycle(t *testing.T) {
+	s := NewTabObsStore()
+	const id = target.ID("TAB")
+	if s.HasTarget(id) || s.RegisterTarget("") || s.TargetCount() != 0 {
+		t.Fatal("empty store reports a registered target")
+	}
+	if !s.RegisterTarget(id) || !s.HasTarget(id) {
+		t.Fatal("first registration did not create the target")
+	}
+	s.PushNetwork(id, 1, json.RawMessage(`{}`))
+	if s.RegisterTarget(id) {
+		t.Error("registering a live target reported a new lifecycle")
+	}
+	if events, _, _ := s.QueryNetwork(id, 0); len(events) != 1 {
+		t.Errorf("re-registration dropped buffered events: %d left", len(events))
+	}
+	s.ClearTarget(id)
+	if s.HasTarget(id) || !s.RegisterTarget(id) {
+		t.Error("cleared target did not start a new lifecycle")
+	}
+	if events, _, _ := s.QueryNetwork(id, 0); len(events) != 0 {
+		t.Errorf("new lifecycle sees %d old event(s)", len(events))
+	}
+}

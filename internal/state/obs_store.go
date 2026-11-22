@@ -48,21 +48,30 @@ func NewTabObsStoreWithCaps(netCap, consCap, errCap int) *TabObsStore {
 // way to create its rings: Push* never creates them, so events arriving before
 // registration or after ClearTarget / SyncPresence are rejected instead of
 // rebuilding buffers for a released target (INV-6). Registering a target that
-// is already registered keeps its buffered events.
-func (s *TabObsStore) RegisterTarget(id target.ID) {
+// is already registered keeps its buffered events. It reports whether this
+// call created the rings, i.e. started a new lifecycle.
+func (s *TabObsStore) RegisterTarget(id target.ID) bool {
 	if id == "" {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.targets[id] != nil {
-		return
+		return false
 	}
 	s.targets[id] = &targetObsRings{
 		net:  newRing(s.netCap),
 		cons: newRing(s.consCap),
 		err:  newRing(s.errCap),
 	}
+	return true
+}
+
+// HasTarget reports whether the target currently owns observation rings.
+func (s *TabObsStore) HasTarget(id target.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.targets[id] != nil
 }
 
 // TargetCount reports how many targets currently own observation rings.
