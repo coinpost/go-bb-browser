@@ -114,3 +114,17 @@ notes:
 - 安装：无；已有Go 1.27.4及固定依赖，无清单或锁文件变更。测试HOME、缓存和诊断文件隔离于本run TMPDIR，仅本地服务；证据保留于本run evidence/FT13-round2-review。
 - 未检查：真实Chrome/CDP、Docker、systemd；未启动浏览器或操作用户窗口，无UI改动。严格并发均摊仅覆盖上述确定性交错，不保证任意并发负载差≤1。
 - 状态：第2/3轮，review/ → ready/；owner可查看分支及非阻断P3。未合并main、未发布。
+
+
+## factory · 2026-11-22 12:37
+owner 要求将 ready 项全部 ship；本项已合并并推送 main。
+
+merge: d59e7724371a011b0009acef53c096800ef4aba6
+main: e63a15c1c8a64c3c1b6a501d965bf17a65025bd3
+tag: 无；按 ship=[merge,push]，未打 tag、未触发 tag 发布。
+
+验证：每项合并后均执行完整 gofmt、vet、无缓存 go test -race -count=1 ./...；最终累计 main 再次通过（11个测试包、1个无测试包）。manager 核验审查 head 与远端分支一致，所有批准分支均为最终 main 祖先；保护路径无差异，diff --check 通过、工作树干净。FT19/FT20 冲突由编码代理解决，保留完整 target 生命周期、无 RPC 历史保留、日志换行恢复及私有权限语义，相关测试适配后通过。
+
+关联 issue/PR：无 source 或 owner 明确关联，无关闭对象。分支保留：配置不含 clean。安装：无。测试使用已有 Go1.27.4，HOME/缓存/TMPDIR 隔离、固定模块离线恢复。真实 Chrome/CDP、Docker、systemd 未验证；既有审查非阻塞 notes 未额外修复。
+
+ready/ → done/。FT28 等非 ready 项不在本次范围。

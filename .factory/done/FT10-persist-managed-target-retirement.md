@@ -117,3 +117,17 @@ Codex 只读审查 origin/main@7223e5a...HEAD 全部13个变更文件。上轮�
 安装：无新增工具/非固定依赖，使用现有Go1.27.4和固定模块；测试HOME、缓存、overlay与基线快照均隔离在本run tmp并清理。未验证真实非headless Chrome/CDP、Docker、systemd。无source或owner签名关联issue/PR，无GitHub评论。
 
 第2/3轮审查通过，review/ → ready/；owner请关注上述生命周期、别名竞争及写盘失败的非阻塞风险。本次未修改代码、未合并main、未发布。
+
+
+## factory · 2026-11-22 12:37
+owner 要求将 ready 项全部 ship；本项已合并并推送 main。
+
+merge: 2141d3b8cf66ecfcaba04e59b914ffa9945c3dc5
+main: e63a15c1c8a64c3c1b6a501d965bf17a65025bd3
+tag: 无；按 ship=[merge,push]，未打 tag、未触发 tag 发布。
+
+验证：每项合并后均执行完整 gofmt、vet、无缓存 go test -race -count=1 ./...；最终累计 main 再次通过（11个测试包、1个无测试包）。manager 核验审查 head 与远端分支一致，所有批准分支均为最终 main 祖先；保护路径无差异，diff --check 通过、工作树干净。FT19/FT20 冲突由编码代理解决，保留完整 target 生命周期、无 RPC 历史保留、日志换行恢复及私有权限语义，相关测试适配后通过。
+
+关联 issue/PR：无 source 或 owner 明确关联，无关闭对象。分支保留：配置不含 clean。安装：无。测试使用已有 Go1.27.4，HOME/缓存/TMPDIR 隔离、固定模块离线恢复。真实 Chrome/CDP、Docker、systemd 未验证；既有审查非阻塞 notes 未额外修复。
+
+ready/ → done/。FT28 等非 ready 项不在本次范围。
