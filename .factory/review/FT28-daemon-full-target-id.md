@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 2
+round: 3
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -130,3 +130,18 @@ notes:
 Codex 独立审查 origin/main@e63a15c...HEAD，涵盖完整长 ID 实现、第 2 轮修复及 main 合并冲突处理。全量 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过，Go 1.27.4。上轮原始 8 子用例在修复前 3576461 全失败、HEAD 带 race 重复 20 次全通过；额外临时诊断复现上述遗漏和新回归。FT10 集成检查：16 个受管目标全部 idle 关闭后，无残留 managed_tab_open，重放恢复数为 0，基线和 HEAD 均通过；target 字段日志恢复正常，旧 tab/首轮 target_id 日志保守跳过。上轮恢复与销毁并发 P2 未提级。
 无新增工具或依赖安装；测试隔离 HOME/TMPDIR/GOCACHE，复用已有模块缓存，GOPROXY=off、GOSUMDB=off，无外网访问。未验证真实 Chrome、Go 1.26 或跨 Chrome 进程 ID 唯一性。工作树干净，无代码修改。
 round 2/3，review/ → new/，下一轮修复 fix 列表；未合并 main、未发布。
+
+
+## factory · plan · 2026-11-22 15:07
+第 3 轮补充：仅修最新 review 的 P1。每次删除通知都刷新最后删除代数，包括已删除/未登记目标；保持 RemoveTarget 返回值及清理语义，删除记忆有界。永久回归固定 close(A) → 取得仍含 A 的枚举快照 → destroyed(A) → 放行，三种 clear 拒绝 A、同后缀 B 不受影响；覆盖重复删除、有界性、溢出与后续当前枚举。先红后绿、重复 race 及全量检查。P2/P3 notes 不扩入本轮。按 owner 明确优先 FT28 的调度覆盖选择本项。
+
+## factory · 2026-11-22 15:07
+Claude Code 完成第 3/3 轮，提交 a7bbb077d6f2987a6e7128d54bd32687d17027b2。origin/main@e63a15c 已为祖先，本轮无需合并；未合并其他 factory 分支。
+- 每次 RemoveTarget 均推进删除代数；重复通知更新同一 id 的槽位并移动至队尾，不挤出其他删除记录。removedLog/removedGen 一一对应，最多 1024 个 id；溢出保守策略不变。仅修改 registry、回归、测试 fake CDP 及 AGENTS 相关说明。
+- 红证据：TestRepeatedRemovalRefreshesRemovalGeneration、TestRepeatedRemovalOfNeverRegisteredTargetRefreshes、TestRepeatedRemovalStaysBounded，以及 TestEnumerationAfterCloseDoesNotReviveTabDestroyedMeanwhile 四入口（tab_list/tab_focus/tab_select_other_tab/resolveTab_fallback）在生产修复前失败，修复后通过。daemon 用例验证三种 clear 拒绝旧 A、同后缀 B 缓冲与存活状态不变。
+- TestRepeatedRemovalSurvivesOverflow 和 TestEnumerationAfterCloseListsLingeringTargetUntilDestroyed 在旧代码本就通过，不算红证据。当前枚举在 close 后、destroyed 到达前仍可发现浏览器继续报告的 A，为既有行为，已明确固定；真实 Chrome 是否存在该时序未验证。
+- coder 定向 race 重复 20 次通过，全量通过；manager 独立隔离 HOME/GOCACHE/TMPDIR，GOPROXY=off、GOSUMDB=off 运行 test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./... 全通过（Go 1.27.4，11 个测试包、1 个无测试包）。diff --check 通过，never 路径无修改，工作树干净。红绿与全量证据保留在本机 build run evidence/FT28-round3/ 下 red.log、green.log、race-repeat.log、full.log、manager-full.log。
+- 安装：无；go.mod/go.sum 未变，复用已有模块缓存，不访问真实外网。
+- 未验：真实 Chrome/CDP（仅 fake CDP/stub）、Go 1.26、Docker/systemd 真实运行、跨 Chrome 会话 ID 唯一性。无 UI 变更，未启动浏览器或操作用户窗口。
+- 最新 review 的 P2/P3（删除历史溢出导致不确定目标被持久退役、CLI 裁剪不透明 ID、残留文档示例）未作为本轮额外修复，仍待 owner/独立 review 注意。
+状态：代码已推送，new/ → review/，round 3/3，待独立审查；本轮仅 build，未合并 main、未发布。
