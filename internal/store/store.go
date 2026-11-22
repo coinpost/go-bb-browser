@@ -68,7 +68,6 @@ type Store struct {
 	maxLogBytes int64
 	seq         atomic.Uint64
 	managed     map[string]managedEntry // keyed by full CDP target id
-	memLogs     []LogRecord
 	logger      *slog.Logger
 	inMemory    bool
 	closed      bool
@@ -270,6 +269,8 @@ func (s *Store) NextSeq() (uint64, error) {
 // managed-tab membership (see RegisterManagedTab / RetireManagedTarget); a
 // successful tab-related line only refreshes the last-activity time of the
 // managed tab whose full target id equals rec.Target.
+// In-memory mode validates the record and updates activity the same way, but
+// discards the line instead of retaining it.
 func (s *Store) AppendRPC(rec LogRecord) error {
 	if s == nil {
 		return fmt.Errorf("store not initialized")
@@ -369,7 +370,8 @@ func (s *Store) appendLocked(rec LogRecord) error {
 	applyManagedUpdate(s.managed, rec)
 
 	if s.inMemory {
-		s.memLogs = append(s.memLogs, rec)
+		// No history is kept: nothing reads it, and retaining every record
+		// (and its body) would grow without bound under long-running RPC.
 		return nil
 	}
 	if s.logFile == nil {
