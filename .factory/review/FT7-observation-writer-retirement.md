@@ -268,3 +268,22 @@ owner 本次明确要求：「补充合理边界，把任务移回 new 再来一
 未检查：真实非 headless Chrome/CDP、真实 loadingFailed 流、真实完整 ID 复用频率、生产默认超时的迟到回包、Docker、运行中的 systemd；未启动 Chrome、未操作用户窗口；click/fill 等 RPC 未注入短 alias 易主调度。
 
 状态：代码已推送，new/ → review/，round=5。owner 仅授权额外一次构建，max_rounds=3 保持不变，不自动追加修复；等待独立 review，未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 18:38
+head: 209ee623974ba0a5df585f4743bb4e21ef273ec5
+verdict: fix
+fix:
+- [P1] internal/daemon/tab_idle.go:169: 启动首次枚举发现目标消失并执行退役时死锁。ListenAndServe 持 tabMu 写锁，退役经 tabConn 再取同锁读锁，HTTP listener 无法启动，取消也无法解开。不同完整 ID 的两个页面在启动期关闭即可复现，HEAD/main 各 3/3。将已连接 Session 传入初始对账，或缩小发布连接的锁范围，保留先停 writer 后清桶契约。
+- [P1] internal/daemon/rpc_observation.go:244: tab_list 的旧快照在用户关闭及 observer/桶清理完成后重新登记死 target；随后 network 查询在失败 attach 回包前重建桶，production sink 的迟到 Record 被接受。无完整 ID 复用；HEAD 3/3 重建，main 同样恢复旧别名但不建桶，错误返回后 HEAD 才回滚桶。internal/state/tab_registry.go:199 的正向枚举登记须受请求开始后删除约束，丢弃或刷新失效旧快照，保证已释放 ID 不被迟到查询重新建桶。
+notes:
+- [P2] internal/browser/observer.go:164: 超时初始化出表后退役无法找到；同一活页重试 8 次留下 8 个未回 attach/等待协程（main 1 次 attach）。另 4 个不同 ID 在 session 已知、Runtime.enable 挂起时超时并销毁，放行命令回包后 HEAD 仍有 4 个初始化等待，main 为 0。应保留可发现的未决初始化、合并/约束重试，已知 session 且确认销毁后取消剩余初始化。此增长诊断使用 25ms 超时，不冒称生产 60s 时限实测。
+- [P2] internal/browser/session.go:613: Close 跨 attach 回包仍可残留远端 session；internal/browser/observer.go:124 的域初始化仍可在 Close 返回后发 Network.enable。HEAD/main 均复现；HEAD 正确返回 RPC 错误并回滚首次桶，daemon 正常退出/连接结束限制影响。需保留回包清理所有权并将域激活关联退役取消。
+- [P2] internal/daemon/tab_idle.go:326: 显式 tab_close 收到明确 No target with given id found 后跳过退役，销毁通知缺失/延迟时保留登记、桶和旧事件，HEAD/main 均 3/3；后续枚举/通知可清理。应同 idle 路径在 ErrorTargetGone 时释放原登记，同时保留现有 RPC 错误。
+
+Codex 独立只读审查 origin/main@2be49f8...209ee62，无可用 review-code skill。严格使用 owner 17:58 边界：完整 CDP ID 不复用、允许不同完整 ID 的短 alias 碰撞；未将 17:41 人为同完整 ID 复用的五项 P1 沿用为阻塞。上述两项 P1 均无需完整 ID 复用，属于初始化/枚举/释放/迟到建桶的范围内缺口；main 已有的死锁明确标记，非宣称本轮引入。
+HEAD 与干净 main 的配置 gofmt/vet/go test -race ./... 均通过（11 个有测试包、1 个无测试包），Go 1.27.4。browser/daemon/state 整包 -race -count=5 通过，永久回归覆盖在途 writer、Close/Forget、并发 Close、关闭应答、四条不同 ID 关闭路径 churn、活页三域/clear、拒绝一次 detach 和 alias 审计。生产默认 60s 超时、回包实际延迟 365 秒后的重试仅余一个远端 session，HEAD/main 均通过。完整配置通过不覆盖新增诊断缺陷。
+manager 核对诊断源码/全量日志，独立运行保留复现脚本，HEAD/main 各 -race -count=3 重现两项 P1 及所列资源/关闭诊断；没有另行重复全量。工作树干净、无代码修改或提交。无工具/依赖安装；隔离 HOME/TMPDIR/缓存，使用已有 pin 模块，GOPROXY=off、GOSUMDB=off，无真实外网。
+证据保留本机 review run evidence/FT7-209ee62/：REVIEW.md、source/、reproduce.zsh、configured.log、configured-main.log、repeat.log、barriers.log、late-head/main.log、diagnostics-head/main.log、startup-head/main.log、release-head/main.log。诊断使用真实 Session+daemon 与回环 CDP 桩；startup overlay 仅增加首次枚举前调度屏障，未改生产判断；临时诊断尚非永久回归。
+未验：真实非 headless Chrome/CDP、真实 loadingFailed、Chrome 完整 ID 实际复用频率、Docker、运行中 systemd、Go 1.26；未启动浏览器或操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
+round=5，已超过 max_rounds=3；owner 仅授权本次额外构建，不自动追加。发现 P1，留在 review/ 等 owner 决定；若继续修复请追加说明并移至 new/。仅 review，未合并 main、未发布。
