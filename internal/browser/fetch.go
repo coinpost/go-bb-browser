@@ -22,7 +22,7 @@ func (s *Session) FetchPageContext(ctx context.Context, tabID target.ID, rawURL,
 	}
 	tabCtx, err := s.tabChromeCtxContext(ctx, tabID)
 	if err != nil {
-		return nil, err
+		return nil, wrapCDPError("Runtime.evaluate", tabID, err)
 	}
 	rawQ, err := json.Marshal(rawURL)
 	if err != nil {
@@ -92,7 +92,7 @@ func (s *Session) FetchPageContext(ctx context.Context, tabID target.ID, rawURL,
 		return p.WithAwaitPromise(true).WithReturnByValue(true)
 	}))
 	if err != nil {
-		return nil, err
+		return nil, wrapCDPError("Runtime.evaluate", tabID, err)
 	}
 	return json.RawMessage(raw), nil
 }

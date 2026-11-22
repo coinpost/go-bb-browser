@@ -56,6 +56,15 @@ type Store struct {
 	memLogs     []LogRecord
 	logger      *slog.Logger
 	inMemory    bool
+
+	// needNewline is set when the log does not end on a line boundary (complete
+	// last record without '\n', or a fragment left by a short write). The next
+	// write must emit a separating '\n' first so records never glue together.
+	needNewline bool
+
+	// writeLog overrides the raw log write (tests inject short writes/errors).
+	// nil uses f.Write.
+	writeLog func(f *os.File, p []byte) (int, error)
 }
 
 // LogRecord is one append-only RPC log line.
@@ -115,10 +124,11 @@ func Open(cfg OpenConfig) (*Store, error) {
 	}
 
 	managed := make(map[string]time.Time)
-	if err := replayLog(f, logger, func(rec LogRecord) error {
+	needNewline, err := replayLog(f, logger, func(rec LogRecord) error {
 		applyManagedUpdate(managed, rec)
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("replay rpc log: %w", err)
 	}
@@ -126,6 +136,7 @@ func Open(cfg OpenConfig) (*Store, error) {
 	s.logFile = f
 	s.logPath = logPath
 	s.managed = managed
+	s.needNewline = needNewline
 	if fi, err := f.Stat(); err == nil {
 		s.logBytes = fi.Size()
 	}
@@ -144,52 +155,53 @@ func dirWritable(dir string) bool {
 // replayLog reads the full log from the start, invoking fn per record, then
 // leaves the file positioned at the end for subsequent appends.
 //
-// A corrupt/truncated JSON line stops replay: records already applied are kept,
-// the bad line and anything after it are truncated, and a warning is logged.
-// This matches crash-truncated last lines without failing daemon startup.
-func replayLog(f *os.File, logger *slog.Logger, fn func(LogRecord) error) error {
+// Records are separated by physical newlines. A newline-terminated line that
+// does not parse is logged and skipped (left on disk); independent records
+// after it are still replayed. No attempt is made to split glued records.
+//
+// The final line without a trailing newline is either a complete record whose
+// newline never reached disk — it is replayed and needNewline is returned true
+// so the next append restores the line boundary first — or an incomplete
+// (crash-truncated) record, which is truncated away.
+func replayLog(f *os.File, logger *slog.Logger, fn func(LogRecord) error) (needNewline bool, err error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
+		return false, err
 	}
 
-	var goodEnd int64
-	var offset int64
+	var offset int64 // start of the line being read
 	rd := bufio.NewReader(f)
 	for {
 		line, err := rd.ReadBytes('\n')
-		if len(line) > 0 {
-			trimmed := bytes.TrimSpace(line)
-			if len(trimmed) > 0 {
-				var rec LogRecord
-				if jerr := json.Unmarshal(trimmed, &rec); jerr != nil {
-					if logger != nil {
-						logger.Warn("rpc log corrupt; abandoning remainder", "err", jerr, "offset", goodEnd)
-					}
-					if terr := f.Truncate(goodEnd); terr != nil {
-						return fmt.Errorf("truncate corrupt rpc log at %d: %w", goodEnd, terr)
-					}
-					if _, seekErr := f.Seek(0, io.SeekEnd); seekErr != nil {
-						return seekErr
-					}
-					return nil
-				}
-				if fnErr := fn(rec); fnErr != nil {
-					_, _ = f.Seek(0, io.SeekEnd)
-					return fnErr
-				}
-			}
-			offset += int64(len(line))
-			goodEnd = offset
-		}
-		if err == io.EOF {
-			if _, seekErr := f.Seek(0, io.SeekEnd); seekErr != nil {
-				return seekErr
-			}
-			return nil
-		}
-		if err != nil {
+		if err != nil && err != io.EOF {
 			_, _ = f.Seek(0, io.SeekEnd)
-			return err
+			return false, err
+		}
+		terminated := err == nil
+		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			var rec LogRecord
+			if jerr := json.Unmarshal(trimmed, &rec); jerr != nil {
+				if !terminated {
+					if logger != nil {
+						logger.Warn("rpc log ends with incomplete record; truncating it", "err", jerr, "offset", offset)
+					}
+					if terr := f.Truncate(offset); terr != nil {
+						return false, fmt.Errorf("truncate incomplete rpc log tail at %d: %w", offset, terr)
+					}
+					_, seekErr := f.Seek(0, io.SeekEnd)
+					return false, seekErr
+				}
+				if logger != nil {
+					logger.Warn("rpc log line corrupt; skipping it", "err", jerr, "offset", offset)
+				}
+			} else if fnErr := fn(rec); fnErr != nil {
+				_, _ = f.Seek(0, io.SeekEnd)
+				return false, fnErr
+			}
+		}
+		offset += int64(len(line))
+		if !terminated {
+			_, seekErr := f.Seek(0, io.SeekEnd)
+			return len(line) > 0, seekErr
 		}
 	}
 }
@@ -263,10 +275,9 @@ func (s *Store) AppendRPC(rec LogRecord) error {
 	if s.logFile == nil {
 		return fmt.Errorf("log file not open")
 	}
-	if _, err := s.logFile.Write(line); err != nil {
+	if err := s.writeLinesLocked(line); err != nil {
 		return err
 	}
-	s.logBytes += int64(len(line))
 	if s.maxLogBytes > 0 && s.logBytes >= s.maxLogBytes {
 		if err := s.rotateLocked(); err != nil && s.logger != nil {
 			s.logger.Warn("rpc log rotation failed", "err", err)
@@ -303,6 +314,7 @@ func (s *Store) rotateLocked() error {
 	}
 	s.logFile = f
 	s.logBytes = 0
+	s.needNewline = false
 	return s.writeManagedSnapshotLocked()
 }
 
@@ -333,9 +345,47 @@ func (s *Store) writeManagedSnapshotLocked() error {
 		buf.Write(data)
 		buf.WriteByte('\n')
 	}
-	n, err := s.logFile.Write(buf.Bytes())
-	s.logBytes += int64(n)
+	return s.writeLinesLocked(buf.Bytes())
+}
+
+// writeLinesLocked appends p (one or more complete, newline-terminated lines)
+// to the current log. It first restores the line boundary if an earlier write
+// or the replayed tail left the file mid-line, and refuses to append while
+// that fails. logBytes tracks the bytes actually written, and a short write
+// re-arms the boundary repair for the next call. Caller holds s.mu.
+func (s *Store) writeLinesLocked(p []byte) error {
+	if s.needNewline {
+		n, err := s.rawWriteLocked([]byte{'\n'})
+		if n > 0 {
+			s.logBytes += int64(n)
+			s.needNewline = false
+		} else if err == nil {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return fmt.Errorf("restore rpc log line boundary: %w", err)
+		}
+	}
+	n, err := s.rawWriteLocked(p)
+	if n > len(p) {
+		n = len(p)
+	}
+	if n > 0 {
+		s.logBytes += int64(n)
+		s.needNewline = p[n-1] != '\n'
+	}
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
 	return err
+}
+
+// rawWriteLocked performs one raw write to the current log. Caller holds s.mu.
+func (s *Store) rawWriteLocked(p []byte) (int, error) {
+	if s.writeLog != nil {
+		return s.writeLog(s.logFile, p)
+	}
+	return s.logFile.Write(p)
 }
 
 // ReplayManagedTabActivity returns managed tab short ids and last activity, rebuilt by replaying the log at startup.

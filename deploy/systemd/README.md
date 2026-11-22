@@ -23,6 +23,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now bb-daemon.service
 ```
 
+`enable` links the unit into the user manager's `default.target` (the unit's
+`[Install]` section), so it starts with your user session. If you installed an
+earlier copy of the unit without `[Install]`, repeat steps 3 and 4.
+
 ## Verify
 
 ```bash

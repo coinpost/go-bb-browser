@@ -9,127 +9,69 @@ import (
 	"strings"
 )
 
-var reAnonAsyncHead = regexp.MustCompile(`(?s)\basync\s+function\s*\([^)]*\)\s*\{`)
+var (
+	reExportDefault  = regexp.MustCompile(`^export[ \t\r\n]+default[ \t\r\n]+`)
+	reAnonAsyncStart = regexp.MustCompile(`^async[ \t]+function[ \t\r\n]*\(`)
+)
+
+// adapterRunSuffix invokes the adapter bound by prepareAdapterJS. It starts on a new
+// line so a trailing // comment in the source cannot swallow it, and it refuses to
+// continue when trailing code turned the binding into something other than a function.
+const adapterRunSuffix = `
+;if (typeof __bb_run !== "function") throw new TypeError("bb-browser: adapter source must be a single async function expression");
+return await __bb_run(__args);`
 
 // prepareAdapterJS fixes adapters written as `async function(args) { ... }`, which is a
 // syntax error when nested inside RunScript's outer function (anonymous declaration).
-// It becomes an async function expression assigned to __bb_run, then invoked.
+// The source is kept verbatim: the function expression is bound to __bb_run by a prefix
+// and invoked by a suffix, so nothing in the body is scanned or rewritten.
+//
+// Only the start of the source is inspected, where whitespace and comments can be
+// skipped without a JS lexer: optional comments (such as @meta), an optional
+// `export default`, then `async function (`. Anything else — a script body, a named
+// function, an anonymous function further down — is passed through untouched and runs
+// (or fails to parse) exactly as written.
 func prepareAdapterJS(src []byte) []byte {
 	s := string(src)
-	s = stripExportDefaultAfterMeta(s)
-	s = rewriteAnonymousAsyncAdapter(s)
-	return []byte(s)
-}
-
-func stripExportDefaultAfterMeta(s string) string {
+	head := skipLeadingJSTrivia(s)
+	rest := s[head:]
 	// ESM default export is invalid inside our wrapper; some adapters use it.
-	s = regexp.MustCompile(`(\*/\s*)export\s+default\s+`).ReplaceAllString(s, "$1")
-	s = regexp.MustCompile(`(?s)^\s*export\s+default\s+`).ReplaceAllString(s, "")
-	return s
+	if loc := reExportDefault.FindStringIndex(rest); loc != nil {
+		rest = rest[loc[1]:]
+	}
+	if !reAnonAsyncStart.MatchString(rest) {
+		return []byte(s[:head] + rest)
+	}
+	return []byte(s[:head] + "const __bb_run = " + rest + adapterRunSuffix)
 }
 
-func rewriteAnonymousAsyncAdapter(s string) string {
-	loc := reAnonAsyncHead.FindStringIndex(s)
-	if loc == nil {
-		return s
-	}
-	bodyOpen := loc[1] - 1
-	if bodyOpen < 0 || s[bodyOpen] != '{' {
-		return s
-	}
-	closeBrace := matchingJSBrace(s, bodyOpen)
-	if closeBrace < 0 {
-		return s
-	}
-	po := paramListOpenParen(s, loc[0], loc[1])
-	if po < 0 {
-		return s
-	}
-	var b strings.Builder
-	b.WriteString(s[:loc[0]])
-	b.WriteString("const __bb_run = async function")
-	b.WriteString(s[po:closeBrace])
-	b.WriteString("}; return await __bb_run(__args);")
-	b.WriteString(s[closeBrace+1:])
-	return b.String()
-}
-
-// paramListOpenParen returns the index of '(' starting the formal parameter list
-// for an "async function …" header spanning [hdrStart, hdrEnd).
-func paramListOpenParen(s string, hdrStart, hdrEnd int) int {
-	seg := s[hdrStart:hdrEnd]
-	fi := strings.Index(seg, "function")
-	if fi < 0 {
-		return -1
-	}
-	j := hdrStart + fi + len("function")
-	for j < hdrEnd && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
-		j++
-	}
-	if j < hdrEnd && s[j] == '(' {
-		return j
-	}
-	return -1
-}
-
-// matchingJSBrace returns the index of the `}` that matches the `{` at open, or -1.
-// It skips //, /* */, and string literals (", ', `) with basic escape handling.
-func matchingJSBrace(s string, open int) int {
-	if open < 0 || open >= len(s) || s[open] != '{' {
-		return -1
-	}
-	depth := 1
-	i := open + 1
+// skipLeadingJSTrivia returns the offset of the first byte of s that is neither
+// whitespace nor part of a comment. At the very start of a script `//` and `/*` can
+// only open comments, so no further lexing is needed. An unterminated block comment
+// is not skipped.
+func skipLeadingJSTrivia(s string) int {
+	i := 0
 	for i < len(s) {
-		// Line comment
-		if i+1 < len(s) && s[i] == '/' && s[i+1] == '/' {
-			i += 2
-			for i < len(s) && s[i] != '\n' {
-				i++
-			}
-			continue
-		}
-		// Block comment
-		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
-			i += 2
-			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(s) {
-				i += 2
-			}
-			continue
-		}
-		c := s[i]
-		// String / template (no nested ${} — good enough for adapters)
-		if c == '"' || c == '\'' || c == '`' {
-			quote := c
+		switch {
+		case s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r':
 			i++
-			for i < len(s) {
-				if s[i] == '\\' && i+1 < len(s) {
-					i += 2
-					continue
-				}
-				if s[i] == quote {
-					i++
-					break
-				}
-				i++
+		case strings.HasPrefix(s[i:], "//"):
+			nl := strings.IndexByte(s[i:], '\n')
+			if nl < 0 {
+				return len(s)
 			}
-			continue
-		}
-		switch c {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
+			i += nl + 1
+		case strings.HasPrefix(s[i:], "/*"):
+			end := strings.Index(s[i+2:], "*/")
+			if end < 0 {
 				return i
 			}
+			i += 2 + end + 2
+		default:
+			return i
 		}
-		i++
 	}
-	return -1
+	return i
 }
 
 // RunScript wraps adapter source as an async IIFE for bb-browser run.

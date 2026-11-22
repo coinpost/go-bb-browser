@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/chromedp/cdproto/target"
@@ -30,6 +29,10 @@ const (
 
 // isCDPSessionLost reports errors that mean the browser CDP websocket/session is gone.
 // context.Canceled is excluded — that is usually request shutdown, not CDP loss.
+//
+// browser.ErrorKindOf is the single authority: it trusts typed errors (CDPError,
+// JS exceptions, protocol replies) before any message text. Do not match on
+// err.Error() here — page-controlled text reaches this error chain.
 func isCDPSessionLost(err error) bool {
 	if err == nil {
 		return false
@@ -40,22 +43,7 @@ func isCDPSessionLost(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if browser.ErrorKindOf(err) == browser.ErrorTransport {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "eof"),
-		strings.Contains(msg, "broken pipe"),
-		strings.Contains(msg, "connection reset"),
-		strings.Contains(msg, "use of closed network connection"),
-		strings.Contains(msg, "websocket"),
-		strings.Contains(msg, "channel closed"),
-		strings.Contains(msg, "could not dial"):
-		return true
-	default:
-		return false
-	}
+	return browser.ErrorKindOf(err) == browser.ErrorTransport
 }
 
 // connectBrowserLocked attaches a new chromedp session. Caller must hold s.tabMu.
@@ -74,9 +62,12 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
 	listCtx, cancel := context.WithTimeout(ctx, timeout.Operation)
+	// runTargetSync is already registering lifecycle events: take the token
+	// before the request so this snapshot cannot remove what they register.
+	tok := s.beginTargetEnumeration()
 	targets, terr := sess.PageTargetsContext(listCtx)
 	cancel()
-	snaps := s.syncInitialTargets(sess, targets, terr)
+	snaps := s.syncInitialTargets(sess, tok, targets, terr)
 	// Perform the initial managed-tab recovery. If target enumeration failed,
 	// runTargetSync repeats this reconciliation after its successful retry.
 	s.reconcileIdleFromLog(snaps)
@@ -91,9 +82,9 @@ type targetDirtyMarker interface {
 	MarkTargetDirty()
 }
 
-func (s *Server) syncInitialTargets(marker targetDirtyMarker, targets []*target.Info, err error) []state.TabSnapshot {
+func (s *Server) syncInitialTargets(marker targetDirtyMarker, tok state.EnumerationToken, targets []*target.Info, err error) []state.TabSnapshot {
 	if err == nil {
-		return s.syncTabsFromTargets(targets)
+		return s.syncTabsFromTargets(tok, targets)
 	}
 	if s.logger != nil {
 		s.logger.Warn("list targets after browser connect", "err", err)
@@ -130,10 +121,13 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		}
 		if sess.ConsumeTargetDirty() {
 			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
+			// Token before the request: RPCs (tab_new) keep registering tabs
+			// while this resync is in flight.
+			tok := s.beginTargetEnumeration()
 			infos, err := sess.PageTargetsContext(probe)
 			cancel()
 			if err == nil {
-				snaps := s.syncTabsFromTargets(infos)
+				snaps := s.syncTabsFromTargets(tok, infos)
 				// Reconciliation is idempotent for tabs already tracked in memory and
 				// is required when the startup target enumeration failed.
 				s.reconcileIdleFromLog(snaps)
