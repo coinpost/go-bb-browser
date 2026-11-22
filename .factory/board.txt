@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-2 at your gates | 2 with the agent | 17 done | 10 sent back
-Drawn Nov 22, 15:31 | https://github.com/coinpost/go-bb-browser
+3 at your gates | 1 with the agent | 17 done | 10 sent back
+Drawn Nov 22, 15:37 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2    16h  生命周期事件溢出重同步与优雅关停次序
@@ -14,12 +14,13 @@ NEW (0)                                     avg stay 5h
     Nothing here
 
 REVIEW (3) [!]                              avg stay 15m
-    FT28   24m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
-                兼容 (round 3)
-  * FT7    15m  target释放与观测writer退役同步 (round 3)
+  * FT7    21m  target释放与观测writer退役同步 (round 3)
                 > Decide: fix or take it
-    FT25    1m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+    FT25    5m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败 (round 3)
+  * FT28    1m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+                兼容 (round 3)
+                > Decide: fix or take it
 
 READY (1) [!]                               avg stay 2h
   * FT26    2h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
@@ -27,13 +28,13 @@ READY (1) [!]                               avg stay 2h
                 > Check, then ship
 
 DONE (17)
-    FT10    2h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+    FT10    3h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
-    FT13    2h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13    3h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon (round 2)
-    FT19    2h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
+    FT19    3h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
-    FT20    2h  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
+    FT20    3h  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
                 其他用户可读取 fill 文本与 fetch 头中的凭据
     ... 13 more in .factory/done/
 
