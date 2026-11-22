@@ -115,3 +115,21 @@ notes:
 未检查：真实非 headless Chrome/CDP 端到端、真实 loadingFailed 事件流、Docker、systemd；未启动 Chrome，未操作用户窗口。没有单独测试 Session 父 context 取消、attach 刚成功撞上 Close、枚举路径独立 barrier（枚举复用释放登记实现）。原 review evidence 在当前机器未找到，永久回归按 review 描述独立重写。
 
 状态：分支已推送，new/ → review/，第 2/3 轮；仅 build，未进行 review、未合并 main、未发布。
+
+
+## factory · review · 2026-11-22 10:35
+head: 11af2d36e02a8afec65901bb53d39dbae84bfc96
+verdict: fix
+fix:
+- [P1] internal/browser/session.go:557: 旧 observer 退役等待 detach 回包时，同 ID 接替页面已登记；随后 chromedp child 取消再次按 target ID 发 closeTarget，实际关闭新页面。按旧 CDP session ID detach 并安全终结 child，避免对复用 target ID 关页；增加检查真实页面仍存在的协议桩永久回归。HEAD、基线均 3/3 复现。
+- [P1] internal/browser/session.go:484: Session.Close 与 ForgetTarget 未共享 writer 退役屏障；无论谁先摘表，另一方均可在旧 Record 完成前返回，清桶并重注册后放行旧 Record，新桶混入 old.test。Close 摘表时发布共同退役完成信号，并等待已由 ForgetTarget 接管的 writer；两个顺序均需永久回归。HEAD、基线均 3/3 复现。
+- [P1] internal/daemon/rpc_observation.go:157: 查询解析短 ID 后若 targetDestroyed 已完成退役，迟到 registerObservation 仍可重建已释放 target 的桶；等待 attach 失败期间 TargetCount 从 0 回到 1。于 obsLifeMu 下核对解析时生命周期仍有效，再注册和 attach，不可仅检查没有进行中的 release。HEAD 3/3 失败，基线相同调度 3/3 通过。
+- [P1] internal/browser/session.go:126: 首次 attach 在生产默认 60s 超时后，迟到 attachToTarget 回包中的 session ID 丢失，远端 flat session 未 detach；重试成功后存在两个 session。保留有界调用等待及迟到回包清理所有权，按迟到 session ID detach；增加永久回归。HEAD 失败，基线复用原 attach 对照通过。
+- [P1] internal/browser/session.go:98: Close 可漏掉已入表但尚未 Run 的初始化，abort 见 attachDone=nil 未持久记下关闭，Close 返回后仍可开始 attach 并等待整个时限。abort 持久记录关闭，run 发布首次 attach 前检查；覆盖 observer/tab pool 两路径。HEAD、基线均 3/3 复现。
+- [P1] internal/browser/observer.go:125: 首次 Run 成功、域初始化停在 Network.disable 时 Session.Close 已退役 writer，放行回包后首次 network RPC 仍返回成功和 cursor。将域激活成功提交与关闭状态同步，退役赢得竞争则返回关闭错误并回滚首次注册。HEAD、基线均 3/3 复现。
+notes:
+- Codex 只读审查 origin/main@7223e5aa905a70f2147801625bdece0d8893876d...HEAD；未找到 review-code skill，按需求和计划直接复核。未修改工作树、提交、push/fetch 或运行 gh；无安装。四项基线也存在的缺陷与本项生命周期验收直接相关，基线复现已明确标注，不冒称本轮引入。
+- coder 在 HEAD 与临时导出的 main 均执行完整配置检查通过；永久生命周期回归 -race -count=10 通过，额外父 context 取消屏障 3/3 通过。manager 独立隔离 HOME/GOCACHE/TMPDIR、GOPROXY=off 执行 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过，Go 1.27.4，10 个有测试包通过、2 个无测试包；diff --check 通过，工作树干净。现有测试通过不覆盖新诊断失败。
+- 新诊断为只读 overlay，使用真实 browser.Session 和本地回环 CDP 协议桩。stale RPC 在成功解析 ID 后插入调度屏障，并以直接调用同一解析/启用方法交叉验证；before-run 构造已入表尚未执行状态；迟到 attach 使用生产默认 60s。证据保留在本机 review run evidence/FT7-11af2d3/：commands.md、overlay/、diagnostics.log、head-stale-rpc.log、baseline-stale-rpc.log、head-late.log、baseline-late.log、head-browser.log、full.log、main-full.log、manager-full.log。commands.md 说明临时目录清理后的复跑方式；诊断尚非永久回归。
+- 未验证真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、systemd；未启动 Chrome、未操作用户窗口。无链接 issue/PR，故不发 GitHub 评论。
+- 第 2/3 轮发现 P1，review/ → new/，下一轮在原分支修复以上 fix 列表；本轮未改代码、未合并 main、未发布。
