@@ -1,6 +1,6 @@
 ---
 branch: factory/FT22-network-route-failure-rollback
-round: 1
+round: 2
 ---
 # [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
 
@@ -74,3 +74,28 @@ notes:
 安装：无额外工具或未 pin 依赖，仅恢复 go.sum 锁定模块。未找到 review-code skill，按只读 code review 执行。
 未检查：真实非 headless Chrome 的 CDP 事件时序、Docker、systemd；未操作用户窗口。无链接 issue/PR，无需 GitHub 评论。
 状态：第 1/3 轮发现 P1，review/ → new/，下一次 build 在原分支修复；P2/P3 为审查备注。未合并 main、未发布。
+
+
+## factory · plan · 2026-11-22 12:08
+第 2 轮补充计划：
+- Behaviour：路由更新仅按 target 串行，等待支持 context 取消；首次启用失败补偿使用独立短超时，A 补偿阻塞不拖累 B。generation 在 attach/排队前记录，加锁后及提交时再次校验，避免清理后复活。
+- Scope：最新 review 的 P1 及直接相关 P2/P3，限 browser 路由实现与永久回归；不处理其他工厂项。
+- Decisions：补偿独立 1s；监听继续入队，仅暂停本 tab 分派，成功后使用新规则、失败使用旧规则；清空提交遇代次变化返回 Fetch.disable 的 ErrorTargetGone。合并最新 main，不 rebase。
+- Checking：先新增正确行为 barrier 回归并证实旧代码失败，再修复；定向重复 -race 与配置全量检查，测试 HOME/缓存/TMPDIR 隔离，无真实外网依赖。
+
+## factory · 2026-11-22 12:08
+第 2/3 轮完成。合并 main@7223e5a：b40afc7（无冲突）；修复提交 c222eb594dc519e1d409a0979309060ce5258f89。未合并其他 factory 分支。
+
+实现：移除全会话 cdpMu，改为按 target 的可取消更新锁，引用计数回收锁条目；首次 enable 失败补偿 disable 独立 1s deadline。generation 提前捕获并重复校验。更新期间继续接收暂停事件但暂缓该 tab 分派，提交后使用确认规则；其他 tab 不受影响。清空规则提交失去 generation 返回 ErrorTargetGone（Fetch.disable）。
+
+决定与边界：补偿仍未确认时保留无规则监听、放行暂停请求；退役 worker 排空队列。同 tab 的暂停请求可能等待在途 Fetch.enable 到操作超时；远端超时执行与本地确认不能保证原子一致，后续成功更新重新对齐。
+
+永久回归：生产改动前六项正确断言失败，覆盖 A 补偿阻塞 B、等待取消、补偿 deadline、attach 中清理复活、清空时 target 消失、暂停事件错用旧规则。其他 tab 分派守卫原代码已通过，不当作红证据；锁回收测试依赖新字段，修复后新增，无红证据。修复后 21 项路由测试通过，定向 -race -count=20 通过。红绿日志与报告保留于本机 build evidence/FT22-round2/。
+
+检查：Claude Code 执行完整配置命令通过；manager 独立以隔离 HOME/GOPATH/GOCACHE/GOMODCACHE/TMPDIR、GOPROXY=off 运行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./...` 通过，10 个测试包、2 个无测试包。Go 1.27.4，未验证目标 Go 1.26。git diff --check 通过，保护路径无变更，代码工作树干净；独有历史仅本项及 main merge。
+
+安装：无工具或未 pin 依赖安装；go.mod/go.sum 未变，锁定模块从本机缓存离线恢复。一次 go mod download 提示缓存缺 mousetrap v1.1.0 的 .mod；当前平台构建、vet、测试未需要它，均通过。
+
+未检查：真实非 headless Chrome/CDP 时序、分派暂停及 Fetch.disable 后 Chrome 实际恢复行为，仅本地协议桩；Docker、systemd。无 UI 变更，未启动 Chrome，未操作用户窗口。无关联 issue/PR。
+
+状态：代码已推送，new/ → review/，第 2 轮；本次仅 build，未做独立 review、未合并 main、未发布。
