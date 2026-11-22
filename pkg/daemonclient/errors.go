@@ -36,7 +36,7 @@ func (e *UnknownTabError) Error() string {
 
 // InvalidTabIDError is returned when a Pool tab id is malformed or its
 // backend key is not a member of this pool. Pool ids are
-// `<backendKey>:<daemonShortId>`.
+// `<backendKey>:<targetId>` (targetId: the complete CDP target id).
 type InvalidTabIDError struct {
 	Tab    string
 	Reason string
@@ -49,12 +49,12 @@ func (e *InvalidTabIDError) Error() string {
 	if e.Reason != "" {
 		return fmt.Sprintf("daemonclient pool: invalid tab id %q: %s", e.Tab, e.Reason)
 	}
-	return fmt.Sprintf("daemonclient pool: invalid tab id %q (want <backendKey>:<daemonShortId>)", e.Tab)
+	return fmt.Sprintf("daemonclient pool: invalid tab id %q (want <backendKey>:<targetId>)", e.Tab)
 }
 
 // TabCollisionError is returned if tab_new would bind an external tab id already
-// owned by a different backend. Prefixed Pool ids make cross-daemon native
-// short-id collisions distinct; this is belt-and-suspenders only.
+// owned by a different backend. Prefixed Pool ids keep equal target ids on
+// different daemons distinct; this is belt-and-suspenders only.
 type TabCollisionError struct {
 	Tab string
 }

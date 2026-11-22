@@ -246,7 +246,7 @@ func TestPool_tabAffinity(t *testing.T) {
 
 	n1, n2 := poolNative(t, first.Tab), poolNative(t, second.Tab)
 	if tabs := sa.evalTabIDs(); len(tabs) > 0 && tabs[0] != n1 && tabs[0] != n2 {
-		t.Fatalf("unexpected eval on a: %v (daemon must see native short ids, not %q/%q)", tabs, first.Tab, second.Tab)
+		t.Fatalf("unexpected eval on a: %v (daemon must see native native ids, not %q/%q)", tabs, first.Tab, second.Tab)
 	}
 	// Each eval must land only on the daemon that created that tab.
 	if sa.hasEval(n1) == sa.hasEval(n2) && sa.hasEval(n1) {
@@ -443,7 +443,7 @@ func TestPool_perDaemonHeaders(t *testing.T) {
 	}
 }
 
-func TestPool_crossDaemonSameShortIDIsUnambiguous(t *testing.T) {
+func TestPool_crossDaemonSameTargetIDIsUnambiguous(t *testing.T) {
 	a, sa := newFakeDaemon(t, "a")
 	b, sb := newFakeDaemon(t, "b")
 	sa.fixedTab = "dup"
@@ -481,7 +481,7 @@ func TestPool_crossDaemonSameShortIDIsUnambiguous(t *testing.T) {
 		t.Fatal("missing owner for second")
 	}
 	if c1.BaseURL == c2.BaseURL {
-		t.Fatal("same native short id must still pin to distinct backends")
+		t.Fatal("same native native id must still pin to distinct backends")
 	}
 
 	if _, err := p.Eval(ctx, protocol.EvalParams{Tab: first.Tab, Script: "1"}); err != nil {
@@ -497,14 +497,14 @@ func TestPool_crossDaemonSameShortIDIsUnambiguous(t *testing.T) {
 		firstSt, secondSt = sb, sa
 	}
 	if !firstSt.hasEval("dup") || !secondSt.hasEval("dup") {
-		t.Fatal("each daemon must receive eval with the native short id")
+		t.Fatal("each daemon must receive eval with the native native id")
 	}
 	if sa.methodCount(protocol.MethodTabClose)+sb.methodCount(protocol.MethodTabClose) != 0 {
 		t.Fatal("prefixed ids must not close-on-collide")
 	}
 }
 
-func TestPool_crossDaemonSameShortIDOwnerDownStillCreates(t *testing.T) {
+func TestPool_crossDaemonSameTargetIDOwnerDownStillCreates(t *testing.T) {
 	a, sa := newFakeDaemon(t, "a")
 	b, sb := newFakeDaemon(t, "b")
 	sa.fixedTab = "dup"
@@ -542,7 +542,7 @@ func TestPool_crossDaemonSameShortIDOwnerDownStillCreates(t *testing.T) {
 		t.Fatal("second create must not replace the original owner")
 	}
 	if otherSt.methodCount(protocol.MethodTabClose) != 0 || ownerSt.methodCount(protocol.MethodTabClose) != 0 {
-		t.Fatal("must not close either tab when native short ids collide")
+		t.Fatal("must not close either tab when native native ids collide")
 	}
 
 	ownerSt.failRPC.Store(false)
@@ -1022,21 +1022,21 @@ func boundSingleTab(t *testing.T, p *Pool) string {
 
 func poolNative(t *testing.T, tab string) string {
 	t.Helper()
-	_, short, ok := SplitTabID(tab)
+	_, native, ok := SplitTabID(tab)
 	if !ok {
 		t.Fatalf("not a pool tab id: %q", tab)
 	}
-	return short
+	return native
 }
 
 func assertPoolTabID(t *testing.T, p *Pool, tab string) {
 	t.Helper()
-	key, short, ok := SplitTabID(tab)
+	key, native, ok := SplitTabID(tab)
 	if !ok {
 		t.Fatalf("TabNew returned unprefixed id %q", tab)
 	}
-	if short == "" {
-		t.Fatalf("empty daemon short id in %q", tab)
+	if native == "" {
+		t.Fatalf("empty daemon tab id in %q", tab)
 	}
 	found := false
 	for _, k := range p.BackendKeys() {
@@ -1164,14 +1164,77 @@ func TestPool_unknownPrefixedTab(t *testing.T) {
 	}
 }
 
-func TestSplitTabID(t *testing.T) {
-	key, short, ok := SplitTabID("west:abc")
-	if !ok || key != "west" || short != "abc" {
-		t.Fatalf("got %q %q %v", key, short, ok)
+// Pool ids are matched byte for byte. The pool neither trims nor case-folds a
+// reference, and an alias of the daemon part (the old short suffix id) is just
+// another unknown id: none of these reaches any daemon.
+func TestPool_tabIDsMatchExactly(t *testing.T) {
+	const native = "AAAA0000000000000000000000AB1234"
+	a, sa := newFakeDaemon(t, "a")
+	b, sb := newFakeDaemon(t, "b")
+	sa.fixedTab = native
+	sb.fixedTab = "BBBB0000000000000000000000AB1234"
+	p, err := NewPoolBackends(PoolBackend{Key: "west", Client: NewClient(a.URL)}, PoolBackend{Key: "east", Client: NewClient(b.URL)})
+	if err != nil {
+		t.Fatal(err)
 	}
-	key, short, ok = SplitTabID("0:ab:cd")
-	if !ok || key != "0" || short != "ab:cd" {
-		t.Fatalf("rest after first colon: %q %q %v", key, short, ok)
+	ctx := context.Background()
+	var tab string
+	for range 2 {
+		res, err := p.TabNew(ctx, protocol.TabNewParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(res.Tab, "west:") {
+			tab = res.Tab
+		}
+	}
+	if tab != "west:"+native {
+		t.Fatalf("pool tab = %q, want west:%s", tab, native)
+	}
+
+	for _, ref := range []string{
+		native,
+		" " + tab, tab + " ", "\t" + tab + "\n",
+		"west:1234", "west:ab1234", "west:" + native[1:], "west:" + native[:len(native)-1],
+		"west:" + strings.ToLower(native), "WEST:" + native,
+		"west: " + native, "west:" + native + " ",
+		"east:" + native,
+	} {
+		_, err := p.Eval(ctx, protocol.EvalParams{Tab: ref, Script: "1"})
+		var unknown *UnknownTabError
+		var invalid *InvalidTabIDError
+		if !errors.As(err, &unknown) && !errors.As(err, &invalid) {
+			t.Errorf("Eval(%q): err = %v, want UnknownTabError / InvalidTabIDError", ref, err)
+		}
+		if _, ok := p.ClientForTab(ref); ok {
+			t.Errorf("ClientForTab(%q) resolved", ref)
+		}
+		p.ForgetTab(ref) // must not unbind the real tab
+	}
+	if sa.hasAnyEval() || sb.hasAnyEval() {
+		t.Fatalf("inexact ids reached a daemon: west %v east %v", sa.evalTabIDs(), sb.evalTabIDs())
+	}
+
+	if _, err := p.Eval(ctx, protocol.EvalParams{Tab: tab, Script: "1"}); err != nil {
+		t.Fatalf("exact id: %v", err)
+	}
+	if got := sa.evalTabIDs(); len(got) != 1 || got[0] != native || sb.hasAnyEval() {
+		t.Fatalf("exact id routed to west %v east %v, want west [%s]", got, sb.evalTabIDs(), native)
+	}
+}
+
+func TestSplitTabID(t *testing.T) {
+	key, native, ok := SplitTabID("west:abc")
+	if !ok || key != "west" || native != "abc" {
+		t.Fatalf("got %q %q %v", key, native, ok)
+	}
+	key, native, ok = SplitTabID("0:ab:cd")
+	if !ok || key != "0" || native != "ab:cd" {
+		t.Fatalf("rest after first colon: %q %q %v", key, native, ok)
+	}
+	// Taken verbatim: surrounding whitespace is part of the id, never trimmed.
+	if key, native, ok := SplitTabID(" west:abc "); !ok || key != " west" || native != "abc " {
+		t.Fatalf("verbatim split: %q %q %v", key, native, ok)
 	}
 	for _, tab := range []string{"", "nope", ":x", "x:", "  "} {
 		if _, _, ok := SplitTabID(tab); ok {

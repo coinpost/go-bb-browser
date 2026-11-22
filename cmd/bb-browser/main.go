@@ -65,7 +65,8 @@ Requires Chrome with remote debugging and a running bb-daemon (see README).`),
 	// Keep the secret out of Cobra's help defaults.
 	apiToken = os.Getenv("BB_BROWSER_API_TOKEN")
 	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "print raw JSON-RPC result (or full envelope for some commands)")
-	root.PersistentFlags().StringVar(&tabFlag, "tab", "", "short tab id; when omitted, uses daemon focused tab from tab_list")
+	tabFlag = ""
+	root.PersistentFlags().Var((*tabIDValue)(&tabFlag), "tab", "tab id: the complete CDP target id printed by open / tab new / tab list, used verbatim; when omitted, uses daemon focused tab from tab_list")
 
 	root.AddCommand(
 		newHealthCmd(),
@@ -225,16 +226,15 @@ func newTabCmd() *cobra.Command {
 	var selIdx int
 	tabSel := &cobra.Command{
 		Use:   "select",
-		Short: "Switch daemon focused tab (--id short id or --index 1-based)",
+		Short: "Switch daemon focused tab (--id complete tab id or --index 1-based)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 			defer cancel()
 			if cmd.Flags().Changed("id") {
-				id := strings.TrimSpace(selID)
-				if id == "" {
+				if strings.TrimSpace(selID) == "" {
 					return errors.New("empty --id")
 				}
-				return cmdRPC(ctx, baseURL, jsonOut, protocol.MethodTabSelect, map[string]any{"tab": id})
+				return cmdRPC(ctx, baseURL, jsonOut, protocol.MethodTabSelect, map[string]any{"tab": selID})
 			}
 			if !cmd.Flags().Changed("index") {
 				return errors.New("need --id or --index")
@@ -246,7 +246,7 @@ func newTabCmd() *cobra.Command {
 			return cmdRPC(ctx, baseURL, jsonOut, protocol.MethodTabSelect, map[string]any{"tab": tab})
 		},
 	}
-	tabSel.Flags().StringVar(&selID, "id", "", "short tab id")
+	tabSel.Flags().StringVar(&selID, "id", "", "complete tab id (CDP target id), used verbatim")
 	tabSel.Flags().IntVar(&selIdx, "index", 0, "1-based index into sorted tab_list")
 
 	var closeID string
@@ -261,8 +261,8 @@ func newTabCmd() *cobra.Command {
 			var err error
 			switch {
 			case cmd.Flags().Changed("id"):
-				tab = strings.TrimSpace(closeID)
-				if tab == "" {
+				tab = closeID
+				if strings.TrimSpace(tab) == "" {
 					return errors.New("empty --id")
 				}
 			case cmd.Flags().Changed("index"):
@@ -279,7 +279,7 @@ func newTabCmd() *cobra.Command {
 			return cmdRPC(ctx, baseURL, jsonOut, protocol.MethodTabClose, map[string]any{"tab": tab})
 		},
 	}
-	tabClose.Flags().StringVar(&closeID, "id", "", "short tab id")
+	tabClose.Flags().StringVar(&closeID, "id", "", "complete tab id (CDP target id), used verbatim")
 	tabClose.Flags().IntVar(&closeIdx, "index", 0, "1-based index into sorted tab_list")
 
 	tab.AddCommand(tabNew, tabSel, tabClose)
@@ -1078,9 +1078,8 @@ func printSiteResult(raw json.RawMessage) *adapterError {
 }
 
 func pickTabForSite(ctx context.Context, domain string) (string, error) {
-	tab := strings.TrimSpace(tabFlag)
-	if tab != "" {
-		return tab, nil
+	if tabFlag != "" {
+		return tabFlag, nil
 	}
 	domain = strings.TrimSpace(strings.ToLower(domain))
 	if domain == "" {
@@ -1242,11 +1241,29 @@ func daemonFocusedTab(ctx context.Context, base string) (string, error) {
 	return tab, nil
 }
 
+// effectiveTab returns the tab a command operates on: the --tab value exactly as
+// given, or the daemon's focused tab when --tab was not passed. An explicit id
+// is never replaced: if it is unknown the daemon rejects the call.
 func effectiveTab(ctx context.Context, base, flag string) (string, error) {
-	if t := strings.TrimSpace(flag); t != "" {
-		return t, nil
+	if flag != "" {
+		return flag, nil
 	}
 	return daemonFocusedTab(ctx, base)
+}
+
+// tabIDValue is the --tab flag. The id is kept verbatim (the daemon matches the
+// complete CDP target id exactly), and an explicitly blank value is an error
+// rather than a silent switch to the focused tab — e.g. --tab "$TAB" with TAB unset.
+type tabIDValue string
+
+func (v *tabIDValue) String() string { return string(*v) }
+func (v *tabIDValue) Type() string   { return "string" }
+func (v *tabIDValue) Set(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return errors.New("empty tab id; omit --tab to use the focused tab")
+	}
+	*v = tabIDValue(s)
+	return nil
 }
 
 func cmdHealth(ctx context.Context, base string, jsonOut bool) error {
