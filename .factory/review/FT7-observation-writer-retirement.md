@@ -1,6 +1,6 @@
 ---
 branch: factory/FT7-observation-writer-retirement
-round: 3
+round: 4
 ---
 # target释放与观测writer退役同步
 
@@ -182,3 +182,26 @@ notes:
 
 ## Guoyin · 2026-11-22 16:54
 再来一轮
+
+
+## factory · plan · 2026-11-22 17:15
+第 4 轮补充计划（owner「再来一轮」授权）：
+- Behaviour：注册、读取、首次 attach 回滚及关闭完成均绑定解析/发出时的注册身份；完整 target ID 或 short alias 复用时，旧操作不得读取或清除新生命周期；过期观测返回现有 stale/invalid tab 错误。
+- Scope：最新 review 三项 P1、必要 state/daemon 身份与桶句柄、永久回归及文档；不扩张处理其余 P2，不改公开 RPC。
+- Decisions：不以字符串相等代替生命周期相等；注册身份需稳定于活页重复登记，桶按所有权条件读取/回滚；不持全局锁跨 CDP/Record，原分支 merge 最新 main，不 rebase。
+- Checking：真实 RPC + Session + 本地 CDP 协议桩 barrier 验证三项原始调度及无碰撞 close 变体，修复前失败、修复后通过；重复 race、三域正常观测与 clear、配置全量。
+
+## factory · 2026-11-22 17:15
+第 4 轮完成：46231d1 合并 main@2be49f8，无冲突；修复提交 9dfe0a4。代码分支已推送，new/ → review/，round=4；owner 明确追加本轮，不修改 max_rounds。
+
+实现与决定：TabRegistration 增加独立、仅新登记递增的身份（现有 targetGen 在活页重复登记时也变，不可充当身份）；ObsBucket 持有具体桶句柄，条件回滚/读取。network/console/errors 在解析、注册、attach 后、读环时校验同一登记，旧失败不清新桶；tab_close/idle close 绑定发出前登记，迟到成功回包只释放原登记。过期查询装上的无主 observer 用 ForgetObservation 单独退役，不动 tab pool/路由。新增生产 nil 的 obsStepHook 及 CDP 扣回包测试缝，确定性复现 RPC 内调度；更新 AGENTS.md。
+
+回归证据（Claude Code 报告）：仅加测试缝、未改逻辑的对照 -race -count=3，TestFailedAttachRollbackKeepsReplacementLifecycleBuffers 3/3 擦掉新事件；TestStaleAliasQueryDoesNotReadReplacementLifecycle 的 resolved/attached 两屏障均返回错标 tab 的接替页事件；TestStaleTabCloseReplyKeepsReplacementLifecycle 的 alias_reassigned/same_alias 均删掉新登记及事件。修复后通过；生命周期 -race -count=20、daemon/state/browser 整包 -race -count=5 通过。新永久回归另覆盖无主迟到 observer（移除清理的变异失败）、活页三域及 clear、身份稳定性和桶句柄隔离。原 review overlay 本机未找到，按描述独立重写。
+
+测试：coder 全量 gofmt/vet/race 通过；manager 独立隔离 HOME/GOCACHE/GOTMPDIR、GOPROXY=off 执行配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全量通过，Go 1.27.4，11 个有测试包、1 个无测试包。git diff --check 通过，工作树干净；相对 main 保护路径未变，独有历史仅本项提交与 main merges。本机 build evidence/FT7-9dfe0a4 保留修复前日志、coder 最终全量日志及 manager-full.log。
+
+安装：无。本轮修复未改 go.mod/go.sum 或保护路径。
+
+未检查/待 review：真实非 headless Chrome/CDP、真实 loadingFailed、Docker、运行中 systemd 均未验证，未启动 Chrome或操作用户窗口。读环复核没有独立 RPC barrier，仅 state 测试和路径覆盖。最新 review 六项 P2 均未处理：超宽限期 attach、旧清理路由、Close 后 attach、detach 错误重试、Close 后域启用、并发 Close race。旧释放仍按 target ID 调用 ForgetTarget/forgetTabManaged，同 ID 接替页在旧释放期间建立的 pool/路由/managed 标记仍有相邻风险；targetDestroyed 仅含 ID，仍按处理时当前登记释放；eval/click/*_clear 等其他 RPC 未绑定登记。重点审查身份/桶/observer 所有权边界，不能把测试通过等同 review 通过。
+
+状态：仅 build，等待独立 review；未合并 main、未发布。
