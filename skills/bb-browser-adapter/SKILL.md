@@ -153,19 +153,23 @@ daemon 包装后实际执行的 JS 等价于：
 })( <argsJSON> )
 ```
 
-对于 `async function(args) { … }`（**匿名**） `internal/site/run.go` 会改写为
+源码**开头**（只允许先出现空白、注释如 `@meta`、可选的 `export default`）若是 `async function(args) { … }`（**匿名**），`internal/site/run.go` 原样保留源码，只在前后各加一段，等价于
 
 ```javascript
-const __bb_run = async function(args) { … };
+const __bb_run = async function(args) { … }   // 你的源码，一字不改
+;if (typeof __bb_run !== "function") throw new TypeError("bb-browser: adapter source must be a single async function expression");
 return await __bb_run(__args);
 ```
 
+包装器**不扫描、不改写函数体**：正则字面量（如 `/^https?:\/\//`、`/[{}"]/`）、嵌套模板字符串都按原样执行；源码本身有语法错误时由页面 JS 引擎原样报错。只识别源码开头的这一种形式：前面有其他语句的匿名 `async function(…)`、字符串/注释里的同样文本、脚本体里的嵌套函数都不会被改写。
+
 因此：
 
-- ✅ **推荐**：`async function(args) { return …; }`（匿名；CLI 会重写并调用）。
+- ✅ **推荐**：`async function(args) { return …; }`（匿名；CLI 会包装并调用）。
 - ✅ 也可：箭头 IIFE，例如整段源就是 `return (async (args) => { … })(__args);` 这种已能返回值的表达式 —— 但**不推荐**，心智负担高。
 - ❌ **避免** 命名 async 声明（如 `async function main(args) { … }`）：CLI **不会**重写、也**不会**自动调用，外层 IIFE 会直接返回 `undefined`。
-- ✅ `export default async function(args) { … }`：紧跟 `@meta` 或文件开头的 `export default` 会被剥掉，再走匿名改写。
+- ✅ `export default async function(args) { … }`：源码开头（空白/注释之后）的 `export default` 会被剥掉，再走匿名包装。
+- ✅ 匿名函数之后可以有结尾分号、注释、被提升的 `function helper() { … }` 声明；不要在它**前面**写语句（会成为语法错误）。
 - ❌ 顶层 ESM `import`：不支持（不是 module 上下文）。需要的话去页面全局找（`window.XXX`）或内联复制。
 
 ## 返回值与错误契约
