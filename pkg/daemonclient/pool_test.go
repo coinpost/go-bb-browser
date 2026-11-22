@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
@@ -32,6 +33,12 @@ type fakeDaemon struct {
 	healthN  int
 	listTab  string
 	tabOps   [][2]string // method, tab for tab-scoped RPCs
+
+	// Set before the first request. hang: /v1 accepts the request and never
+	// answers until the channel is closed or the client goes away. delay: /v1
+	// answers late and ignores client cancellation.
+	hang  chan struct{}
+	delay time.Duration
 }
 
 func newFakeDaemon(t *testing.T, tabPrefix string) (*httptest.Server, *fakeDaemon) {
@@ -105,10 +112,18 @@ func newFakeDaemon(t *testing.T, tabPrefix string) (*httptest.Server, *fakeDaemo
 			}
 			listTab := st.listTab
 			st.mu.Unlock()
+			if st.hang != nil {
+				select {
+				case <-st.hang:
+				case <-r.Context().Done():
+				}
+				return
+			}
+			time.Sleep(st.delay)
 
 			result := map[string]any{"seq": seq, "tab": tab}
 			if req.Method == protocol.MethodTabList {
-				var tabs []any
+				tabs := []any{} // the daemon always sends an array
 				if listTab != "" {
 					tabs = append(tabs, map[string]string{"tab": listTab, "title": "t", "url": "u"})
 					result["tab"] = listTab
