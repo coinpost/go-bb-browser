@@ -47,3 +47,15 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 安装：无；未更改 go.mod/go.sum。使用已有 Go 1.27.4（模块目标 1.26）及既有缓存。测试 HOME/临时文件位于本次专属临时目录。
 
 未验证：真实 Chrome/daemon、Docker、systemd；未改 UI，未操作用户窗口。已从 `new/` 移至 `review/`，供下一轮审查。
+
+
+## factory · review · 2026-11-22 08:16
+head: 32aaf227d0b5beef3df28e70651297d014350555
+verdict: pass
+notes:
+- [P3] cmd/bb-browser/main.go:511: MIME 以 string 解码，非标准响应中的非字符串 mime（例如 42）会让自动命名及显式路径均在写文件前失败；基线忽略该字段。协议内 daemon 始终返回字符串，故非阻塞。可用 json.RawMessage 接收，仅自动命名时尝试解码字符串，无法识别则回退 .png。
+- [P3] cmd/bb-browser/screenshot_test.go:187: JSON 用例以 json.Marshal 生成紧凑有序响应再 TrimSpace 比较，不能防止解析后重序列化的未来回归；可改为带内部空白及非排序字段的固定响应，并逐字节比较 stdout 与响应加换行。
+
+Codex 只读审查 origin/main（4f86c1c）...HEAD，未发现 P0/P1。配置完整测试 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0；新增 19 子用例单独重跑均通过，临时基线副本的 4 个 JPEG 默认名断言按预期失败。另用本地 fake daemon 验证了非字符串 MIME 的差异及带格式 JSON 的当前字节保真行为。工作树干净，无代码提交。
+
+安装：无未锁定工具或依赖清单变更。未验证：真实 Chrome/CDP 端到端、Docker、systemd，未在 Go 1.26 上复测（本轮使用 Go 1.27.4）。无关联 GitHub issue/PR，故无需评论。按无 P0/P1 规则从 review/ 移至 ready/；上述两项 P3 供 owner 参考。
