@@ -188,8 +188,12 @@ func removeNetworkRoutes(ctx context.Context, conn routeConn, id target.ID, patt
 	return conn.RemoveNetworkRoutes(id, pattern)
 }
 
-// lockTab serializes CDP operations per short tab id. Entries are reference-counted
-// so target removal can forget them without racing in-flight operations.
+// lockTab serializes CDP operations per short tab id. The key comes straight
+// from the client and is locked before the tab is resolved, so an entry lives
+// only while a holder or waiter references it: the last reference to leave
+// deletes it, whether or not the tab ever existed. Every reference is taken
+// from the map under tabMuOps, so callers that overlap in time always share
+// one entry and a new entry can only appear once the previous one has drained.
 func (s *Server) lockTab(ctx context.Context, short string) (func(), bool) {
 	if short == "" {
 		return func() {}, true
@@ -219,32 +223,15 @@ func (s *Server) lockTab(ctx context.Context, short string) (func(), bool) {
 }
 
 type tabLockEntry struct {
-	sem       chan struct{}
-	refs      int
-	forgotten bool
+	sem  chan struct{}
+	refs int
 }
 
 func (s *Server) releaseTabLockRef(short string, ent *tabLockEntry) {
 	s.tabMuOps.Lock()
 	defer s.tabMuOps.Unlock()
 	ent.refs--
-	if ent.refs == 0 && ent.forgotten && s.tabCDPLocks[short] == ent {
-		delete(s.tabCDPLocks, short)
-	}
-}
-
-func (s *Server) forgetTabLock(short string) {
-	if short == "" {
-		return
-	}
-	s.tabMuOps.Lock()
-	defer s.tabMuOps.Unlock()
-	ent := s.tabCDPLocks[short]
-	if ent == nil {
-		return
-	}
-	ent.forgotten = true
-	if ent.refs == 0 {
+	if ent.refs == 0 && s.tabCDPLocks[short] == ent {
 		delete(s.tabCDPLocks, short)
 	}
 }

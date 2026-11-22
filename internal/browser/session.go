@@ -823,7 +823,7 @@ func (s *Session) EvalAwaitContext(ctx context.Context, tabID target.ID, script 
 		return p.WithAwaitPromise(awaitPromise).WithReturnByValue(true)
 	}))
 	if err != nil {
-		return nil, err
+		return nil, wrapCDPError("Runtime.evaluate", tabID, err)
 	}
 	return json.RawMessage(raw), nil
 }

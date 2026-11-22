@@ -121,8 +121,10 @@ CLI 将命令行合成一个对象传给 adapter 最外层函数（见 `internal
 
 1. **位置参数**：第 i 个位置参数映射到 `@meta.args` 的**第 i 个键**（JSON 源顺序），**同时总是**写入 `argN`（`arg1`, `arg2`, …）。
 2. **命名参数**：`--key value` 或 `--key=value` → `args.key = "value"`（**值永远是字符串**，脚本内需 `parseInt` / `JSON.parse`）。
-3. **不支持** 纯 `--flag`（无值）布尔开关；缺值会报 `flag --foo needs a value`。想做布尔，请写 `--foo true` 并在脚本里 `args.foo === 'true'`。
+3. **不支持** 纯 `--flag`（无值）布尔开关；缺值（或下一个 token 以 `--` 开头）会报 `flag --foo needs a value`。想做布尔，请写 `--foo true` 并在脚本里 `args.foo === 'true'`。
+   值原样传入：`--foo=` 为空字符串，`--foo=a=b` 的值是 `a=b`，同名多次取最后一次，`-5` 这类单横线 token 是普通值；值以 `--` 开头时写 `--foo=--x`。
 4. `--tab <id>` 显式指定时，**忽略** `@meta.domain` 的自动选 tab / 新开 tab 逻辑。
+5. `--url` / `--api-token` / `--json` / `--tab` / `--help` 是 CLI 全局选项（保留名），写在 `run` 前后或穿插都不会进 `args`。adapter 需要同名参数时放到 `--` 之后：`bb-browser run ./x.js --tab ab12 -- hello --tab x` → `args.tab === "x"`。
 
 示例（对应上面的 `example/search`）：
 
@@ -151,19 +153,23 @@ daemon 包装后实际执行的 JS 等价于：
 })( <argsJSON> )
 ```
 
-对于 `async function(args) { … }`（**匿名**） `internal/site/run.go` 会改写为
+源码**开头**（只允许先出现空白、注释如 `@meta`、可选的 `export default`）若是 `async function(args) { … }`（**匿名**），`internal/site/run.go` 原样保留源码，只在前后各加一段，等价于
 
 ```javascript
-const __bb_run = async function(args) { … };
+const __bb_run = async function(args) { … }   // 你的源码，一字不改
+;if (typeof __bb_run !== "function") throw new TypeError("bb-browser: adapter source must be a single async function expression");
 return await __bb_run(__args);
 ```
 
+包装器**不扫描、不改写函数体**：正则字面量（如 `/^https?:\/\//`、`/[{}"]/`）、嵌套模板字符串都按原样执行；源码本身有语法错误时由页面 JS 引擎原样报错。只识别源码开头的这一种形式：前面有其他语句的匿名 `async function(…)`、字符串/注释里的同样文本、脚本体里的嵌套函数都不会被改写。
+
 因此：
 
-- ✅ **推荐**：`async function(args) { return …; }`（匿名；CLI 会重写并调用）。
+- ✅ **推荐**：`async function(args) { return …; }`（匿名；CLI 会包装并调用）。
 - ✅ 也可：箭头 IIFE，例如整段源就是 `return (async (args) => { … })(__args);` 这种已能返回值的表达式 —— 但**不推荐**，心智负担高。
 - ❌ **避免** 命名 async 声明（如 `async function main(args) { … }`）：CLI **不会**重写、也**不会**自动调用，外层 IIFE 会直接返回 `undefined`。
-- ✅ `export default async function(args) { … }`：紧跟 `@meta` 或文件开头的 `export default` 会被剥掉，再走匿名改写。
+- ✅ `export default async function(args) { … }`：源码开头（空白/注释之后）的 `export default` 会被剥掉，再走匿名包装。
+- ✅ 匿名函数之后可以有结尾分号、注释、被提升的 `function helper() { … }` 声明；不要在它**前面**写语句（会成为语法错误）。
 - ❌ 顶层 ESM `import`：不支持（不是 module 上下文）。需要的话去页面全局找（`window.XXX`）或内联复制。
 
 ## 返回值与错误契约
@@ -183,6 +189,8 @@ CLI 会打印 `[error] …` 并在 `error/hint` 文本匹配 `401|403|unauthoriz
 ```
 
 所以：**401/403 请老老实实返回 `{ error: 'HTTP 401', hint: 'please log in' }`**，别把它当成空数据；登录提示才会触发。
+
+返回 `error` 为**非空字符串**的对象时，`bb-browser run` 以**非 0 退出码**结束（stdout 不输出结果；`--json` 下 stdout 仍是完整 RPC 包络，stderr 与退出码相同），脚本和上层 agent 可以直接用退出码判断失败。空字符串或非字符串的 `error` 不算失败，会按普通返回值打印并以 0 退出。
 
 ## 三层复杂度（按需升级，不要跳级）
 

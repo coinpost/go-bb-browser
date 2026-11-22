@@ -88,7 +88,7 @@ func TestTargetReleaseRetiresWriterThenClearsObservation(t *testing.T) {
 		}},
 		{"removed_twice", func(_ *testing.T, srv *Server, _ *fakeConn, tid target.ID, short string) {
 			srv.removeTargetState(tid)
-			srv.clearRemovedTarget(tid, short)
+			srv.clearRemovedTarget(tid)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -387,7 +387,7 @@ func TestTabIdleRepeatedReconcileDoesNotRenew(t *testing.T) {
 	// idle. Reconciliation must not reset the already-tracked idle timer.
 	deadline := time.Now().Add(timeout + 40*time.Millisecond)
 	for time.Now().Before(deadline) {
-		srv.reconcileIdleFromLog(srv.syncTabsFromTargets(fc.infos))
+		srv.reconcileIdleFromLog(srv.syncTabsFromTargets(srv.beginTargetEnumeration(), fc.infos))
 		time.Sleep(15 * time.Millisecond)
 	}
 
@@ -441,7 +441,7 @@ func TestTabIdleRestartRestoresManagedTab(t *testing.T) {
 		},
 	}}
 	srvB := newIdleTestServerWithState(fcB, timeout, stateDir)
-	snaps := srvB.syncTabsFromTargets(fcB.infos)
+	snaps := srvB.syncTabsFromTargets(srvB.beginTargetEnumeration(), fcB.infos)
 	srvB.reconcileIdleFromLog(snaps)
 
 	time.Sleep(60 * time.Millisecond)
@@ -495,7 +495,7 @@ func TestTabIdleRestartGraceDelaysClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv.tabHook = fc
-	snaps := srv.syncTabsFromTargets(fc.infos)
+	snaps := srv.syncTabsFromTargets(srv.beginTargetEnumeration(), fc.infos)
 	srv.reconcileIdleFromLog(snaps)
 
 	srv.closeExpiredTabs(context.Background())
@@ -535,7 +535,7 @@ func TestUnwritableStateDirErrors(t *testing.T) {
 	}
 }
 
-func TestSyncTabIdlePresenceKeepsLog(t *testing.T) {
+func TestEnumerationRemovalKeepsLog(t *testing.T) {
 	stateDir := t.TempDir()
 	fc := &fakeConn{infos: []*target.Info{}}
 	srv := newIdleTestServerWithState(fc, time.Minute, stateDir)
@@ -545,7 +545,12 @@ func TestSyncTabIdlePresenceKeepsLog(t *testing.T) {
 	}
 	drainRPCLog(t, srv)
 
-	srv.syncTabIdlePresence(nil)
+	// A fresh empty enumeration removes the tab from memory (registry + idle
+	// tracking) but must not touch the persisted log.
+	srv.syncTabsFromTargets(srv.beginTargetEnumeration(), nil)
+	if left := srv.tabIdle.Snapshot(); len(left) != 0 {
+		t.Fatalf("idle tracking retained removed tab: %v", left)
+	}
 
 	logPath := filepath.Join(stateDir, store.RPCLogFile())
 	data, err := os.ReadFile(logPath)
@@ -553,6 +558,6 @@ func TestSyncTabIdlePresenceKeepsLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(data) == 0 {
-		t.Fatal("rpc log cleared by presence sync")
+		t.Fatal("rpc log cleared by target removal sync")
 	}
 }
