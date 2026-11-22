@@ -1,6 +1,6 @@
 ---
 branch: factory/FT7-observation-writer-retirement
-round: 2
+round: 3
 ---
 # target释放与观测writer退役同步
 
@@ -133,3 +133,28 @@ notes:
 - 新诊断为只读 overlay，使用真实 browser.Session 和本地回环 CDP 协议桩。stale RPC 在成功解析 ID 后插入调度屏障，并以直接调用同一解析/启用方法交叉验证；before-run 构造已入表尚未执行状态；迟到 attach 使用生产默认 60s。证据保留在本机 review run evidence/FT7-11af2d3/：commands.md、overlay/、diagnostics.log、head-stale-rpc.log、baseline-stale-rpc.log、head-late.log、baseline-late.log、head-browser.log、full.log、main-full.log、manager-full.log。commands.md 说明临时目录清理后的复跑方式；诊断尚非永久回归。
 - 未验证真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、systemd；未启动 Chrome、未操作用户窗口。无链接 issue/PR，故不发 GitHub 评论。
 - 第 2/3 轮发现 P1，review/ → new/，下一轮在原分支修复以上 fix 列表；本轮未改代码、未合并 main、未发布。
+
+
+## factory · plan · 2026-11-22 14:44
+第 3 轮补充计划：
+- Behaviour：按旧 CDP session detach，不关闭复用 ID 的接替页；Close/Forget 两种顺序共享 writer 退役屏障；过期解析不得为已释放 target 重建桶；超时 attach 保留迟到回包清理所有权；run 前 abort 持久生效；域初始化成功提交与关闭同步。
+- Scope：最新 review 六项 P1 与直接相关永久回归及生命周期文档，不改公开 RPC、不处理其他工厂项。
+- Decisions：明确清理所有权，不持全局表锁跨 CDP/Record；调用方等待有界，迟到 attach 采用有限宽限期；在原分支实施，不 rebase。
+- Checking：真实 Session+daemon 本地 CDP 协议桩 barrier、修复前失败对照、重复 race 和配置全量检查；不依赖真实外网。
+
+## factory · 2026-11-22 14:44
+第 3/3 轮构建提交：e11ba35；基于 11af2d3，origin/main 未移动，无需新增 merge。
+
+实现：子 context 取消前清空 Target.TargetID，仅按旧 session ID detach，覆盖 observer/tab pool；Close 发布并等待 obsRetiring，与 ForgetTarget 共享退役屏障；registerObservation 在 obsLifeMu 下检查 target 仍在 registry；attach 调用方超时后由初始化方继续等待迟到 session（lateAttachGrace 默认 5 分钟）并 detach，新增 Session.SetAttachTimeout；abort 永久记录并由 run 前检查；EnsureObservation 仅在 observer 仍有效且 Session 未关闭时提交成功，失败由 daemon 回滚首次桶。更新 AGENTS.md。
+
+回归证据（coder 报告）：修复前 11af2d3 导出副本叠加新永久测试，复用 ID 误关接替页、Close/Forget 双顺序旧 Record 污染新桶、过期解析建桶、迟到 attach 残留双 session、Close 后域初始化误报成功、run 前 abort/Close 仍 attach 均失败；迟到 attach 对照使用临时 shim 将旧超时设为 100ms，非生产默认 60s；cancel 子用例原本通过，不计失败证据。修复后生命周期 browser/daemon -race -count=20、browser 整包 -race -count=3 通过。
+
+测试：coder 全量通过；manager 独立隔离 HOME/GOCACHE/TMPDIR、GOPROXY=off 执行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全量通过，Go 1.27.4，10 个有测试包、2 个无测试包。git diff --check 通过，保护路径与 go.mod/go.sum 未变；独有历史仅本项提交和 main merge，工作树干净。
+
+安装：无。coder 报告一个编辑脚本误用系统默认临时目录，已自行删除；未由 manager 清理 /tmp。
+
+需 review 重点检查的边界：迟到回包超过 5 分钟宽限期仍可能泄漏 session；Close 不提前结束已超时且已出表的 attach，最多等宽限期，宽限期到期仅假 allocator 验证。注册检查未引入代次，同 ID 已重新登记时旧查询服务当前页面；过期解析回归直接调用 resolveTab/enableObservation，未在 RPC 函数内部注入屏障。Target.TargetID 处理依赖 chromedp v0.15.1 的取消 watcher 实现，升级需复核。
+
+未检查：真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、systemd；未启动 Chrome、未操作用户窗口。Session 父 context 取消与本轮改动组合未单独做 barrier 测试。
+
+状态：代码分支已推送，new/ → review/，第 3/3 轮；仅 build，尚未 review，未合并 main、未发布。下一步核查六项 P1 与上述边界，不将现有测试通过视为审查通过。
