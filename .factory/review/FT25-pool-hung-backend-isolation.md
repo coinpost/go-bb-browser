@@ -1,6 +1,6 @@
 ---
 branch: factory/FT25-pool-hung-backend-isolation
-round: 1
+round: 2
 ---
 # [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起的 daemon 使整个调用失败
 
@@ -79,3 +79,20 @@ notes:
 - 使用现有 Go 1.27.4、隔离 HOME、TMPDIR 与离线缓存；无安装。未找到 review-code skill。git diff --check 通过。
 - 未验证真实非 headless Chrome/CDP、Docker、systemd、真实网络黑洞；未操作用户浏览器。无关联 issue/PR，未发 GitHub 评论。
 - 第 1/3 轮发现 P1，review/ → new/，下次 build 在原分支修复；未合并 main、未发布。
+
+
+## factory · plan · 2026-11-22 12:30
+第 2 轮补充计划：
+- Behaviour：并发请求启动前快照每个后端 Client 的 HTTP 指针、URL 和深拷贝 headers，ID 仍取自原 Client 原子序列；主动取消在交付结果前优先，丢弃整批且不绑定；只采纳预算内完成解码的成功回复，普通接收与截止排空相同。
+- Scope：review 三项 P1、最小 Client 内部请求 helper、永久回归和相关文档；不处理其他工厂任务。
+- Decisions：不复制 atomic Client；以解码完成时刻严格早于有效截止为准；取消发生在最后检查之后不能保证生效。保留构造顺序、部分成功、2s 默认预算和 inFlight 最终释放。
+- Checking：门控 context/进程内 transport 确定性覆盖取消、超预算、返回后重配竞争；覆盖 TabList/TabFocus、泛型 Call、结果/绑定无污染、共享 ID 序列、快照隔离；先红后绿、重复 race 和全量检查。
+
+## factory · 2026-11-22 12:30
+第 2/3 轮构建完成。d1711aa 合并 origin/main@7223e5a（无冲突，未 rebase）；79dc763e733ef841c5fa86462e5165677502ade2 修复三项 P1。未合并其他 factory 分支。
+- 启动任何 worker 前同步快照各 Client 配置，后台不再读公开字段；共享原 Client 请求 ID 计数器。主动取消丢弃已有成功响应；解码完成时间不早于截止的回复统一判超时。
+- 永久回归：CancelBeatsReadyAnswers 四子项修复前均返回错误成功；RejectsSuccessCompletedAfterBudget 四子项修复前均错误成功；KeepsInBudgetNextToOverBudget 两方法错误含超预算 0:ta；DoesNotReadClientConfigAfterReturn 修复前 race 五处。修复后全部通过。RequestIDsShareClientCounter 原先已通过，不算红证据；两个新 helper 单测无旧实现红证据。真实 deadline 排空探针旧实现 80 次均通过，未确定性复现该路径，红证据来自门控 context 的普通接收路径。
+- coder 定向 -race -count=15 通过（141s），完整配置通过。manager 独立隔离 HOME/GOCACHE/TMPDIR、GOPROXY=off 运行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全通过，Go 1.27.4，10 个测试包通过、2 个无测试包；diff --check 通过，保护路径无变化，工作树干净。证据保留在 build run evidence/FT25-79dc763/ 的 red.log、green.log、manager-full.log。
+- 安装：无；go.mod/go.sum 未变，使用既有 pin 模块缓存。
+- 未验：真实 Chrome/CDP、Docker、systemd、真实网络黑洞、Go 1.26；无 UI 改动，未启动 Chrome 或操作用户窗口。快照不保证并发修改 Client 配置本身安全，也不深拷贝 *http.Client 内部；长期不响应取消的自定义 Transport 仍可能保留 goroutine，已覆盖最终释放路径。
+状态：代码已推送，new/ → review/，待独立审查。本轮仅 build，未合并 main、未发布。
