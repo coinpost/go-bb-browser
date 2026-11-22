@@ -150,9 +150,9 @@ func TestStaleResolvedTargetCannotRegisterAfterRelease(t *testing.T) {
 	e := newObsLifeEnv(t)
 	ctx := context.Background()
 	// The first half of handleObsQuery ...
-	tid, ok := e.srv.resolveTab(ctx, e.sess, e.short)
-	if !ok || tid != obsLifeTabID {
-		t.Fatalf("precondition: resolveTab = %q, %v", tid, ok)
+	reg, ok := e.srv.resolveTabRegistration(ctx, e.sess, e.short)
+	if !ok || reg.TargetID != obsLifeTabID {
+		t.Fatalf("precondition: resolveTabRegistration = %+v, %v", reg, ok)
 	}
 	// ... the complete release in between ...
 	e.st.destroyPage(obsLifeTabID)
@@ -165,7 +165,10 @@ func TestStaleResolvedTargetCannotRegisterAfterRelease(t *testing.T) {
 	attachArrived, releaseAttach := e.st.holdNext("Target.attachToTarget")
 	defer releaseAttach()
 	result := make(chan error, 1)
-	go func() { result <- e.srv.enableObservation(ctx, e.sess, tid, browser.ObservationNetwork) }()
+	go func() {
+		_, err := e.srv.enableObservation(ctx, e.sess, reg, browser.ObservationNetwork)
+		result <- err
+	}()
 	var err error
 	select {
 	case err = <-result:

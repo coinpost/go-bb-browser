@@ -46,6 +46,9 @@ type cdpStub struct {
 type cdpStubHold struct {
 	arrived chan struct{}
 	release chan struct{}
+	// replyOnly: the command takes effect when it arrives and only its reply
+	// waits for release.
+	replyOnly bool
 }
 
 type cdpStubMessage struct {
@@ -53,6 +56,9 @@ type cdpStubMessage struct {
 	Method    string          `json:"method"`
 	Params    json.RawMessage `json:"params"`
 	SessionID string          `json:"sessionId,omitempty"`
+
+	// replyGate, when set by a reply-only hold, delays every reply to this command.
+	replyGate chan struct{} `json:"-"`
 }
 
 func newCDPStub(t *testing.T, pages ...target.ID) *cdpStub {
@@ -124,6 +130,20 @@ func (st *cdpStub) holdNextGetTargets() chan struct{} {
 // release function is idempotent.
 func (st *cdpStub) holdNext(method string) (arrived <-chan struct{}, release func()) {
 	h := &cdpStubHold{arrived: make(chan struct{}), release: make(chan struct{})}
+	st.mu.Lock()
+	if st.holds == nil {
+		st.holds = make(map[string][]*cdpStubHold)
+	}
+	st.holds[method] = append(st.holds[method], h)
+	st.mu.Unlock()
+	return h.arrived, func() { closeOnce(h.release) }
+}
+
+// holdNextReply lets the next command named method take effect as soon as it
+// arrives and parks only its reply: the browser has acted, the client has not
+// heard yet. The returned release function is idempotent.
+func (st *cdpStub) holdNextReply(method string) (arrived <-chan struct{}, release func()) {
+	h := &cdpStubHold{arrived: make(chan struct{}), release: make(chan struct{}), replyOnly: true}
 	st.mu.Lock()
 	if st.holds == nil {
 		st.holds = make(map[string][]*cdpStubHold)
@@ -241,6 +261,18 @@ func (st *cdpStub) emit(method string, params any) {
 	st.write(map[string]any{"method": method, "params": params})
 }
 
+// send writes a reply to msg, after its reply gate (if any) has opened.
+func (st *cdpStub) send(msg cdpStubMessage, v any) {
+	if msg.replyGate == nil {
+		st.write(v)
+		return
+	}
+	go func() {
+		<-msg.replyGate
+		st.write(v)
+	}()
+}
+
 func (st *cdpStub) write(v any) {
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -259,7 +291,7 @@ func (st *cdpStub) reply(msg cdpStubMessage, result any) {
 	if msg.SessionID != "" {
 		out["sessionId"] = msg.SessionID
 	}
-	st.write(out)
+	st.send(msg, out)
 }
 
 func (st *cdpStub) serveWS(w http.ResponseWriter, r *http.Request) {
@@ -295,6 +327,12 @@ func (st *cdpStub) handle(msg cdpStubMessage) {
 		st.dispatch(msg)
 		return
 	}
+	if hold.replyOnly {
+		msg.replyGate = hold.release
+		st.dispatch(msg)
+		close(hold.arrived)
+		return
+	}
 	close(hold.arrived)
 	// Handle out of band so the read loop keeps serving other commands.
 	go func() {
@@ -315,7 +353,7 @@ func (st *cdpStub) dispatch(msg cdpStubMessage) {
 		if msg.SessionID != "" {
 			out["sessionId"] = msg.SessionID
 		}
-		st.write(out)
+		st.send(msg, out)
 		return
 	}
 	switch msg.Method {

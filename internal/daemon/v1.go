@@ -1255,6 +1255,19 @@ func (s *Server) resolveTab(ctx context.Context, conn tabConn, tab string) (targ
 	return tid, false
 }
 
+// resolveTabRegistration is resolveTab for callers that must be able to tell
+// later whether the tab they resolved is still the same registration.
+func (s *Server) resolveTabRegistration(ctx context.Context, conn tabConn, tab string) (state.TabRegistration, bool) {
+	reg, ok := s.tabs.Registration(tab)
+	if ok {
+		return reg, true
+	}
+	if _, err := s.enumerateTabs(ctx, conn); err == nil {
+		return s.tabs.Registration(tab)
+	}
+	return state.TabRegistration{}, false
+}
+
 func (s *Server) cdpHint(err error) string {
 	if err == nil {
 		return ""

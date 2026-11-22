@@ -653,26 +653,49 @@ func (s *Session) ForgetTarget(id target.ID) {
 	delete(s.tabPool, id)
 	s.poolMu.Unlock()
 
+	// Writes are disabled first; this also waits out an in-flight Record, so
+	// the caller can clear the target's observation buffers afterwards.
+	obs, done, pending := s.retireObserver(id)
+	if ent != nil {
+		ent.cleanup.cancel()
+	}
+	s.finishObserverRetirement(id, obs, done, pending)
+	s.ClearRoutesForTarget(id)
+}
+
+// ForgetObservation is the observer half of ForgetTarget: it retires the
+// target's observer under the same barriers and leaves the tab pool entry and
+// the network routes alone. It is for an observer that turned out to have no
+// owner while the target id itself may be in use.
+func (s *Session) ForgetObservation(id target.ID) {
+	if s == nil || id == "" {
+		return
+	}
+	obs, done, pending := s.retireObserver(id)
+	s.finishObserverRetirement(id, obs, done, pending)
+}
+
+// retireObserver takes id's observer out of the table, publishes its
+// retirement and stops its writer, in-flight Record included. The caller must
+// pass the results to finishObserverRetirement.
+func (s *Session) retireObserver(id target.ID) (obs *tabObserver, done chan struct{}, pending []chan struct{}) {
 	s.obsMu.Lock()
-	obs := s.observers[id]
+	obs = s.observers[id]
 	delete(s.observers, id)
 	// Retirements already under way are not finished just because the table
-	// entry is gone: wait for them below, outside the lock.
-	pending := slices.Clone(s.obsRetiring[id])
-	var done chan struct{}
+	// entry is gone: finishObserverRetirement waits for them, outside the lock.
+	pending = slices.Clone(s.obsRetiring[id])
 	if obs != nil {
 		done = s.beginObserverRetirementLocked(id)
 	}
 	s.obsMu.Unlock()
-
 	if obs != nil {
-		// Writes are disabled first; this also waits out an in-flight Record, so
-		// the caller can clear the target's observation buffers afterwards.
 		obs.retire()
 	}
-	if ent != nil {
-		ent.cleanup.cancel()
-	}
+	return obs, done, pending
+}
+
+func (s *Session) finishObserverRetirement(id target.ID, obs *tabObserver, done chan struct{}, pending []chan struct{}) {
 	if obs != nil {
 		if obs.cleanup != nil {
 			// Safe during initialization: cancel ends a pending attach and takes
@@ -684,7 +707,6 @@ func (s *Session) ForgetTarget(id target.ID) {
 	for _, ch := range pending {
 		<-ch
 	}
-	s.ClearRoutesForTarget(id)
 }
 
 // PingBrowser checks CDP connectivity with a lightweight Browser.getVersion call.

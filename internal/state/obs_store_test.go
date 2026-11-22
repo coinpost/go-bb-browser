@@ -165,3 +165,65 @@ func TestRegisterTargetReportsNewLifecycle(t *testing.T) {
 		t.Errorf("new lifecycle sees %d old event(s)", len(events))
 	}
 }
+
+// A bucket handle stands for the rings one registration got. After the target
+// is cleared and registered again the old handle owns nothing: it cannot read
+// the new rings or release them.
+func TestObsBucketHandleIsBoundToItsLifecycle(t *testing.T) {
+	s := NewTabObsStore()
+	const id = target.ID("T1")
+	old, created := s.RegisterBucket(id)
+	if !created || !s.OwnsBucket(old) {
+		t.Fatalf("first registration: created = %v, owns = %v", created, s.OwnsBucket(old))
+	}
+	again, created := s.RegisterBucket(id)
+	if created || !s.OwnsBucket(again) || !s.OwnsBucket(old) {
+		t.Fatal("registering a registered target must hand out the same rings")
+	}
+	s.PushNetwork(id, 1, json.RawMessage(`{"n":1}`))
+	s.ClearNetworkOnly(id)
+	if !s.OwnsBucket(old) {
+		t.Fatal("a single-domain clear ended the lifecycle")
+	}
+	s.PushConsole(id, 2, json.RawMessage(`{"n":2}`))
+	if ev, cursor, _, ok := s.QueryBucket(old, ObsRingConsole, 0); !ok || len(ev) != 1 || cursor != 2 {
+		t.Fatalf("QueryBucket(console) = %v, %d, %v", ev, cursor, ok)
+	}
+	if ev, _, _, ok := s.QueryBucket(old, ObsRingNetwork, 0); !ok || len(ev) != 0 {
+		t.Fatalf("QueryBucket(network) after its clear = %v, %v", ev, ok)
+	}
+
+	s.ClearTarget(id)
+	next, created := s.RegisterBucket(id)
+	if !created {
+		t.Fatal("registration after ClearTarget did not create new rings")
+	}
+	s.PushNetwork(id, 3, json.RawMessage(`{"n":3}`))
+	s.PushError(id, 4, json.RawMessage(`{"n":4}`))
+	if s.OwnsBucket(old) {
+		t.Fatal("old handle owns the rings of the new lifecycle")
+	}
+	for _, ring := range []ObsRing{ObsRingNetwork, ObsRingConsole, ObsRingErrors} {
+		if ev, cursor, _, ok := s.QueryBucket(old, ring, 7); ok || len(ev) != 0 || cursor != 7 {
+			t.Fatalf("old handle read ring %d of the new lifecycle: %v, %d, %v", ring, ev, cursor, ok)
+		}
+	}
+	if s.ReleaseBucket(old) {
+		t.Fatal("old handle released the rings of the new lifecycle")
+	}
+	if ev, _, _, ok := s.QueryBucket(next, ObsRingNetwork, 0); !ok || len(ev) != 1 || ev[0].Seq != 3 {
+		t.Fatalf("new lifecycle's events = %v, %v", ev, ok)
+	}
+	if ev, _, _, ok := s.QueryBucket(next, ObsRingErrors, 0); !ok || len(ev) != 1 || ev[0].Seq != 4 {
+		t.Fatalf("new lifecycle's errors = %v, %v", ev, ok)
+	}
+	if !s.ReleaseBucket(next) || s.TargetCount() != 0 || s.ReleaseBucket(next) {
+		t.Fatal("ReleaseBucket by the owner must retire the target exactly once")
+	}
+	if s.PushNetwork(id, 5, json.RawMessage(`{}`)) {
+		t.Fatal("event accepted after the owner released the bucket")
+	}
+	if s.OwnsBucket(ObsBucket{}) || s.ReleaseBucket(ObsBucket{}) {
+		t.Fatal("zero handle owns something")
+	}
+}

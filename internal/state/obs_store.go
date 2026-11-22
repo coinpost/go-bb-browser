@@ -44,6 +44,25 @@ func NewTabObsStoreWithCaps(netCap, consCap, errCap int) *TabObsStore {
 	}
 }
 
+// ObsBucket is a handle on the rings one registration of a target created or
+// found. The target id alone does not identify them: after ClearTarget the same
+// id can be registered again and then owns different rings. Operations that
+// must not cross into such a later lifecycle (reading for a query, taking a
+// failed registration back) go through the handle. The zero value owns nothing.
+type ObsBucket struct {
+	id    target.ID
+	rings *targetObsRings
+}
+
+// ObsRing names one of a target's three rings.
+type ObsRing int
+
+const (
+	ObsRingNetwork ObsRing = iota
+	ObsRingConsole
+	ObsRingErrors
+)
+
 // RegisterTarget starts the observation lifecycle of a target. It is the only
 // way to create its rings: Push* never creates them, so events arriving before
 // registration or after ClearTarget / SyncPresence are rejected instead of
@@ -51,20 +70,71 @@ func NewTabObsStoreWithCaps(netCap, consCap, errCap int) *TabObsStore {
 // is already registered keeps its buffered events. It reports whether this
 // call created the rings, i.e. started a new lifecycle.
 func (s *TabObsStore) RegisterTarget(id target.ID) bool {
+	_, created := s.RegisterBucket(id)
+	return created
+}
+
+// RegisterBucket is RegisterTarget returning a handle on the target's rings.
+func (s *TabObsStore) RegisterBucket(id target.ID) (bucket ObsBucket, created bool) {
 	if id == "" {
-		return false
+		return ObsBucket{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.targets[id] != nil {
+	tb := s.targets[id]
+	if tb == nil {
+		tb = &targetObsRings{
+			net:  newRing(s.netCap),
+			cons: newRing(s.consCap),
+			err:  newRing(s.errCap),
+		}
+		s.targets[id] = tb
+		created = true
+	}
+	return ObsBucket{id: id, rings: tb}, created
+}
+
+// OwnsBucket reports whether b's rings are still the ones registered for its target.
+func (s *TabObsStore) OwnsBucket(b ObsBucket) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return b.rings != nil && s.targets[b.id] == b.rings
+}
+
+// ReleaseBucket retires b's target like ClearTarget, but only while b's rings
+// are still the registered ones. Rings registered for the same target id later
+// are left alone; it reports whether anything was removed.
+func (s *TabObsStore) ReleaseBucket(b ObsBucket) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if b.rings == nil || s.targets[b.id] != b.rings {
 		return false
 	}
-	s.targets[id] = &targetObsRings{
-		net:  newRing(s.netCap),
-		cons: newRing(s.consCap),
-		err:  newRing(s.errCap),
-	}
+	delete(s.targets, b.id)
 	return true
+}
+
+// QueryBucket returns the events with seq > since of one ring of b. ok is false,
+// with nothing read, when b's rings are no longer the registered ones.
+func (s *TabObsStore) QueryBucket(b ObsBucket, ring ObsRing, since uint64) (events []ObsEvent, cursor uint64, dropped uint64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if b.rings == nil || s.targets[b.id] != b.rings {
+		return nil, since, 0, false
+	}
+	var rb *RingBuffer
+	switch ring {
+	case ObsRingNetwork:
+		rb = &b.rings.net
+	case ObsRingConsole:
+		rb = &b.rings.cons
+	case ObsRingErrors:
+		rb = &b.rings.err
+	default:
+		return nil, since, 0, false
+	}
+	raw, cursor, dropped := rb.QuerySince(since)
+	return entriesToObs(raw), cursor, dropped, true
 }
 
 // HasTarget reports whether the target currently owns observation rings.

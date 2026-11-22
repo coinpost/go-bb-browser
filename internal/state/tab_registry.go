@@ -22,6 +22,24 @@ type TabRegistry struct {
 	// re-registered), so a full enumeration requested earlier cannot remove it.
 	gen       uint64
 	targetGen map[target.ID]uint64
+
+	// regSeq numbers registrations. targetReg holds the number of each target's
+	// current registration; unlike targetGen it never changes while the target
+	// stays registered, so it tells one lifecycle of a target id from the next.
+	regSeq    uint64
+	targetReg map[target.ID]uint64
+}
+
+// TabRegistration identifies one registration of a target: the span between
+// the target entering the registry and leaving it. A target id that is removed
+// and registered again, with the same short id or another, gets a new one, so
+// comparing registrations (IsCurrent) is the only way to tell that a tab
+// resolved earlier is still the same tab. Equal target or short id strings do
+// not show that. The zero value is no registration.
+type TabRegistration struct {
+	TargetID target.ID
+	ShortID  string
+	seq      uint64
 }
 
 // EnumerationToken marks the moment a full target enumeration was requested.
@@ -41,7 +59,63 @@ func NewTabRegistry() *TabRegistry {
 		targetToShort: make(map[target.ID]string),
 		shortToTarget: make(map[string]target.ID),
 		targetGen:     make(map[target.ID]uint64),
+		targetReg:     make(map[target.ID]uint64),
 	}
+}
+
+// Registration resolves a short id to the registration it currently names (INV-3).
+func (r *TabRegistry) Registration(shortID string) (TabRegistration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	shortID = strings.TrimSpace(shortID)
+	if shortID == "" {
+		return TabRegistration{}, false
+	}
+	id, ok := r.shortToTarget[shortID]
+	if !ok {
+		return TabRegistration{}, false
+	}
+	return TabRegistration{TargetID: id, ShortID: shortID, seq: r.targetReg[id]}, true
+}
+
+// RegistrationOf returns the current registration of a target id.
+func (r *TabRegistry) RegistrationOf(id target.ID) (TabRegistration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	short, ok := r.targetToShort[id]
+	if !ok || id == "" {
+		return TabRegistration{}, false
+	}
+	return TabRegistration{TargetID: id, ShortID: short, seq: r.targetReg[id]}, true
+}
+
+// IsCurrent reports whether reg is still the registration of its target. A
+// registration keeps its short id for as long as it lasts, so a current one
+// also still owns its alias.
+func (r *TabRegistry) IsCurrent(reg TabRegistration) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.isCurrentLocked(reg)
+}
+
+func (r *TabRegistry) isCurrentLocked(reg TabRegistration) bool {
+	if reg.seq == 0 {
+		return false
+	}
+	return r.targetReg[reg.TargetID] == reg.seq
+}
+
+// RemoveRegistration removes reg's target only while reg is still its
+// registration. It reports false, changing nothing, when that registration is
+// already gone, whether or not the target id has been registered again since.
+func (r *TabRegistry) RemoveRegistration(reg TabRegistration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.isCurrentLocked(reg) {
+		return false
+	}
+	r.removeLocked(reg.TargetID)
+	return true
 }
 
 // BeginEnumeration must be called BEFORE the browser is asked for its target
@@ -205,6 +279,7 @@ func (r *TabRegistry) removeLocked(id target.ID) {
 	delete(r.targetToShort, id)
 	delete(r.shortToTarget, short)
 	delete(r.targetGen, id)
+	delete(r.targetReg, id)
 	if r.selected == short {
 		r.selected = ""
 	}
@@ -244,6 +319,8 @@ func (r *TabRegistry) registerLocked(id target.ID, short string) {
 	r.shortToTarget[short] = id
 	r.gen++
 	r.targetGen[id] = r.gen
+	r.regSeq++
+	r.targetReg[id] = r.regSeq
 }
 
 func hexRunes(s string) []rune {

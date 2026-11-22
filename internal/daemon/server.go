@@ -54,6 +54,9 @@ type Server struct {
 	// targetReleases has an entry per target id for as long as any release of
 	// that id is still running (see beginTargetReleaseLocked).
 	targetReleases map[target.ID]*targetRelease
+	// obsStepHook is nil outside tests. Lifecycle regressions set it to park an
+	// observation query between two of its steps (see obsStep*).
+	obsStepHook func(step string, tid target.ID)
 
 	tabMuOps    sync.Mutex
 	tabCDPLocks map[string]*tabLockEntry

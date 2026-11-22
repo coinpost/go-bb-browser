@@ -174,14 +174,36 @@ func (s *Server) retireTargetObservation(tid target.ID) {
 	}
 }
 
-// removeTargetState releases everything the daemon holds for tid and returns
-// only once that is complete. A missing registry entry does not mean so: the
-// release may have been started by another path (a Target.targetDestroyed event
-// overtaking the reply to Target.closeTarget) and still be running, in which
-// case this call waits for it.
+// removeTargetState releases everything the daemon holds for the current
+// registration of tid and returns only once that is complete. A missing
+// registry entry does not mean so: the release may have been started by another
+// path and still be running, in which case this call waits for it.
+//
+// It is for callers that learn about the target by id alone (lifecycle events).
+// A caller that resolved a registration earlier must use releaseRegistration:
+// by the time it gets here tid may name a later registration.
 func (s *Server) removeTargetState(tid target.ID) {
 	s.obsLifeMu.Lock()
 	_, removed := s.tabs.RemoveTarget(tid)
+	s.finishTargetRemovalLocked(tid, removed)
+}
+
+// releaseRegistration releases reg, the registration a caller resolved before
+// an operation that ended its target (tab_close, idle reclaim), and returns only
+// once reg's release is complete. If reg is already gone (a
+// Target.targetDestroyed event overtook the reply to Target.closeTarget), its
+// release was started elsewhere and is only waited for. A registration the same
+// target id has received since then is a different tab and keeps its registry
+// entry, buffers and observer.
+func (s *Server) releaseRegistration(reg state.TabRegistration) {
+	s.obsLifeMu.Lock()
+	removed := s.tabs.RemoveRegistration(reg)
+	s.finishTargetRemovalLocked(reg.TargetID, removed)
+}
+
+// finishTargetRemovalLocked is entered with obsLifeMu held, in the critical
+// section of the registry removal it completes, and unlocks it.
+func (s *Server) finishTargetRemovalLocked(tid target.ID, removed bool) {
 	if removed {
 		s.beginTargetReleaseLocked(tid)
 	}
@@ -289,21 +311,24 @@ func (s *Server) closeTabByShort(ctx context.Context, tab string) error {
 
 // closeTabByShortLocked closes tab while the caller holds its keyed operation lock.
 func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab string) error {
-	tid, ok := s.tabs.Lookup(tab)
-	if !ok {
-		if _, err := s.enumerateTabs(ctx, conn); err == nil {
-			tid, ok = s.tabs.Lookup(tab)
-		}
-	}
+	reg, ok := s.resolveTabRegistration(ctx, conn, tab)
 	if !ok {
 		return errTabCloseUnknownID
 	}
-	if err := closeTarget(ctx, conn, tid); err != nil {
+	return s.closeRegistrationLocked(ctx, conn, reg)
+}
+
+// closeRegistrationLocked closes the page of reg while the caller holds the
+// keyed operation lock of its short id. The close is bound to reg: whatever
+// happens to the target id while Target.closeTarget is in flight, only reg is
+// released afterwards.
+func (s *Server) closeRegistrationLocked(ctx context.Context, conn tabConn, reg state.TabRegistration) error {
+	if err := closeTarget(ctx, conn, reg.TargetID); err != nil {
 		return err
 	}
 	// Target.closeTarget succeeded, so clear every target-scoped resource even if
 	// no later lifecycle event is delivered.
-	s.removeTargetState(tid)
+	s.releaseRegistration(reg)
 	return nil
 }
 
@@ -345,11 +370,12 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 			}
 			return
 		}
-		short, ok := s.tabs.ShortForTarget(tid)
+		reg, ok := s.tabs.RegistrationOf(tid)
 		if !ok {
 			s.forgetTabManaged(tid)
 			continue
 		}
+		short := reg.ShortID
 		conn := s.tabConn()
 		if conn == nil {
 			if s.logger != nil {
@@ -366,26 +392,23 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 		}
 		// Expired returned a snapshot. Activity may have completed while cleanup
 		// waited for this lock, so make the close decision again while serialized
-		// with tab operations.
-		if !s.tabIdle.IsExpired(tid, time.Now(), timeout) {
+		// with tab operations. The tab may also have been released meanwhile; its
+		// short id or target id can then name another tab, which is not the one
+		// that expired.
+		if !s.tabs.IsCurrent(reg) || !s.tabIdle.IsExpired(tid, time.Now(), timeout) {
 			unlock()
 			continue
 		}
-		err := s.closeTabByShortLocked(ctx, conn, short)
+		err := s.closeRegistrationLocked(ctx, conn, reg)
 		if err != nil && browser.ErrorKindOf(err) == browser.ErrorTargetGone {
 			// Idle cleanup is complete when Chrome has already removed the target.
 			// Keep explicit tab_close RPC errors unchanged.
-			s.removeTargetState(tid)
-			s.forgetTabManaged(tid)
+			s.releaseRegistration(reg)
 			unlock()
 			continue
 		}
 		unlock()
 		if err != nil {
-			if errors.Is(err, errTabCloseUnknownID) {
-				s.forgetTabManaged(tid)
-				continue
-			}
 			if s.logger != nil {
 				s.logger.Warn("tab idle cleanup failed", "tab", short, "err", err)
 			}

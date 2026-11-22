@@ -170,21 +170,34 @@ func TestEnableObservationForReleasedTargetLeavesNoBuffers(t *testing.T) {
 	srv.tabHook = conn
 	const tid = target.ID("ABCDEF123456")
 
-	err := srv.enableObservation(context.Background(), conn, tid, browser.ObservationNetwork)
-	if !errors.Is(err, errObservationTargetGone) {
-		t.Fatalf("err = %v, want errObservationTargetGone", err)
+	// A registration that was released, and one that never existed.
+	srv.tabs.RegisterPageTarget(tid)
+	released, _ := srv.tabs.RegistrationOf(tid)
+	srv.removeTargetState(tid)
+	forgottenBefore := len(conn.forgotten())
+	for _, reg := range []state.TabRegistration{released, {TargetID: tid, ShortID: "3456"}} {
+		_, err := srv.enableObservation(context.Background(), conn, reg, browser.ObservationNetwork)
+		if !errors.Is(err, errObservationTargetGone) {
+			t.Fatalf("err = %v, want errObservationTargetGone", err)
+		}
 	}
-	if got := conn.forgotten(); len(got) != 0 {
-		t.Fatalf("ForgetTarget calls = %v, want none: nothing was set up", got)
+	if got := conn.forgotten(); len(got) != forgottenBefore {
+		t.Fatalf("ForgetTarget calls = %v, want none for the stale queries: nothing was set up", got)
 	}
 	recordAllKinds(srv.obsSink, tid, 1)
 	assertObservationReleased(t, srv, tid)
 
+	// The same target id registered again is a new lifecycle: its own
+	// registration works, the released one stays stale and leaves it alone.
 	srv.tabs.RegisterPageTarget(tid)
-	if err := srv.enableObservation(context.Background(), conn, tid, browser.ObservationNetwork); err != nil {
+	current, _ := srv.tabs.RegistrationOf(tid)
+	if _, err := srv.enableObservation(context.Background(), conn, current, browser.ObservationNetwork); err != nil {
 		t.Fatal(err)
 	}
 	recordAllKinds(srv.obsSink, tid, 2)
+	if _, err := srv.enableObservation(context.Background(), conn, released, browser.ObservationNetwork); !errors.Is(err, errObservationTargetGone) {
+		t.Fatalf("released registration on a reused target id: err = %v, want errObservationTargetGone", err)
+	}
 	if events, _, _ := srv.obsStore.QueryNetwork(tid, 0); len(events) != 1 || events[0].Seq != 2 {
 		t.Fatalf("live target events = %#v", events)
 	}
@@ -228,11 +241,12 @@ func TestObservationChurnLeavesNoBuffers(t *testing.T) {
 	for round := range 200 {
 		tid := target.ID(fmt.Sprintf("CHURN%04d", round%8))
 		short := srv.tabs.RegisterPageTarget(tid)
+		reg, _ := srv.tabs.RegistrationOf(tid)
 		var wg sync.WaitGroup
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			_ = srv.enableObservation(context.Background(), conn, tid, browser.ObservationConsole)
+			_, _ = srv.enableObservation(context.Background(), conn, reg, browser.ObservationConsole)
 		}()
 		go func() {
 			defer wg.Done()
