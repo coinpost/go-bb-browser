@@ -99,8 +99,9 @@ _, err = pool.Eval(ctx, protocol.EvalParams{Tab: out.Tab, Script: "document.titl
 |------|------|
 | **启动** | `NewPool` **不**探测后端。部分 daemon 当时不可用也可以构造成功。 |
 | **无 tab 的请求** | `Health` / `Ready` / `Live`、`tab_new`：选 **in-flight 最少**的后端（并列时 round-robin），失败则试下一个；全部失败返回 `*AllFailedError`。`tab_new` 的 failover 只表示「新 tab 开在另一个 daemon」，**不会**把已有 tab 挪走。 |
-| **tab_list** | **查询每一个后端**（构造顺序），把各端短 id 加上前缀后合并。某端失败则 **跳过**（该端 tab 不会出现在结果里），其余端仍返回；全部失败才是 `*AllFailedError`。列出的 id 会写入映射，可直接用于后续 tab 操作。Pool 没有跨 daemon 的焦点：`tab` / `focus` 取构造顺序上第一个非空值。`seq` 为成功端中的最大值。 |
-| **tab_focus** | 构造顺序上 **第一个成功**的后端（跳过失败端），返回前缀化的 `tab` / `focus` 并绑定。不是池级焦点。全部失败返回 `*AllFailedError`。 |
+| **tab_list** | **并发查询每一个后端**，把各端短 id 加上前缀后按 **构造顺序**（而非应答先后）合并。某端失败则 **跳过**（该端 tab 不会出现在结果里），其余端仍返回；全部失败才是 `*AllFailedError`。空列表算成功。列出的 id 会写入映射，可直接用于后续 tab 操作。Pool 没有跨 daemon 的焦点：`tab` / `focus` 取构造顺序上第一个非空值。`seq` 为成功端中的最大值。 |
+| **tab_focus** | 并发查询所有后端，取构造顺序上 **第一个成功**的后端（跳过失败端；不是最快应答者），返回前缀化的 `tab` / `focus` 并绑定。排在它前面的后端都已应答后立即返回，不等后面的后端。不是池级焦点。全部失败返回 `*AllFailedError`。 |
+| **tab_list / tab_focus 超时** | 这两个聚合查询最多等待 **2 秒**（调用方 deadline 更短则以其为准；即使调用方 deadline 更长或没有 deadline 也是 2 秒）。到时仍未应答的后端按失败 **跳过** 并取消其请求，已收到的成功结果照常返回，所以一个接受连接但不应答的 daemon 只会让调用变慢到该上限，不会让它失败或永久阻塞。没有任何成功结果时：调用方 deadline 已到则返回其 context 错误，否则返回 `*AllFailedError`（超时端记为 `context.DeadlineExceeded`）。调用前 context 已结束则不发请求；调用中 **主动取消** context 会立即返回 `context.Canceled`，丢弃已收到的结果且不写入映射。其它 Pool 方法和单 `Client` 没有内置超时。 |
 | **有 tab 的请求** | **硬性**：必须打到 **该前缀对应的同一个 daemon**（含 `tab_select`）。池对外 id 为 `<backendKey>:<daemonShortId>`（`TabNew` / `TabList` / `TabFocus` 成功时写入映射，`TabClose` 成功后删除）；发给 daemon 时去掉前缀。对端失败 **不会**改道到其它 daemon，也不做跨 daemon 转发。未知（未创建/未列出/已关闭）tab 返回 `*UnknownTabError`；格式错误或未知前缀返回 `*InvalidTabIDError`。省略 `tab` 会得到 `ErrTabRequired`。 |
 
 `Pool.Clients()` 可拿到各 `*Client`（每端独立 URL / `Headers`）。`TabClose` 成功后解除亲和；daemon 空闲关 tab 时可用 `ForgetTab`。`BackendKeys()` 返回构造顺序下的前缀。

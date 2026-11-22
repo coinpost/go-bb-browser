@@ -3,12 +3,14 @@ package daemonclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
@@ -43,13 +45,22 @@ import (
 //     is done, the walk stops. If every backend fails, the error is
 //     [*AllFailedError]. Failover here never moves an existing tab; tab_new
 //     creates a new tab on the backend that succeeds.
-//   - tab_list: query every backend in constructor order, prefix each id, and
-//     merge. A down backend is skipped (its tabs are omitted). If every
-//     backend fails, the error is [*AllFailedError]. Listed ids are bound so
-//     later tab ops can use them. There is no pool-wide focus: Tab and Focus
-//     are the first non-empty values in constructor order.
-//   - tab_focus: first successful backend in constructor order (skip down);
+//   - tab_list: query every backend concurrently, prefix each id, and merge
+//     in constructor order (not completion order). A down backend is skipped
+//     (its tabs are omitted). If every backend fails, the error is
+//     [*AllFailedError]. Listed ids are bound so later tab ops can use them.
+//     There is no pool-wide focus: Tab and Focus are the first non-empty
+//     values in constructor order.
+//   - tab_focus: query every backend concurrently and return the first
+//     successful one in constructor order (skip down), not the fastest;
 //     return prefixed ids. Not a pool-wide focus.
+//   - tab_list / tab_focus wait at most 2s (or the caller's deadline if
+//     sooner) for backends. One that has not answered by then is skipped like
+//     a down backend and its request is cancelled; answers already received
+//     are returned. If none succeeded the error is the caller's context error
+//     when its deadline passed, else [*AllFailedError]. Cancelling the
+//     caller's context aborts the call with that error and no result. No
+//     other Pool method has a built-in timeout.
 //   - Bound requests: parse the prefix, then lookup in the tab map. Unknown
 //     tab ids return [*UnknownTabError]; malformed / unknown-prefix ids return
 //     [*InvalidTabIDError] (no silent fallback).
@@ -60,9 +71,16 @@ type Pool struct {
 	inFlight []atomic.Int64
 	rr       atomic.Uint64
 
+	fanoutTimeout time.Duration // see defaultFanoutTimeout
+
 	mu   sync.Mutex
 	tabs map[string]int // external tab id → backend that opened it
 }
+
+// defaultFanoutTimeout bounds how long tab_list / tab_focus wait for backends
+// (a shorter caller deadline still wins). It matches the daemon's default CDP
+// watchdog probe timeout.
+const defaultFanoutTimeout = 2 * time.Second
 
 // PoolBackend is one named member of a [Pool]. Key is the prefix in external
 // tab ids (`<key>:<daemonShortId>`). If Key is empty, [NewPoolBackends] uses
@@ -120,6 +138,8 @@ func NewPoolBackends(backends ...PoolBackend) (*Pool, error) {
 		byKey:    byKey,
 		inFlight: make([]atomic.Int64, len(clients)),
 		tabs:     make(map[string]int),
+
+		fanoutTimeout: defaultFanoutTimeout,
 	}, nil
 }
 
@@ -322,25 +342,15 @@ func (p *Pool) callBound(ctx context.Context, tab, method string, params any, re
 }
 
 func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
+	replies, err := fanout[protocol.TabListResult](ctx, p, protocol.MethodTabList, params, false)
+	if err != nil {
+		return err
+	}
 	merged := protocol.TabListResult{Tabs: []protocol.TabListItem{}}
-	var lastErrs []error
-	anyOK := false
-	for i := range p.clients {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		var one protocol.TabListResult
-		hold := p.track(i)
-		err := p.clients[i].Call(ctx, protocol.MethodTabList, params, &one)
-		hold()
-		if err != nil {
-			lastErrs = append(lastErrs, err)
-			continue
-		}
-		anyOK = true
-		one = prefixTabListResult(p.keys[i], one)
+	for _, r := range replies {
+		one := prefixTabListResult(p.keys[r.idx], r.val)
 		ids := append([]string{one.Tab, one.Focus}, tabIDsFromList(one)...)
-		p.bindObservedTabs(i, ids...)
+		p.bindObservedTabs(r.idx, ids...)
 		merged.Tabs = append(merged.Tabs, one.Tabs...)
 		if one.Seq > merged.Seq {
 			merged.Seq = one.Seq
@@ -352,32 +362,127 @@ func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
 			merged.Focus = one.Focus
 		}
 	}
-	if !anyOK {
-		return &AllFailedError{Op: protocol.MethodTabList, Errs: lastErrs}
-	}
 	return copyResult(result, merged)
 }
 
 func (p *Pool) callTabFocus(ctx context.Context, params any, result any) error {
-	var lastErrs []error
-	for i := range p.clients {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		var one protocol.TabFocusResult
-		hold := p.track(i)
-		err := p.clients[i].Call(ctx, protocol.MethodTabFocus, params, &one)
-		hold()
-		if err != nil {
-			lastErrs = append(lastErrs, err)
-			continue
-		}
-		one.Tab = prefixPoolTab(p.keys[i], one.Tab)
-		one.Focus = prefixPoolTab(p.keys[i], one.Focus)
-		p.bindObservedTabs(i, one.Tab, one.Focus)
-		return copyResult(result, one)
+	replies, err := fanout[protocol.TabFocusResult](ctx, p, protocol.MethodTabFocus, params, true)
+	if err != nil {
+		return err
 	}
-	return &AllFailedError{Op: protocol.MethodTabFocus, Errs: lastErrs}
+	i, one := replies[0].idx, replies[0].val
+	one.Tab = prefixPoolTab(p.keys[i], one.Tab)
+	one.Focus = prefixPoolTab(p.keys[i], one.Focus)
+	p.bindObservedTabs(i, one.Tab, one.Focus)
+	return copyResult(result, one)
+}
+
+// fanoutReply is one backend's answer to a [fanout] request.
+type fanoutReply[R any] struct {
+	idx int
+	val R
+	err error
+}
+
+// fanout sends method to every backend at once and returns the successful
+// replies in constructor order (never empty when err is nil). The wait ends
+// when every backend has answered, when the caller's context is done, or after
+// p.fanoutTimeout, whichever comes first; with firstOnly it also ends as soon
+// as the first success in constructor order is known.
+//
+// Backends that have not answered by then are abandoned (their requests are
+// cancelled) and count as failed. If the caller's context was cancelled the
+// call returns its error and discards everything; on a deadline or the pool
+// timeout, successes that already arrived are kept. With no success the error
+// is the caller's context error if it is done, else [*AllFailedError].
+//
+// The request goroutines only write to their own reply; binding and copying
+// into the caller's result happen in the caller after fanout returns, so a
+// late answer has no effect.
+func fanout[R any](ctx context.Context, p *Pool, method string, params any, firstOnly bool) ([]fanoutReply[R], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Marshal once: abandoned goroutines must not read the caller's params.
+	if params != nil {
+		b, err := json.Marshal(params)
+		if err != nil {
+			return nil, fmt.Errorf("marshal params: %w", err)
+		}
+		params = json.RawMessage(b)
+	}
+	fctx, cancel := context.WithTimeout(ctx, p.fanoutTimeout)
+	defer cancel()
+
+	n := len(p.clients)
+	ch := make(chan fanoutReply[R], n) // buffered: abandoned senders never block
+	for i := range p.clients {
+		release := p.track(i)
+		go func() {
+			r := fanoutReply[R]{idx: i}
+			r.err = p.clients[i].Call(fctx, method, params, &r.val)
+			release()
+			ch <- r
+		}()
+	}
+
+	replies := make([]*fanoutReply[R], n)
+	// decided reports whether the first success in constructor order is known.
+	decided := func() bool {
+		for _, r := range replies {
+			if r == nil {
+				return false
+			}
+			if r.err == nil {
+				return true
+			}
+		}
+		return false
+	}
+wait:
+	for pending := n; pending > 0; pending-- {
+		select {
+		case r := <-ch:
+			replies[r.idx] = &r
+			if firstOnly && decided() {
+				break wait
+			}
+		case <-fctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, ctx.Err()
+			}
+			// Keep answers that completed before the deadline but lost the
+			// select race.
+			for {
+				select {
+				case r := <-ch:
+					replies[r.idx] = &r
+				default:
+					break wait
+				}
+			}
+		}
+	}
+
+	var ok []fanoutReply[R]
+	var errs []error
+	for _, r := range replies {
+		switch {
+		case r == nil:
+			errs = append(errs, fctx.Err())
+		case r.err != nil:
+			errs = append(errs, r.err)
+		default:
+			ok = append(ok, *r)
+		}
+	}
+	if len(ok) == 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, &AllFailedError{Op: method, Errs: errs}
+	}
+	return ok, nil
 }
 
 func (p *Pool) callUnbound(ctx context.Context, method string, params any, result any) error {
