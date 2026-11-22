@@ -1,29 +1,28 @@
 go-bb-browser - factory board
 =============================
-4 at your gates | 6 with the agent | 11 done | 2 sent back
-Drawn Nov 22, 11:19 | https://github.com/coinpost/go-bb-browser
+4 at your gates | 6 with the agent | 11 done | 3 sent back
+Drawn Nov 22, 11:32 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
-    FT2    11h  生命周期事件溢出重同步与优雅关停次序
-    FT3    11h  创建在途关停收尾与唯一释放记账
-    FT4    11h  日志尾行、轮转恢复与安全可写探测
-    FT5    11h  快照ref作用域与脱离节点清理
-    FT6    11h  run帮助布尔参数与选项终止符兼容
+    FT2    12h  生命周期事件溢出重同步与优雅关停次序
+    FT3    12h  创建在途关停收尾与唯一释放记账
+    FT4    12h  日志尾行、轮转恢复与安全可写探测
+    FT5    12h  快照ref作用域与脱离节点清理
+    FT6    12h  run帮助布尔参数与选项终止符兼容
 
-NEW (6)                                     avg stay 5h
-    FT13    6h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
-                顺序调用方的 tab 会全部落到同一个 daemon
-    FT22    3h  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
+NEW (5)                                     avg stay 5h
+    FT22    4h  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
     FT25    2h  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败
-    FT26    1h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
+    FT26    2h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中
     FT28    1h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容
-    FT7    43m  target释放与观测writer退役同步 (round 2)
+    FT7    57m  target释放与观测writer退役同步 (round 2)
 
-REVIEW (0)                                  avg stay 16m
-    Nothing here
+REVIEW (1)                                  avg stay 16m
+    FT13    1m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+                顺序调用方的 tab 会全部落到同一个 daemon (round 2)
 
 READY (4) [!]                               avg stay 1h
   * FT19    4h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
@@ -35,7 +34,7 @@ READY (4) [!]                               avg stay 1h
   * FT27    1h  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
                 > Check, then ship
-  * FT10    1m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+  * FT10   13m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
                 > Check, then ship
 
@@ -46,7 +45,7 @@ DONE (11)
                 adapter 被截断成永不执行的脚本
     FT24    1h  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
                 screenshot-<ts>.png
-    FT17    4h  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
+    FT17    5h  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
     ... 7 more in .factory/done/
 
