@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -1262,6 +1263,7 @@ func (s *Server) cdpHint(err error) string {
 		s.fatalCDPLost(err)
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		s.triggerBrowserProbe()
+		return fmt.Sprintf("%v (one RPC is limited to %ds; split longer work into several calls)", err, timeout.OperationSeconds)
 	}
 	return err.Error()
 }
