@@ -1,27 +1,28 @@
 go-bb-browser - factory board
 =============================
-2 at your gates | 2 with the agent | 17 done | 9 sent back
-Drawn Nov 22, 15:16 | https://github.com/coinpost/go-bb-browser
+2 at your gates | 2 with the agent | 17 done | 10 sent back
+Drawn Nov 22, 15:31 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
-    FT2    15h  生命周期事件溢出重同步与优雅关停次序
-    FT3    15h  创建在途关停收尾与唯一释放记账
-    FT4    15h  日志尾行、轮转恢复与安全可写探测
-    FT5    15h  快照ref作用域与脱离节点清理
-    FT6    15h  run帮助布尔参数与选项终止符兼容
+    FT2    16h  生命周期事件溢出重同步与优雅关停次序
+    FT3    16h  创建在途关停收尾与唯一释放记账
+    FT4    16h  日志尾行、轮转恢复与安全可写探测
+    FT5    16h  快照ref作用域与脱离节点清理
+    FT6    16h  run帮助布尔参数与选项终止符兼容
 
-NEW (1)                                     avg stay 5h
-    FT25    2h  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
-                的 daemon 使整个调用失败 (round 2)
+NEW (0)                                     avg stay 5h
+    Nothing here
 
-REVIEW (2) [!]                              avg stay 15m
-    FT28    9m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+REVIEW (3) [!]                              avg stay 15m
+    FT28   24m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容 (round 3)
-  * FT7     1m  target释放与观测writer退役同步 (round 3)
+  * FT7    15m  target释放与观测writer退役同步 (round 3)
                 > Decide: fix or take it
+    FT25    1m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+                的 daemon 使整个调用失败 (round 3)
 
 READY (1) [!]                               avg stay 2h
-  * FT26    1h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
+  * FT26    2h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中 (round 2)
                 > Check, then ship
 
