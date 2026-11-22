@@ -1,6 +1,7 @@
 package daemonclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,9 +60,16 @@ import (
 //     [*AllFailedError]. Listed ids are bound so later tab ops can use them.
 //     There is no pool-wide focus: Tab and Focus are the first non-empty
 //     values in constructor order.
+//     A successful reply is that backend's authoritative tab set: bindings
+//     for that backend which the reply's Tabs no longer name are retired
+//     (later ops return [*UnknownTabError] without an RPC). A backend whose
+//     list failed keeps its bindings, and so does one whose reply has no
+//     tabs array (missing, null or not an array): that reply counts as a
+//     failure, only an explicit [] empties a backend. See "Binding
+//     lifecycle" below.
 //   - tab_focus: query every backend concurrently and return the first
 //     successful one in constructor order (skip down), not the fastest;
-//     return prefixed ids. Not a pool-wide focus.
+//     return prefixed ids. This partial observation never retires tabs.
 //   - tab_list / tab_focus wait at most 2s (or the caller's deadline if
 //     sooner) for backends. One that has not answered by then is skipped like
 //     a down backend and its request is cancelled; answers already received
@@ -78,6 +86,44 @@ import (
 //   - Bound requests: parse the prefix, then lookup in the tab map. Unknown
 //     tab ids return [*UnknownTabError]; malformed / unknown-prefix ids return
 //     [*InvalidTabIDError] (no silent fallback).
+//
+// # Binding lifecycle
+//
+// A binding is added by a successful tab_new, tab_list or tab_focus and
+// removed by a successful tab_close, [Pool.ForgetTab], or a later successful
+// tab_list on the same backend that no longer names the tab. Only the Tabs
+// array of a list is authoritative; its Tab / Focus metadata neither binds
+// nor keeps a tab alive.
+//
+// Replies can arrive out of order, so the pool keeps a logical clock (ticked
+// under a short lock that is never held across network I/O). Every tab_list /
+// tab_focus takes its generation from that clock when it is sent, and what it
+// reports counts as evidence of that generation, whenever the reply lands:
+//
+//   - Per backend the pool remembers the generation of the newest list it has
+//     adopted. A list or focus sent before that one is ignored when it lands
+//     late: it can neither keep or add a tab the newer list dropped (even an
+//     id the pool never bound) nor retire anything.
+//   - Adopting a list retires the backend's bindings whose latest evidence is
+//     older than the list's generation. A tab created by tab_new while the
+//     list was in flight, or confirmed by a tab_list / tab_focus sent after
+//     it, survives, and such a newer observation re-binds a live tab even if
+//     an older list landed first and retired it.
+//   - tab_close and [Pool.ForgetTab] take effect when they happen: an
+//     observation already in flight does not re-bind the id, one sent
+//     afterwards does if the daemon still reports it. The marks needed for
+//     this are kept only while an observation older than the removal is in
+//     flight on that backend; each returning observation reclaims the marks
+//     older than the earliest one still in flight, so polling that always
+//     overlaps does not accumulate them.
+//
+// Limits: generations order requests by when this pool sent them, not by when
+// the daemon took the snapshot; two overlapping requests can be served in the
+// other order, and then the later-sent one still wins. A tab closed outside
+// the pool stays bound until the next successful list of its backend, as do
+// tabs of a backend whose lists keep failing; until then calls on such an id
+// reach the daemon and fail there. A late, ignored list is still returned to
+// its caller, so that result may name ids the pool does not bind.
 type Pool struct {
 	clients  []*Client
 	keys     []string
@@ -93,14 +139,44 @@ type Pool struct {
 
 	fanoutTimeout time.Duration // see defaultFanoutTimeout
 
-	mu   sync.Mutex
-	tabs map[string]int // external tab id → backend that opened it
+	mu sync.Mutex
+	// tabs maps external tab id → owning backend and the generation of the
+	// newest evidence that the tab exists.
+	tabs map[string]tabBinding
+	// clock is the pool-local logical time. Every tab_new bind, observation
+	// start and explicit removal takes a fresh tick, so ticks are unique and
+	// totally ordered. Guarded by mu, like everything below.
+	clock uint64
+	// observing holds, per backend, the generations of the in-flight
+	// tab_list / tab_focus calls.
+	observing []map[uint64]struct{}
+	// listGen is, per backend, the generation of the newest adopted tab_list
+	// (0: none yet). Observations older than it are ignored.
+	listGen []uint64
+	// removed holds, per backend, ids explicitly unbound (tab_close /
+	// ForgetTab) while an observation was in flight there: id → logical time
+	// of the removal. A mark only matters to observations older than it, so
+	// marks older than the earliest in-flight observation are reclaimed and
+	// the map is nil whenever nothing is in flight.
+	removed []map[string]uint64
 }
 
 // defaultFanoutTimeout bounds how long tab_list / tab_focus wait for backends
 // (a shorter caller deadline still wins). It matches the daemon's default CDP
 // watchdog probe timeout.
 const defaultFanoutTimeout = 2 * time.Second
+
+// tabBinding is one entry of the pool tab map.
+type tabBinding struct {
+	idx int // backend index
+	// epoch is the generation of the newest evidence for the tab: the
+	// logical time tab_new bound it, or the generation (send time) of the
+	// newest tab_list / tab_focus that reported it.
+	epoch uint64
+}
+
+// errTabListNoTabs reports a tab_list result without a tabs array.
+var errTabListNoTabs = errors.New("daemonclient: tab_list result has no tabs array")
 
 // PoolBackend is one named member of a [Pool]. Key is the prefix in external
 // tab ids (`<key>:<daemonShortId>`). If Key is empty, [NewPoolBackends] uses
@@ -153,11 +229,14 @@ func NewPoolBackends(backends ...PoolBackend) (*Pool, error) {
 		byKey[key] = i
 	}
 	return &Pool{
-		clients:  clients,
-		keys:     keys,
-		byKey:    byKey,
-		inFlight: make([]atomic.Int64, len(clients)),
-		tabs:     make(map[string]int),
+		clients:   clients,
+		keys:      keys,
+		byKey:     byKey,
+		inFlight:  make([]atomic.Int64, len(clients)),
+		tabs:      make(map[string]tabBinding),
+		observing: make([]map[uint64]struct{}, len(clients)),
+		listGen:   make([]uint64, len(clients)),
+		removed:   make([]map[string]uint64, len(clients)),
 
 		fanoutTimeout: defaultFanoutTimeout,
 	}, nil
@@ -200,7 +279,8 @@ func (p *Pool) Clients() []*Client {
 
 // ClientForTab returns the backend pinned to tab, if any. tab must be a
 // Pool-facing id (`<backendKey>:<daemonShortId>`) created via TabNew or
-// observed via TabList / TabFocus.
+// observed via TabList / TabFocus, and not since closed, forgotten, or retired
+// by a later TabList of its backend.
 func (p *Pool) ClientForTab(tab string) (*Client, bool) {
 	idx, ok := p.lookupTab(tab)
 	if !ok {
@@ -211,6 +291,8 @@ func (p *Pool) ClientForTab(tab string) (*Client, bool) {
 
 // ForgetTab drops tab affinity without calling tab_close (for example after a
 // daemon-side idle close). Subsequent ops for tab return [*UnknownTabError].
+// A TabList / TabFocus already in flight does not re-bind it; one started
+// afterwards does if the daemon still reports the tab.
 func (p *Pool) ForgetTab(tab string) {
 	p.unbind(tab)
 }
@@ -366,18 +448,16 @@ func (p *Pool) callBound(ctx context.Context, tab, method string, params any, re
 }
 
 func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
-	replies, err := fanout[protocol.TabListResult](ctx, p, protocol.MethodTabList, params, false)
+	observations := make([]backendObservation, len(p.clients))
+	defer p.endObservations(observations)
+	replies, err := fanout[backendTabList](ctx, p, protocol.MethodTabList, params, false, observations)
 	if err != nil {
 		return err
 	}
 	merged := protocol.TabListResult{Tabs: []protocol.TabListItem{}}
-	var observed []observedTab
 	for _, r := range replies {
-		one := prefixTabListResult(p.keys[r.idx], r.val)
-		observed = appendObserved(observed, r.idx, one.Tab, one.Focus)
-		for _, item := range one.Tabs {
-			observed = appendObserved(observed, r.idx, item.Tab)
-		}
+		one := prefixTabListResult(p.keys[r.idx], r.val.TabListResult)
+		observations[r.idx].tabs = tabIDsFromList(one)
 		merged.Tabs = append(merged.Tabs, one.Tabs...)
 		if one.Seq > merged.Seq {
 			merged.Seq = one.Seq
@@ -389,57 +469,50 @@ func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
 			merged.Focus = one.Focus
 		}
 	}
-	return p.commitObserved(ctx, observed, result, merged)
+	return p.commitObserved(ctx, observations, true, result, merged)
 }
 
 func (p *Pool) callTabFocus(ctx context.Context, params any, result any) error {
-	replies, err := fanout[protocol.TabFocusResult](ctx, p, protocol.MethodTabFocus, params, true)
+	observations := make([]backendObservation, len(p.clients))
+	defer p.endObservations(observations)
+	replies, err := fanout[protocol.TabFocusResult](ctx, p, protocol.MethodTabFocus, params, true, observations)
 	if err != nil {
 		return err
 	}
 	i, one := replies[0].idx, replies[0].val
 	one.Tab = prefixPoolTab(p.keys[i], one.Tab)
 	one.Focus = prefixPoolTab(p.keys[i], one.Focus)
-	return p.commitObserved(ctx, appendObserved(nil, i, one.Tab, one.Focus), result, one)
+	observations[i].tabs = []string{one.Tab, one.Focus}
+	return p.commitObserved(ctx, observations, false, result, one)
 }
 
-// observedTab is a binding staged by tab_list / tab_focus: Pool-facing tab id
-// → backend that reported it.
-type observedTab struct {
-	tab string
-	idx int
-}
-
-func appendObserved(dst []observedTab, idx int, tabs ...string) []observedTab {
-	for _, tab := range tabs {
-		if tab = strings.TrimSpace(tab); tab != "" {
-			dst = append(dst, observedTab{tab: tab, idx: idx})
-		}
-	}
-	return dst
+// Each fanout owns one slot per backend. Only selected replies stage tab IDs.
+// A non-nil empty slice stages an authoritative empty list.
+type backendObservation struct {
+	started uint64
+	tabs    []string
 }
 
 // commitObserved is the single point where a tab_list / tab_focus outcome
 // takes effect. Up to here nothing has touched the pool's tab map or the
-// caller's result: the bindings are staged in observed and src is decoded into
-// a fresh value of the result's type (outside the lock, since that can be slow
-// and may run the caller's own decoder).
+// caller's result. The observations hold the proposed changes. Decoding src
+// into a fresh value happens outside the lock and may run the caller's decoder.
 //
 // Then, holding the affinity lock, the caller's context is checked one last
 // time. If it was cancelled (done for a reason other than its deadline) at any
 // point before that check, including while preparing the result or waiting
-// for the lock, the call returns that error with no binding made and result
-// left exactly as it was. A deadline that passed is not a cancellation: the
-// in-budget answers are committed. Otherwise the whole batch is bound under
-// the same lock hold and the prepared value replaces *result.
+// for the lock, the call returns that error with bindings and result
+// left untouched. A deadline that passed is not a cancellation: the
+// in-budget answers are committed. The whole batch is reconciled under the
+// same lock hold and the prepared value replaces *result.
 //
 // A cancellation after that check is too late: the batch is committed and the
 // call succeeds.
 //
 // Bindings follow [Pool.bind]: an id another backend already owns is left
-// alone. A src that cannot be decoded into result is reported after binding
-// (the tabs were observed either way) and result is not written.
-func (p *Pool) commitObserved(ctx context.Context, observed []observedTab, result any, src any) error {
+// alone. If src cannot be decoded into result, reconciliation still takes
+// effect. The decode error is returned and result is left untouched.
+func (p *Pool) commitObserved(ctx context.Context, observations []backendObservation, authoritative bool, result any, src any) error {
 	deliver, decodeErr := stageResult(result, src)
 
 	p.mu.Lock()
@@ -447,11 +520,10 @@ func (p *Pool) commitObserved(ctx context.Context, observed []observedTab, resul
 		p.mu.Unlock()
 		return err
 	}
-	for _, o := range observed {
-		if prev, ok := p.tabs[o.tab]; ok && prev != o.idx {
-			continue
+	for i, o := range observations {
+		if o.tabs != nil {
+			p.applyObservationLocked(i, o.started, authoritative, o.tabs)
 		}
-		p.tabs[o.tab] = o.idx
 	}
 	p.mu.Unlock()
 
@@ -519,7 +591,7 @@ type fanoutReply[R any] struct {
 // The goroutines only write to their own reply; binding and handing over the
 // caller's result happen in the calling goroutine after fanout returns, so a
 // late answer has no effect.
-func fanout[R any](ctx context.Context, p *Pool, method string, params any, firstOnly bool) ([]fanoutReply[R], error) {
+func fanout[R any](ctx context.Context, p *Pool, method string, params any, firstOnly bool, observations []backendObservation) ([]fanoutReply[R], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -540,6 +612,7 @@ func fanout[R any](ctx context.Context, p *Pool, method string, params any, firs
 
 	ch := make(chan fanoutReply[R], n) // buffered: abandoned senders never block
 	for i, target := range targets {
+		observations[i].started = p.beginObserve(i)
 		release := p.track(i)
 		go func() {
 			r := fanoutReply[R]{idx: i}
@@ -728,11 +801,127 @@ func (p *Pool) bind(tab string, idx int) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if prev, ok := p.tabs[tab]; ok && prev != idx {
+	if prev, ok := p.tabs[tab]; ok && prev.idx != idx {
 		return &TabCollisionError{Tab: tab}
 	}
-	p.tabs[tab] = idx
+	p.clock++
+	p.tabs[tab] = tabBinding{idx: idx, epoch: p.clock}
+	// A fresh tab_new outranks an earlier removal of the same id.
+	delete(p.removed[idx], tab)
 	return nil
+}
+
+// beginObserve marks the start of a tab_list / tab_focus on backend idx and
+// returns its generation. Every call must be paired with exactly one
+// endObserveLocked. The lock is released before any network I/O.
+func (p *Pool) beginObserve(idx int) uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clock++
+	if p.observing[idx] == nil {
+		p.observing[idx] = make(map[uint64]struct{})
+	}
+	p.observing[idx][p.clock] = struct{}{}
+	return p.clock
+}
+
+// The collector owns these observations through result staging and commit.
+// Even if an abandoned transport keeps running, it no longer needs a mark
+// once the caller returns and cannot apply its late reply.
+func (p *Pool) endObservations(observations []backendObservation) {
+	if len(observations) == 0 || observations[0].started == 0 {
+		return // fanout returned before dispatch
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, o := range observations {
+		p.endObserveLocked(i, o.started)
+	}
+}
+
+// endObserveLocked drops the observation of generation started from the
+// in-flight set and reclaims the removal marks no remaining observation can
+// need: all of them when the backend goes idle, otherwise those older than
+// the earliest observation still in flight.
+func (p *Pool) endObserveLocked(idx int, started uint64) {
+	delete(p.observing[idx], started)
+	if len(p.observing[idx]) == 0 {
+		p.observing[idx] = nil
+		p.removed[idx] = nil
+		return
+	}
+	if len(p.removed[idx]) == 0 {
+		return
+	}
+	var earliest uint64
+	for g := range p.observing[idx] {
+		if earliest == 0 || g < earliest {
+			earliest = g
+		}
+	}
+	if earliest < started {
+		return // an older observation is still in flight: nothing new to reclaim
+	}
+	for tab, at := range p.removed[idx] {
+		if at < earliest {
+			delete(p.removed[idx], tab)
+		}
+	}
+}
+
+// applyObservationLocked applies a successful observation of backend idx sent at
+// generation started. tabs are the external ids the backend
+// reported; when authoritative (tab_list) they are its whole set.
+//
+// Everything is judged by started, never by when the reply landed:
+//
+//   - An observation older than the newest adopted list is ignored.
+//   - A reported id is bound with evidence generation started, unless it was
+//     explicitly removed after started (tab_close / ForgetTab).
+//   - An authoritative list retires the backend's bindings whose evidence is
+//     older than started. Bindings from a tab_new that completed, or an
+//     observation that was sent, after started are newer evidence and stay.
+func (p *Pool) applyObservationLocked(idx int, started uint64, authoritative bool, tabs []string) {
+	if started < p.listGen[idx] {
+		return
+	}
+	for _, tab := range tabs {
+		tab = strings.TrimSpace(tab)
+		if tab == "" {
+			continue
+		}
+		if at, gone := p.removed[idx][tab]; gone && at > started {
+			continue
+		}
+		prev, ok := p.tabs[tab]
+		if ok && (prev.idx != idx || prev.epoch >= started) {
+			continue // other backend (defensive, see bind) or newer evidence
+		}
+		p.tabs[tab] = tabBinding{idx: idx, epoch: started}
+	}
+	if !authoritative {
+		return
+	}
+	p.listGen[idx] = started
+	for tab, b := range p.tabs {
+		if b.idx == idx && b.epoch < started {
+			delete(p.tabs, tab)
+		}
+	}
+}
+
+// markRemovedLocked remembers that tab was explicitly removed from backend
+// idx at logical time at, for the benefit of observations still in flight
+// there (all of them are older than at). With none in flight nothing is
+// recorded: an observation sent later is newer evidence.
+func (p *Pool) markRemovedLocked(idx int, tab string, at uint64) {
+	if len(p.observing[idx]) == 0 {
+		return
+	}
+	if p.removed[idx] == nil {
+		p.removed[idx] = make(map[string]uint64)
+	}
+	p.removed[idx][tab] = at
 }
 
 // abandonCreated closes a tab on idx without touching the pool map (the id may
@@ -754,8 +943,22 @@ func (p *Pool) unbind(tab string) {
 		return
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	// The prefix names the backend even when tab is not bound yet (an
+	// in-flight observation might be about to bind it).
+	idx := -1
+	if b, ok := p.tabs[tab]; ok {
+		idx = b.idx
+	} else if key, _, ok := SplitTabID(tab); ok {
+		if i, known := p.byKey[key]; known {
+			idx = i
+		}
+	}
 	delete(p.tabs, tab)
-	p.mu.Unlock()
+	if idx >= 0 {
+		p.clock++
+		p.markRemovedLocked(idx, tab, p.clock)
+	}
 }
 
 func (p *Pool) lookupTab(tab string) (int, bool) {
@@ -765,8 +968,8 @@ func (p *Pool) lookupTab(tab string) (int, bool) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	idx, ok := p.tabs[tab]
-	return idx, ok
+	b, ok := p.tabs[tab]
+	return b.idx, ok
 }
 
 // resolveTab parses a Pool-facing tab id, checks the prefix against this pool,
@@ -868,6 +1071,37 @@ func prefixTabListResult(key string, r protocol.TabListResult) protocol.TabListR
 	}
 	r.Tabs = out
 	return r
+}
+
+type backendTabList struct {
+	protocol.TabListResult
+}
+
+// UnmarshalJSON decodes one backend's tab_list result and requires an
+// explicit tabs array. A missing, null or non-array tabs is an error rather
+// than an empty set, so a malformed reply can never empty a backend.
+func (r *backendTabList) UnmarshalJSON(raw []byte) error {
+	var peek struct {
+		Tabs json.RawMessage `json:"tabs"`
+	}
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		return fmt.Errorf("daemonclient: decode tab_list result: %w", err)
+	}
+	if tabs := bytes.TrimSpace(peek.Tabs); len(tabs) == 0 || tabs[0] != '[' {
+		return errTabListNoTabs
+	}
+	if err := json.Unmarshal(raw, &r.TabListResult); err != nil {
+		return fmt.Errorf("daemonclient: decode tab_list result: %w", err)
+	}
+	return nil
+}
+
+func tabIDsFromList(r protocol.TabListResult) []string {
+	ids := make([]string, 0, len(r.Tabs))
+	for _, item := range r.Tabs {
+		ids = append(ids, item.Tab)
+	}
+	return ids
 }
 
 // setJSONTab rewrites only the tab field and leaves every other value untouched.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -39,11 +40,14 @@ var commitOps = append(fanoutOps[:len(fanoutOps):len(fanoutOps)], []struct {
 }...)
 
 // commitPool has two healthy in-process backends listing several tabs each and
-// one binding ("0:old") made before the call under test.
+// an old binding on each backend made before the call under test.
 func commitPool(t *testing.T) *Pool {
 	t.Helper()
 	p := stubPool(t, &stubRT{tab: "ta", extra: 3}, &stubRT{tab: "tb", extra: 3})
 	if err := p.bind("0:old", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.bind("1:old", 1); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -63,12 +67,33 @@ func mustStillBind(t *testing.T, p *Pool, tab string, idx int) {
 // behind it), runs act, and only then lets the call take the lock.
 func duringCommitLockWait(t *testing.T, p *Pool, ctx *gateCtx, act func(), call func()) {
 	t.Helper()
-	p.mu.Lock()
+	// Both RPCs must have registered their generations before we take mu.
+	gates := make([]*gate, p.Len())
+	for i, c := range p.Clients() {
+		g := newGate()
+		defer g.open()
+		gates[i] = g
+		c.HTTP.Transport.(*stubRT).before = func(*http.Request) error {
+			g.wait()
+			return nil
+		}
+	}
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
 		call()
 	}()
+	for _, g := range gates {
+		select {
+		case <-g.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("RPC did not reach its gate")
+		}
+	}
+	p.mu.Lock()
+	for _, g := range gates {
+		g.open()
+	}
 	select {
 	case <-ctx.stopped:
 	case <-time.After(5 * time.Second):
@@ -103,6 +128,7 @@ func TestPool_fanoutCancelWhileWaitingForCommitLock(t *testing.T) {
 			}
 			mustNotBind(t, p, commitPoolTabs...)
 			mustStillBind(t, p, "0:old", 0)
+			mustStillBind(t, p, "1:old", 1)
 			waitInFlightZero(t, p)
 		})
 	}
@@ -114,8 +140,6 @@ func TestPool_fanoutCommitsStagedBatchWithoutCancel(t *testing.T) {
 		ctx := newGateCtx(time.Time{})
 		defer ctx.release()
 		p := commitPool(t)
-		// Defensive rule kept from bind: an id another backend owns is not taken over.
-		p.tabs["1:tb-1"] = 0
 		var list protocol.TabListResult
 		var err error
 		duringCommitLockWait(t, p, ctx, func() {}, func() { list, err = p.TabList(ctx, protocol.TabListParams{}) })
@@ -129,8 +153,8 @@ func TestPool_fanoutCommitsStagedBatchWithoutCancel(t *testing.T) {
 		for _, tab := range commitPoolTabs {
 			mustStillBind(t, p, tab, int(tab[0]-'0'))
 		}
-		mustStillBind(t, p, "1:tb-1", 0)
-		mustStillBind(t, p, "0:old", 0)
+		mustStillBind(t, p, "1:tb-1", 1)
+		mustNotBind(t, p, "0:old", "1:old")
 	})
 	t.Run("TabFocus", func(t *testing.T) {
 		ctx := newGateCtx(time.Time{})
@@ -162,12 +186,16 @@ func TestPool_fanoutCommitsStagedBatchWithoutCancel(t *testing.T) {
 		ctx := newGateCtx(time.Time{})
 		defer ctx.release()
 		p := commitPool(t)
+		// Defensive rule kept from bind: an id another backend owns is not taken over.
+		if err := p.bind("0:ta", 1); err != nil {
+			t.Fatal(err)
+		}
 		var err error
 		duringCommitLockWait(t, p, ctx, func() {}, func() { err = p.Call(ctx, protocol.MethodTabFocus, nil, nil) })
 		if err != nil {
 			t.Fatal(err)
 		}
-		mustStillBind(t, p, "0:ta", 0)
+		mustStillBind(t, p, "0:ta", 1)
 	})
 }
 
@@ -294,6 +322,52 @@ func TestPool_fanoutUndecodableResult(t *testing.T) {
 				t.Fatalf("result written despite the error: %d", *n)
 			}
 			mustStillBind(t, p, "0:ta", 0)
+		})
+	}
+}
+
+// A selected reply still needs its removal marks during result staging. An
+// abandoned transport may keep running after return, without pinning marks
+// or changing bindings when it eventually produces a successful reply.
+func TestPool_fanoutObservationLifetime(t *testing.T) {
+	for _, method := range []string{protocol.MethodTabList, protocol.MethodTabFocus} {
+		t.Run(method, func(t *testing.T) {
+			slow := newGate()
+			defer slow.open()
+			fast := &stubRT{tab: "ta"}
+			p := stubPool(t, fast, &stubRT{tab: "tb", before: func(*http.Request) error {
+				slow.wait()
+				return nil
+			}})
+			fast.before = func(*http.Request) error {
+				<-slow.entered
+				p.ForgetTab("1:tb")
+				return nil
+			}
+			if err := p.bind("1:old", 1); err != nil {
+				t.Fatal(err)
+			}
+			p.fanoutTimeout = 500 * time.Millisecond
+			decodeProbeHook = func() { p.ForgetTab("0:ta") }
+			defer func() { decodeProbeHook = nil }()
+			var result decodeProbe
+			if err := p.Call(context.Background(), method, nil, &result); err != nil {
+				t.Fatal(err)
+			}
+			if tabFromRawResult(json.RawMessage(result.Raw)) != "0:ta" {
+				t.Fatalf("staged result: %s", result.Raw)
+			}
+			mustNotBind(t, p, "0:ta", "1:tb")
+			mustStillBind(t, p, "1:old", 1)
+			for i := range p.clients {
+				if len(p.observing[i]) != 0 || len(p.removed[i]) != 0 {
+					t.Fatalf("backend %d retained observations or removal marks after return", i)
+				}
+			}
+			slow.open()
+			waitInFlightZero(t, p)
+			mustNotBind(t, p, "1:tb")
+			mustStillBind(t, p, "1:old", 1)
 		})
 	}
 }
