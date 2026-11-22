@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-5 at your gates | 9 with the agent | 8 done
-Drawn Nov 22, 09:32 | https://github.com/coinpost/go-bb-browser
+2 at your gates | 9 with the agent | 11 done
+Drawn Nov 22, 09:39 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2    10h  生命周期事件溢出重同步与优雅关停次序
@@ -11,7 +11,7 @@ BACKLOG (5)                                 never built
     FT6    10h  run帮助布尔参数与选项终止符兼容
 
 NEW (8)                                     avg stay 5h
-    FT7     7h  target释放与观测writer退役同步
+    FT7     8h  target释放与观测writer退役同步
     FT10    5h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭
     FT13    4h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
@@ -21,42 +21,33 @@ NEW (8)                                     avg stay 5h
     FT21    2h  [P3] 短 tab id 在后缀碰撞时取决于登记顺序，重启后同一短 id 会指
                 向另一个 tab
     FT22    2h  [P3] network_route 同步 CDP 失败后规则仍留在内存表中，没有回滚
-    FT25   46m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+    FT25   52m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败
-    FT26    1m  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
+    FT26    6m  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中
 
 REVIEW (1)                                  avg stay 17m
-    FT27    6m  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
+    FT27   13m  [P3] CLI 与 adapter 文档宣称 run 有约 180s 预算（
                 eval/snapshot/fetch 为 120s），daemon 对每个 RPC 固定 60s 截止
 
-READY (5) [!]                               avg stay 1h
-  * FT18    3h  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
-                该行及其后的全部记录截断丢弃
-                > Check, then ship
+READY (2) [!]                               avg stay 1h
   * FT19    2h  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
                 > Check, then ship
   * FT20    2h  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
                 其他用户可读取 fill 文本与 fetch 头中的凭据
                 > Check, then ship
-  * FT23    1h  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
-                adapter 被截断成永不执行的脚本
-                > Check, then ship
-  * FT24    1h  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
-                screenshot-<ts>.png
-                > Check, then ship
 
-DONE (8)
+DONE (11)
+    FT18    1m  [P3] rpc.jsonl 尾部不是换行时继续追加会粘行，下次启动 replay 将
+                该行及其后的全部记录截断丢弃
+    FT23    1m  [P3] adapter 包装器的括号扫描把正则字面量里的 // 当行注释，合法
+                adapter 被截断成永不执行的脚本
+    FT24    1m  [P3] `screenshot --format jpeg` 未指定路径时把 JPEG 数据写入
+                screenshot-<ts>.png
     FT17    3h  [P2] 未知/过期 tab id 的请求在 tabCDPLocks 中留下永不回收的条目
                 （key 由客户端控制）
-    FT16    3h  [P2] 官方 compose 示例的 named volume 对镜像内 nonroot 用户不可
-                写，daemon 启动即退出
-    FT11    3h  [P2] 过期的 Target.getTargets 快照晚于 tab_new 应用时，会把刚创
-                建的受管 tab 从注册表和空闲跟踪中删除
-    FT12    3h  [P2] snapshot 不清除旧的 __bb_snap_ref 属性，click/fill @ref 可
-                能命中上一次快照遗留的其它元素
-    ... 4 more in .factory/done/
+    ... 7 more in .factory/done/
 
 * waits for you. [!] a stage that holds one.
 Each item's thread is its file in .factory/<folder>/.
