@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -201,6 +202,256 @@ func TestPool_tabNewEvenDistribution(t *testing.T) {
 		if v != n/3 {
 			t.Fatalf("backend %d tab_new=%d want %d (all=%v)", i, v, n/3, got)
 		}
+	}
+}
+
+// poolCreators opens one tab through each public creation path; both must
+// share the same spread policy.
+var poolCreators = []struct {
+	name   string
+	create func(context.Context, *Pool) error
+}{
+	{"TabNew", func(ctx context.Context, p *Pool) error {
+		_, err := p.TabNew(ctx, protocol.TabNewParams{URL: "about:blank"})
+		return err
+	}},
+	{"Call", func(ctx context.Context, p *Pool) error {
+		return p.Call(ctx, protocol.MethodTabNew, map[string]any{"url": "about:blank"}, nil)
+	}},
+}
+
+func newFakePool(t *testing.T, n int) (*Pool, []*fakeDaemon) {
+	t.Helper()
+	clients := make([]*Client, n)
+	states := make([]*fakeDaemon, n)
+	for i := range n {
+		srv, st := newFakeDaemon(t, "t")
+		clients[i], states[i] = NewClient(srv.URL), st
+	}
+	p, err := NewPool(clients...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, states
+}
+
+func tabNewCounts(states []*fakeDaemon) []int {
+	out := make([]int, len(states))
+	for i, st := range states {
+		out[i] = st.tabNewCount()
+	}
+	return out
+}
+
+// Probing between creates must not consume tab_new's spread: a sequential
+// caller that checks health before each tab still gets an even distribution.
+func TestPool_tabNewSpreadIgnoresInterleavedProbes(t *testing.T) {
+	cases := []struct {
+		name     string
+		backends int
+		probes   []func(*Pool, context.Context) error
+	}{
+		{"2backends_Health", 2, []func(*Pool, context.Context) error{(*Pool).Health}},
+		{"3backends_LiveReady", 3, []func(*Pool, context.Context) error{(*Pool).Live, (*Pool).Ready}},
+	}
+	for _, tc := range cases {
+		for _, cr := range poolCreators {
+			t.Run(tc.name+"/"+cr.name, func(t *testing.T) {
+				p, states := newFakePool(t, tc.backends)
+				ctx := context.Background()
+				const perBackend = 10
+				for range perBackend * tc.backends {
+					for _, probe := range tc.probes {
+						if err := probe(p, ctx); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := cr.create(ctx, p); err != nil {
+						t.Fatal(err)
+					}
+				}
+				got := tabNewCounts(states)
+				for i, v := range got {
+					if v != perBackend {
+						t.Fatalf("backend %d tab_new=%d want %d (all=%v)", i, v, perBackend, got)
+					}
+				}
+			})
+		}
+	}
+}
+
+// With one backend rejecting RPCs, its share must be split across the healthy
+// backends rather than handed to its ring neighbour.
+func TestPool_tabNewSpreadWithOneBackendDown(t *testing.T) {
+	const backends, n = 3, 30
+	for down := range backends {
+		for _, cr := range poolCreators {
+			for _, probed := range []bool{false, true} {
+				name := fmt.Sprintf("down%d/%s/probed=%v", down, cr.name, probed)
+				t.Run(name, func(t *testing.T) {
+					p, states := newFakePool(t, backends)
+					states[down].failRPC.Store(true)
+					states[down].failHealth.Store(true)
+					ctx := context.Background()
+					for range n {
+						if probed {
+							if err := p.Live(ctx); err != nil {
+								t.Fatal(err)
+							}
+							if err := p.Ready(ctx); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if err := cr.create(ctx, p); err != nil {
+							t.Fatal(err)
+						}
+					}
+					got := tabNewCounts(states)
+					if got[down] != 0 {
+						t.Fatalf("down backend %d created tabs: %v", down, got)
+					}
+					x, y := got[(down+1)%backends], got[(down+2)%backends]
+					if x+y != n {
+						t.Fatalf("tab_new total %d want %d (all=%v)", x+y, n, got)
+					}
+					if d := x - y; d < -1 || d > 1 {
+						t.Fatalf("healthy backends differ by more than 1: %v", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A recovered backend rejoins the rotation without a catch-up burst.
+func TestPool_tabNewSpreadAfterBackendRecovers(t *testing.T) {
+	p, states := newFakePool(t, 3)
+	ctx := context.Background()
+	states[1].failRPC.Store(true)
+	for range 10 {
+		if _, err := p.TabNew(ctx, protocol.TabNewParams{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	states[1].failRPC.Store(false)
+	before := tabNewCounts(states)
+	for range 30 {
+		if err := p.Health(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.TabNew(ctx, protocol.TabNewParams{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := tabNewCounts(states)
+	for i := range after {
+		if d := after[i] - before[i]; d != 10 {
+			t.Fatalf("backend %d got %d tabs after recovery, want 10 (before=%v after=%v)", i, d, before, after)
+		}
+	}
+}
+
+// Concurrent creates with one backend down still all succeed and reach every
+// healthy backend.
+func TestPool_concurrentTabNewWithOneBackendDown(t *testing.T) {
+	p, states := newFakePool(t, 3)
+	states[0].failRPC.Store(true)
+	ctx := context.Background()
+	const n = 60
+	errCh := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			if i%2 == 0 {
+				_ = p.Health(ctx)
+			}
+			errCh <- poolCreators[i%len(poolCreators)].create(ctx, p)
+		})
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := tabNewCounts(states)
+	if got[0] != 0 || got[1]+got[2] != n || got[1] == 0 || got[2] == 0 {
+		t.Fatalf("tab_new distribution %v", got)
+	}
+}
+
+// A create that is still waiting on a failing backend must not, once it fails
+// over, take or skip the turn of a healthy backend that a concurrent create
+// has not used. The interleaving is pinned with channels: A blocks on backend
+// 0 (which then answers 503), B runs to completion, then A is released and
+// fails over. Repeated pairs must keep both healthy backends within one tab.
+func TestPool_tabNewConcurrentFailoverKeepsHealthySpread(t *testing.T) {
+	for _, cr := range poolCreators {
+		t.Run(cr.name, func(t *testing.T) {
+			arrived := make(chan struct{})
+			release := make(chan struct{})
+			var downHits atomic.Int64
+			down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				downHits.Add(1)
+				arrived <- struct{}{}
+				<-release
+				http.Error(w, "down", http.StatusServiceUnavailable)
+			}))
+			t.Cleanup(down.Close)
+			srv1, st1 := newFakeDaemon(t, "t")
+			srv2, st2 := newFakeDaemon(t, "t")
+			p, err := NewPool(NewClient(down.URL), NewClient(srv1.URL), NewClient(srv2.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			const pairs = 10
+			for pair := range pairs {
+				aDone := make(chan error, 1)
+				go func() { aDone <- cr.create(ctx, p) }()
+				blocked := false
+				select {
+				case <-arrived:
+					blocked = true
+				case err := <-aDone:
+					// A went straight to a healthy backend this round.
+					if err != nil {
+						t.Fatalf("pair %d: A: %v", pair, err)
+					}
+				}
+				// B runs to completion; if it lands on the down backend itself
+				// it is let through at once so only A's wait is held open.
+				bDone := make(chan error, 1)
+				go func() { bDone <- cr.create(ctx, p) }()
+				for bRunning := true; bRunning; {
+					select {
+					case <-arrived:
+						release <- struct{}{}
+					case err := <-bDone:
+						if err != nil {
+							t.Fatalf("pair %d: B: %v", pair, err)
+						}
+						bRunning = false
+					}
+				}
+				if blocked {
+					release <- struct{}{}
+					if err := <-aDone; err != nil {
+						t.Fatalf("pair %d: A after failover: %v", pair, err)
+					}
+				}
+			}
+			got := []int{st1.tabNewCount(), st2.tabNewCount()}
+			if got[0]+got[1] != 2*pairs {
+				t.Fatalf("tab_new total %d want %d (healthy=%v)", got[0]+got[1], 2*pairs, got)
+			}
+			if d := got[0] - got[1]; d < -1 || d > 1 {
+				t.Fatalf("healthy backends differ by more than 1: [0 %d %d] (down backend hit %d times)",
+					got[0], got[1], downHits.Load())
+			}
+		})
 	}
 }
 

@@ -133,10 +133,10 @@ func TestAppendRPC_compactsLongScriptOnDisk(t *testing.T) {
 	}
 
 	if err := s.AppendRPC(LogRecord{
-		Action:   "eval",
-		Body:     body,
-		TargetID: "aa11",
-		OK:       true,
+		Action: "eval",
+		Body:   body,
+		Target: "aa11",
+		OK:     true,
 	}); err != nil {
 		t.Fatal(err)
 	}

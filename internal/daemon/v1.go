@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -171,7 +172,7 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 		Body:   meta.body,
 		// Only the identity this request was actually resolved to is recorded;
 		// what the client asked for stays in Body.
-		TargetID: string(meta.target),
+		Target:   string(meta.target),
 		SenderIP: meta.senderIP,
 		Seq:      seq,
 		OK:       ok,
@@ -1273,6 +1274,7 @@ func (s *Server) cdpHint(err error) string {
 		s.fatalCDPLost(err)
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		s.triggerBrowserProbe()
+		return fmt.Sprintf("%v (one RPC is limited to %ds; split longer work into several calls)", err, timeout.OperationSeconds)
 	}
 	return err.Error()
 }

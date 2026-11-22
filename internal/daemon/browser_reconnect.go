@@ -64,13 +64,19 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	listCtx, cancel := context.WithTimeout(ctx, timeout.Operation)
 	// runTargetSync is already registering lifecycle events: take the token
 	// before the request so this snapshot cannot remove what they register.
+	// The managed retirement candidates are fixed at the same point, so the
+	// reply can only retire tabs that were already persisted when it was asked.
+	candidates := s.beginManagedReconcile()
 	tok := s.beginTargetEnumeration()
 	targets, terr := sess.PageTargetsContext(listCtx)
 	cancel()
 	snaps := s.syncInitialTargets(sess, tok, targets, terr)
 	// Perform the initial managed-tab recovery. If target enumeration failed,
-	// runTargetSync repeats this reconciliation after its successful retry.
-	s.reconcileIdleFromLog(snaps)
+	// runTargetSync runs this reconciliation after its successful retry; it must
+	// not run on a failed enumeration, which would retire still-live tabs.
+	if terr == nil {
+		s.reconcileIdleFromLog(candidates, snaps)
+	}
 	go s.runCDPWatchdog(ctx, sess)
 	if s.logger != nil {
 		s.logger.Info("browser CDP session connected", "debugger", s.cfg.DebuggerURL)
@@ -121,8 +127,10 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		}
 		if sess.ConsumeTargetDirty() {
 			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
-			// Token before the request: RPCs (tab_new) keep registering tabs
-			// while this resync is in flight.
+			// Token and managed retirement candidates before the request: RPCs
+			// (tab_new) keep registering and persisting tabs while this resync is
+			// in flight and until its reply has been reconciled.
+			candidates := s.beginManagedReconcile()
 			tok := s.beginTargetEnumeration()
 			infos, err := sess.PageTargetsContext(probe)
 			cancel()
@@ -130,7 +138,7 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 				snaps := s.syncTabsFromTargets(tok, infos)
 				// Reconciliation is idempotent for tabs already tracked in memory and
 				// is required when the startup target enumeration failed.
-				s.reconcileIdleFromLog(snaps)
+				s.reconcileIdleFromLog(candidates, snaps)
 			} else {
 				sess.MarkTargetDirty()
 				s.triggerBrowserProbe()

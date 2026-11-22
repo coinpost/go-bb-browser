@@ -19,7 +19,7 @@ const (
 )
 
 // Records written by a daemon that named tabs by short alias carry the alias
-// under "tab" and no "target_id". They are replayed without error but manage
+// under "tab" and no "target". They are replayed without error but manage
 // nothing, whatever the alias (or the request body) happens to contain.
 func TestReplaySkipsRecordsWithoutCompleteTargetID(t *testing.T) {
 	dir := t.TempDir()
@@ -29,8 +29,10 @@ func TestReplaySkipsRecordsWithoutCompleteTargetID(t *testing.T) {
 		`{"action":"tab_new","body":{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1},"tab":"1234","sender_ip":"","ok":true,"time":"` + at + `"}`,
 		// legacy: "tab" that looks like a complete id is still not an identity
 		`{"action":"tab_new","body":{"jsonrpc":"2.0","method":"tab_new","params":{},"id":2},"tab":"` + storeIDB + `","sender_ip":"","ok":true,"time":"` + at + `"}`,
-		// current format
-		`{"action":"tab_new","body":{"jsonrpc":"2.0","method":"tab_new","params":{},"id":3},"target_id":"` + storeIDA + `","sender_ip":"","ok":true,"time":"` + at + `"}`,
+		// current format: only a lifecycle record with a complete id registers
+		`{"action":"managed_tab_open","body":{},"target":"` + storeIDA + `","sender_ip":"","ok":true,"time":"` + at + `"}`,
+		// a lifecycle record naming its tab only by alias registers nothing
+		`{"action":"managed_tab_open","body":{},"tab":"1234","sender_ip":"","ok":true,"time":"` + at + `"}`,
 		// the tab a request body asks for is not an identity either: it must
 		// neither register nor refresh nor release anything
 		`{"action":"tab_new","body":{"jsonrpc":"2.0","method":"tab_new","params":{"tab":"` + storeIDB + `"},"id":4},"sender_ip":"","ok":true,"time":"` + at + `"}`,
@@ -55,17 +57,14 @@ func TestReplaySkipsRecordsWithoutCompleteTargetID(t *testing.T) {
 	}
 }
 
-func TestLogRecordWritesTargetIDNotLegacyTab(t *testing.T) {
+func TestLogRecordWritesTargetNotLegacyTab(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(OpenConfig{StateDir: dir, MaxLogBytes: 600})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
-	if err := s.AppendRPC(LogRecord{
-		Action: protocol.MethodTabNew, Body: json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
-		TargetID: storeIDA, OK: true, Time: t0,
-	}); err != nil {
+	if err := s.RegisterManagedTab(storeIDA, t0); err != nil {
 		t.Fatal(err)
 	}
 	// An unresolved request (no identity) for the same-suffix id changes nothing.
@@ -92,8 +91,8 @@ func TestLogRecordWritesTargetIDNotLegacyTab(t *testing.T) {
 	if err := json.Unmarshal(first, &rec); err != nil {
 		t.Fatalf("snapshot line %q: %v", first, err)
 	}
-	if rec["action"] != protocol.MethodTabNew || rec["target_id"] != storeIDA {
-		t.Fatalf("snapshot record = %v, want tab_new for %s", rec, storeIDA)
+	if rec["action"] != ActionManagedTabOpen || rec["target"] != storeIDA {
+		t.Fatalf("snapshot record = %v, want managed_tab_open for %s", rec, storeIDA)
 	}
 	if _, legacy := rec["tab"]; legacy {
 		t.Fatalf("snapshot record carries the legacy tab key: %v", rec)
