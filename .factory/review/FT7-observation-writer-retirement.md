@@ -158,3 +158,24 @@ notes:
 未检查：真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、systemd；未启动 Chrome、未操作用户窗口。Session 父 context 取消与本轮改动组合未单独做 barrier 测试。
 
 状态：代码分支已推送，new/ → review/，第 3/3 轮；仅 build，尚未 review，未合并 main、未发布。下一步核查六项 P1 与上述边界，不将现有测试通过视为审查通过。
+
+## factory · review · 2026-11-22 15:16
+head: 50e450c5ec61e81677d47e8d8ed925720882595f
+verdict: fix
+fix:
+- [P1] internal/daemon/rpc_observation.go:141: 旧首次 network RPC attach 失败、回滚前，同完整 target ID 已以新 short ID 重注册并写入新事件；旧 created=true 随后 ClearTarget 擦掉接替页事件。HEAD 3/3 失败，main 3/3 保留事件。注册返回具体桶/生命周期句柄，仅在该句柄仍拥有当前桶时回滚，不能按 target ID 无条件清理。
+- [P1] internal/daemon/rpc_observation.go:165: 真实 network RPC 在解析 c0de 后暂停，旧页释放、c0de 分配给另一 target、原完整 ID 以 0c0de 回归；旧 RPC 返回接替页 network 事件却标记 tab=c0de。HEAD/main 均 3/3 失败。解析时捕获注册身份，在注册、attach 和读 ring 时验证同一生命周期及 alias 映射，否则返回 stale-tab 错误。
+- [P1] internal/daemon/tab_idle.go:306: targetDestroyed 已退役旧页且同 ID 接替页已登记后，旧 tab_close 成功回包再次 removeTargetState，删除接替页 registry 及观测事件，真实页面仍存在。HEAD/main 均 3/3 失败，无 short-ID 碰撞变体也复现。close 绑定发出时的注册身份，只完成/等待该次释放，不删除后来注册的资源。
+notes:
+- [P2] internal/browser/session.go:200: 生产默认 60s 超时及 5 分钟宽限期不变，365s 后释放 attach 回包，再重试成功留下两个远端 CDP session；main 同调度一个。保留迟到确认清理所有权直至取得 session ID 可 detach 或 transport 关闭，调用方等待仍可有界。
+- [P2] internal/browser/session.go:687: 旧 observer detach 等待期间，接替页 network_route 已确认一条规则；旧退役完成又清零其规则。HEAD/main 均 3/3。路由清理绑定退役代次，或新安装等待旧清理完成。
+- [P2] internal/browser/session.go:612: Session.Close 后立即释放未完成的 attach 成功回包，network/eval 均在存活页面残留远端 session；HEAD/main 各路径均 3/3。关闭后仍须保留已发 attach 的回包处理及按 session ID detach 所有权。
+- [P2] internal/browser/session.go:230: 初始化失败后仅一次 detach 被拒，清理丢弃 session ID，重试成功后残留双 session；HEAD/main 均 3/3。非终态 detach 错误保留 ID 并重试清理。
+- [P2] internal/browser/observer.go:124: Close 赢得域初始化竞争时 HEAD 已正确返回 RPC 错误，但仍在 Close 返回后发 Network.enable 且 session 残留；HEAD/main 均 3/3。域初始化与退役取消关联，并按 session ID detach 已初始化 child。
+- [P2] internal/browser/session.go:635: 并发四次 Close 对 s.cancel 的读写触发 race，HEAD/main 均复现。删除无用字段或同步其终结，仍确保每个 Close 等待 writer 退役屏障。
+- 原六项 P1 的原始失败调度本轮全部通过，包括接替页存活、Close/Forget 双顺序、target 仍缺席时拒绝旧 RPC、宽限期内迟到回包 detach、run 前 abort 双路径、域初始化关闭竞争返回错误。独立宽限期内诊断使用生产默认 60s。不是沿用历史 finding；上列为相邻新失败调度，基线存在项已明确标注。
+- 审查前 origin/main 已到 e63a15c，与分支 AGENTS.md 冲突。Codex 本地 merge 并保留两侧规则，提交 50e450c；manager 检查保护路径及 diff、独立全量测试后推送，仅代码分支更新，未合并 main。
+- Codex 只读 review origin/main...HEAD，无 review-code skill，未改工作树、提交、push/fetch 或运行 gh。HEAD 与导出 main 的配置 gofmt/vet/go test -race ./... 均通过；选定永久回归 -race -count=5 通过。manager 独立配置全量通过（部分包缓存），11 个有测试包、1 个无测试包，Go 1.27.4；另独立重跑上述三项 P1 及无碰撞 close 变体均失败。配置通过不覆盖诊断缺陷。
+- 证据保留本机 review run evidence/FT7-50e450c/：REPRODUCE.md、source/、schedules-head/main.log、close-head/main.log、close-same-alias-head/main.log、grace-head/main.log、configured.log、configured-main.log、manager-diagnostics.log、prior-schedules-head.log、within-grace.log、permanent.log。merge 后 manager 全量日志另存 evidence/FT7-e11ba35/manager-merge-test.log。诊断用真实 Session+daemon 与本地回环 CDP 桩、工作树外 overlay，非已提交永久回归。
+- 无安装。未验证真实非 headless Chrome/CDP、真实 loadingFailed、Docker、运行中的 systemd；未启动 Chrome、未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
+- 第 3/3 轮发现 P1，达到 max_rounds，留在 review/ 等 owner 决定；如需修复，请添加说明并移至 new/。本轮未发布。
