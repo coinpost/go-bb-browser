@@ -59,3 +59,24 @@ owner 已要求将 main 全库 CC review 报告中的 bug 逐项放入 new/。�
 未检查：真实非 headless Chrome/CDP、真实 60s 超时及 watchdog 端到端、Docker、systemd 均未验证；browser runCDPWithContext 的原有 60s 层未新增测试。供 review 核对端到端预算及提示准确性。
 
 状态：代码已推送，new/ → review/，round: 1。本次仅 build，未 review、未合并 main、未发布。
+
+## factory · review · 2026-11-22 09:48
+head: 661f9df605569304a0c86c9e16b0522f46e715ac
+verdict: pass
+notes:
+- [P2] internal/browser/session.go:160: requestCtx 到期经 context.AfterFunc(cancel) 转成普通取消。真实本地 HTTP/chromedp/CDP 替身诊断中，附加标签页延迟 300ms 后，60.004s 返回 eval failed / context canceled，缺少 60s 提示；应保留到期与主动取消区别，并覆盖 runCDPWithContext。
+- [P2] cmd/bb-browser/main.go:1146: run 开页后的 time.Sleep(3s) 不监听期限；虚拟时钟中 tab_new 第59秒返回后到第62秒才报错。第185行 open --wait 65 也可第65秒成功，与整条命令预算表述不符。等待应监听 ctx.Done 并补近期限回归。
+- [P2] internal/daemon/v1.go:1243: resolveTab 丢弃枚举错误，Target.getTargets 到期可返回 -32602 unknown tab id；应向上传递枚举错误，避免将超时报成无效ID。
+- [P2] skills/bb-browser-adapter/references/patterns.md:225: 文档承诺直接中断页面脚本，但 Runtime.evaluate 超时只停止等待，不保证终止已启动的异步任务；此处及 SKILL.md:18 应明确页面任务可能继续、有重复副作用风险。
+- [P2] cmd/bb-browser/main.go:48: 统一60s提示未表达实际期限；network clear 实际30s或更短父期限也提示60s，health GET到期无时长提示。应按实际预算及取消原因提示，覆盖GET和响应体读取。
+- [P3] internal/daemon/rpc_connections.go:89: tab锁等待耗尽RPC期限仅提示 another operation is still running for this tab；应保留竞争原因并注明到期预算。
+- [P3] internal/timeout/timeout_test.go:29: 文档一致性测试未校验新增的 AGENTS.md:33 60s 声明，应补 Operation budget 段落校验。
+- [P3] internal/daemon/operation_timeout_test.go:56: newBudgetServer 未关闭audit writer，goroutine持续等待auditCh；建议注册 t.Cleanup(closeAudit)。
+
+审查：Codex 对 origin/main...HEAD 只读审查；无 P0/P1，依规则通过。审查基线 origin/main@7223e5a，三点差异基点4f86c1c。git merge-tree 验证与当前main无冲突，无需改分支。六个目标命令共用 Operation，短操作保留，HTTP写出覆盖读取/操作/flush余量。以上 P2/P3 均为非阻塞意见，并不表示所有60s契约细节均已正确。
+
+检查：配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全通过（Go 1.27.4，隔离HOME/缓存）。额外 go test -overlay 临时诊断覆盖等待、短操作、枚举与锁，并用本地HTTP/WebSocket进行两轮真实60s等待。manager复核HEAD、工作树干净及diff --check。代码无修改、无新提交；安装：无。
+
+未检查：真实Chrome中的超时后副作用、watchdog端到端恢复、Docker/systemd实机。未访问真实外网，未操作用户窗口。
+
+状态：review/ → ready/；未合并main、未发布。请owner关注上述非阻塞超时语义与文档问题。
