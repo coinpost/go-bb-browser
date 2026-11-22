@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-Nothing at your gates | 4 with the agent | 17 done | 5 sent back
-Drawn Nov 22, 12:50 | https://github.com/coinpost/go-bb-browser
+Nothing at your gates | 4 with the agent | 17 done | 6 sent back
+Drawn Nov 22, 13:21 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2    13h  生命周期事件溢出重同步与优雅关停次序
@@ -10,29 +10,28 @@ BACKLOG (5)                                 never built
     FT5    13h  快照ref作用域与脱离节点清理
     FT6    13h  run帮助布尔参数与选项终止符兼容
 
-NEW (4)                                     avg stay 5h
-    FT26    3h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
-                消失的 tab 永久留在映射中
-    FT28    2h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+NEW (3)                                     avg stay 5h
+    FT28    3h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容
     FT7     2h  target释放与观测writer退役同步 (round 2)
-    FT25    1m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+    FT25   31m  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败 (round 2)
 
-REVIEW (0)                                  avg stay 16m
-    Nothing here
+REVIEW (1)                                  avg stay 16m
+    FT26    1m  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
+                消失的 tab 永久留在映射中 (round 2)
 
 READY (0)                                   avg stay 2h
     Nothing here
 
 DONE (17)
-    FT10   13m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+    FT10   44m  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
-    FT13   13m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13   44m  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon (round 2)
-    FT19   13m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
+    FT19   44m  [P3] --state-dir - 内存模式下每条 RPC 记录被永久保存在 memLogs，
                 内存无界增长
-    FT20   13m  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
+    FT20   44m  [P3] 含完整请求体的 rpc.jsonl 以 0644 创建、状态目录 0755，本机
                 其他用户可读取 fill 文本与 fetch 头中的凭据
     ... 13 more in .factory/done/
 
