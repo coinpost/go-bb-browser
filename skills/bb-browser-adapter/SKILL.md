@@ -34,7 +34,7 @@ Task Progress:
 先在 Chrome 中登录目标站，然后：
 
 ```bash
-bb-browser tab list                                    # 找 domain 对应的短 id（或 open 新开）
+bb-browser tab list                                    # 找 domain 对应的 tab id（完整 id；或 open 新开）
 bb-browser network clear --tab <id>
 bb-browser reload --tab <id>
 bb-browser network requests api --tab <id>             # 位置参数 = URL 子串过滤

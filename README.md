@@ -42,7 +42,7 @@ go test ./...
 | **`cmd/bb-daemon`** | 解析 `--debugger-url` / `--listen`（及对应环境变量），构造 `daemon.Config`，启动 `daemon.Server`。 |
 | **`internal/daemon`** | `http.ServeMux`、JSON-RPC 分发、tab 生命周期协调器和 CDP supervisor。supervisor 以 `Browser.getVersion` 维护 `ready → suspect → failed`；确认失败后 daemon 非零退出，由 systemd/Docker 重启，不在进程内重连。 |
 | **`internal/store`** | **RPC log**（`{StateDir}/rpc.jsonl`，append-only）；**全局单调 `seq`**（启动时以纳秒时钟为起始值，内存自增）。 |
-| **`internal/state`** | **短 tab id 注册表**（`TabRegistry`，关 tab 释放 id、清缓冲）；**按 tab 隔离的观测环形缓冲**（`TabObsStore` + `ringbuf`），满足 INV-1～INV-7 类不变量。 |
+| **`internal/state`** | **tab 注册表**（`TabRegistry`：以完整 CDP target id 登记 page target，关 tab 后该 id 不再可解析、清缓冲）；**按 tab 隔离的观测环形缓冲**（`TabObsStore` + `ringbuf`），满足 INV-1～INV-7 类不变量。 |
 | **`internal/daemon`（观测）** | network / console / errors 首次查询时按需启用并续租；listener 只向每 tab 的 1024 容量非阻塞队列投递，worker 编码并写 ring buffer。 |
 | **`internal/browser`** | browser control 只在 browser executor 上执行 `Browser.*` / `Target.*`；每 tab 独立缓存执行 context，observer context 与页面操作 context 分离；**不**负责启动 Chrome。 |
 | **`pkg/protocol`** | JSON-RPC 请求/响应与各 `method` 的 params/result 类型，供 daemon 与 `pkg/daemonclient` 共用。 |
@@ -111,7 +111,16 @@ bb-daemon --debugger-url 127.0.0.1:9222 --api-token-file /path/to/api-tokens --a
 bb-browser tab list
 ```
 
-**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl` 求出这些 tab 的最后活跃时间来恢复 idle 跟踪（短 tab id 由 CDP target id 确定性派生，跨重启稳定）。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 最后活跃时间），因此恢复只需读当前文件即可保持完整。回放按物理换行逐行解析：中间损坏的行告警并跳过（保留在文件中），其后的合法记录照常恢复；末尾缺换行的完整记录正常回放，后续追加前先补换行；末尾不完整的记录被截断。写入失败或短写后，下一次写入同样先补换行，避免与残片粘连。
+**Tab id = 完整 CDP target id（破坏性变更）**：`tab_new` / `tab_list` / `tab_focus` 返回的 `tab`、`focus` 以及所有定向方法的 `tab` 参数，都是 Chrome 给出的**完整 CDP target id**（不透明字符串，如 `E3B0C44298FC1C149AFBF4C8996FB924`），daemon 原样使用、逐字节精确匹配：
+
+- 旧版的 4 位起十六进制**短 id（后缀别名）已移除**，daemon 不再生成也不再解析；短 id、任意前缀/后缀/截断、大小写变体、首尾带空白的写法一律返回 `unknown tab id`（`-32602`）。
+- 显式给出的 id 未知或已过期时**直接报错**，绝不回退到焦点 tab、其他 tab 或“看起来相近”的 tab。目标消失后，持有旧 id 的请求（包括正在等待该 tab 操作锁的请求）只会失败，不会落到之后出现的其他目标上。
+- 一次请求解析出的 target id 贯穿该请求的操作锁、CDP 命令、idle 续期与 `rpc.jsonl` 审计记录，中途不重新解析。
+- 只有 `tab_list` / `tab_focus` 以及 CLI 省略 `--tab` 时才使用 daemon 焦点 tab；CLI 显式传空的 `--tab ""` 会报错而不是改用焦点 tab。
+- **迁移**：旧客户端不要缓存或拼接短 id，改为保存并原样回传 `tab_new` / `tab_list` 返回的 `tab`；脚本里写死的 `--tab ab12` 之类需要换成 `bb-browser tab list` 输出的完整 id。Pool 调用方同理（`<backendKey>:<完整 id>`，见 [`pkg/daemonclient`](pkg/daemonclient/README.md)）。
+- CDP target id 在同一个运行中的浏览器内唯一；本项目**不承诺**它跨浏览器重启/跨浏览器会话永久唯一，也不引入所有权或租约协议。
+
+**Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`，请求实际解析到的完整 target id 记在 **`target_id`** 字段（未解析成功的请求没有该字段）；idle 状态维护在内存。**daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl`，只按 `target_id` 与当前仍存在的 page target **完全相等**来恢复这些 tab 的最后活跃时间。旧版本写入的记录只有短 id（`tab` 字段）而没有 `target_id`，无法证明身份，回放时**保守跳过**（启动时告警一次）：升级前由旧 daemon 创建的 tab 不会被新 daemon 接管 idle 清理，需要时请手动关闭。重启后有约 30s grace。全局 `seq` 以启动时的纳秒时钟为起始值内存自增，无需持久化即可跨重启保持递增。`rpc.jsonl` 超过约 8 MiB 会自动轮转：旧文件保存为 `rpc.jsonl.1`…（保留 3 份），新文件开头会写入当前存活 managed tab 的快照（合成 `tab_new` + 最后活跃时间），因此恢复只需读当前文件即可保持完整。回放按物理换行逐行解析：中间损坏的行告警并跳过（保留在文件中），其后的合法记录照常恢复；末尾缺换行的完整记录正常回放，后续追加前先补换行；末尾不完整的记录被截断。写入失败或短写后，下一次写入同样先补换行，避免与残片粘连。
 
 **Docker Compose 示例**（需挂载 volume 才能跨容器重建保留 state）：
 
@@ -184,7 +193,7 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 | `--url` | `BB_BROWSER_URL` | `bb-daemon` 根 URL，默认 `http://127.0.0.1:8787`（无尾部 `/`） |
 | `--api-token` | `BB_BROWSER_API_TOKEN` | 一个 daemon API token，自动为 `POST /v1` 添加 `Authorization: Bearer <token>`；标志覆盖环境变量 |
 | `--json` | — | 打印原始 JSON-RPC（部分子命令为完整 envelope） |
-| `--tab` | — | 短 tab id；省略则用 `tab_list` 返回的 daemon 焦点 tab |
+| `--tab` | — | tab id（完整 CDP target id，原样传给 daemon）；省略则用 `tab_list` 返回的 daemon 焦点 tab；显式传空报错 |
 | `-v` / `--version` | — | 打印版本并退出 |
 
 ---
@@ -233,7 +242,7 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 |--------|------|------|
 | `tab list` | `tab_list` | |
 | `tab new [url]` | `tab_new`；省略 url 为 `about:blank` | |
-| `tab select` | `tab_select` | 必须 `--id <短id>` **或** `--index <1-based>`（按 tab id 排序） |
+| `tab select` | `tab_select` | 必须 `--id <完整 tab id>` **或** `--index <1-based>`（按 tab id 排序） |
 | `tab close` | `tab_close` | `--id` / `--index`；都不给则用 `--tab` 或焦点 tab |
 
 ---
@@ -345,7 +354,7 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 ```bash
 bb-browser run ./x.js hello --count 20        # args = { query: "hello", arg1: "hello", count: "20" }
 bb-browser run ./x.js hello --count=20 --json # 同上，并输出原始 JSON-RPC
-bb-browser run ./x.js --tab ab12 -- hello --tab x   # 全局 tab=ab12；脚本得到 args.tab = "x"
+bb-browser run ./x.js --tab "$TAB" -- hello --tab x   # 全局 tab=$TAB（完整 tab id）；脚本得到 args.tab = "x"
 ```
 
 参数规则（`run` 自行解析参数，不交给 Cobra，因此未知的 `--name` 不会被拒绝）：
@@ -383,4 +392,4 @@ IPv6 本机调试地址可使用 `::1:9222`（daemon 会规范化为 `[::1]:9222
 
 ## 相关包
 
-- [`pkg/daemonclient`](pkg/daemonclient/README.md)：Go 语言 JSON-RPC 客户端。`NewClient` 连一台 daemon；`NewPool` 在多台 daemon 间均摊请求（每端独立 URL / 头），并把 tab 钉在创建它的那一台（tab 不能跨 daemon）。Pool 对外 tab id 为 `<backendKey>:<daemonShortId>`（默认 key 为构造时的 0-based 下标）；`TabList` 合并所有后端并带此外前缀。
+- [`pkg/daemonclient`](pkg/daemonclient/README.md)：Go 语言 JSON-RPC 客户端。`NewClient` 连一台 daemon；`NewPool` 在多台 daemon 间均摊请求（每端独立 URL / 头），并把 tab 钉在创建它的那一台（tab 不能跨 daemon）。Pool 对外 tab id 为 `<backendKey>:<完整 CDP target id>`（默认 key 为构造时的 0-based 下标）；`TabList` 合并所有后端并带此外前缀。
