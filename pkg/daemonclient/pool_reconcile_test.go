@@ -342,7 +342,7 @@ func TestPool_tabNewSurvivesInFlightList(t *testing.T) {
 		_, err := p.TabList(ctx, protocol.TabListParams{})
 		done <- err
 	}()
-	<-g.entered
+	awaitGate(t, g, done)
 	out, err := p.TabNew(ctx, protocol.TabNewParams{})
 	if err != nil {
 		t.Fatal(err)
@@ -395,7 +395,7 @@ func TestPool_staleListDoesNotReviveRetiredTab(t *testing.T) {
 		_, err := p.TabList(context.Background(), protocol.TabListParams{})
 		done <- err
 	}()
-	<-g.entered
+	awaitGate(t, g, done)
 	mustTabList(t, p) // newer list: x is gone
 	assertPoolUnknown(t, p, "0:x")
 	g.open()
@@ -440,7 +440,7 @@ func TestPool_staleListDoesNotRetireNewerObservations(t *testing.T) {
 		_, err := p.TabList(context.Background(), protocol.TabListParams{})
 		done <- err
 	}()
-	<-g.entered
+	awaitGate(t, g, done)
 	mustTabList(t, p) // newer list binds y and confirms old
 	g.open()
 	if err := <-done; err != nil {
@@ -511,7 +511,7 @@ func TestPool_closeAndForgetNotRevivedByStaleObservation(t *testing.T) {
 			go func() {
 				done <- p.Call(ctx, tc.observe, nil, nil)
 			}()
-			<-g.entered
+			awaitGate(t, g, done)
 			if err := tc.drop(p, out.Tab); err != nil {
 				t.Fatal(err)
 			}
@@ -659,7 +659,7 @@ func TestPool_removalMarksDoNotOutliveObservations(t *testing.T) {
 	marks := func() (int, int) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return len(p.removed[0]), p.observing[0]
+		return len(p.removed[0]), len(p.observing[0])
 	}
 	mustTabList(t, p)
 	p.ForgetTab("0:a") // nothing in flight: no mark
@@ -671,7 +671,7 @@ func TestPool_removalMarksDoNotOutliveObservations(t *testing.T) {
 		_, err := p.TabList(context.Background(), protocol.TabListParams{})
 		done <- err
 	}()
-	<-g.entered
+	awaitGate(t, g, done)
 	p.ForgetTab("0:b")
 	p.ForgetTab("0:never-bound")
 	p.ForgetTab("9:other-pool") // unknown backend key: ignored

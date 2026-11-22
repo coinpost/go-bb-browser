@@ -108,7 +108,7 @@ func newFakeDaemon(t *testing.T, tabPrefix string) (*httptest.Server, *fakeDaemo
 
 			result := map[string]any{"seq": seq, "tab": tab}
 			if req.Method == protocol.MethodTabList {
-				var tabs []any
+				tabs := []any{} // the daemon always sends an array
 				if listTab != "" {
 					tabs = append(tabs, map[string]string{"tab": listTab, "title": "t", "url": "u"})
 					result["tab"] = listTab
