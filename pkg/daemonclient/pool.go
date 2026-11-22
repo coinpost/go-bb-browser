@@ -57,10 +57,14 @@ import (
 //   - tab_list / tab_focus wait at most 2s (or the caller's deadline if
 //     sooner) for backends. One that has not answered by then is skipped like
 //     a down backend and its request is cancelled; answers already received
-//     are returned. If none succeeded the error is the caller's context error
-//     when its deadline passed, else [*AllFailedError]. Cancelling the
-//     caller's context aborts the call with that error and no result. No
-//     other Pool method has a built-in timeout.
+//     are returned. An answer completed after that budget never counts, even
+//     if it arrives before the call returns. If none succeeded the error is
+//     the caller's context error when its deadline passed, else
+//     [*AllFailedError]. Cancelling the caller's context aborts the call with
+//     that error, no result and no bindings, even if answers are already in
+//     (a cancellation racing with the return itself may come too late). Each
+//     request uses the backend Client's HTTP / BaseURL / Headers as they were
+//     when the call started. No other Pool method has a built-in timeout.
 //   - Bound requests: parse the prefix, then lookup in the tab map. Unknown
 //     tab ids return [*UnknownTabError]; malformed / unknown-prefix ids return
 //     [*InvalidTabIDError] (no silent fallback).
@@ -379,9 +383,10 @@ func (p *Pool) callTabFocus(ctx context.Context, params any, result any) error {
 
 // fanoutReply is one backend's answer to a [fanout] request.
 type fanoutReply[R any] struct {
-	idx int
-	val R
-	err error
+	idx  int
+	val  R
+	err  error
+	done time.Time // when the answer was fully read and decoded
 }
 
 // fanout sends method to every backend at once and returns the successful
@@ -390,43 +395,62 @@ type fanoutReply[R any] struct {
 // p.fanoutTimeout, whichever comes first; with firstOnly it also ends as soon
 // as the first success in constructor order is known.
 //
-// Backends that have not answered by then are abandoned (their requests are
-// cancelled) and count as failed. If the caller's context was cancelled the
-// call returns its error and discards everything; on a deadline or the pool
-// timeout, successes that already arrived are kept. With no success the error
-// is the caller's context error if it is done, else [*AllFailedError].
+// Only a success that completed inside that budget counts: each reply is
+// timestamped when it is fully decoded, and one stamped at or after the
+// deadline is treated as timed out however it reached the collector. Backends
+// that have not answered when the wait ends are abandoned (their requests are
+// cancelled) and count as failed too. With no success the error is the
+// caller's context error if it is done, else [*AllFailedError].
 //
-// The request goroutines only write to their own reply; binding and copying
-// into the caller's result happen in the caller after fanout returns, so a
-// late answer has no effect.
+// Cancellation wins over any answer: if the caller's context is cancelled
+// (done for a reason other than its deadline) when the outcome is about to be
+// returned, the call returns that error and discards the whole batch.
+//
+// Each request is built before its goroutine starts from a snapshot of the
+// backend [Client] (HTTP client, URL, cloned headers, request id), so an
+// abandoned request never reads a Client the caller may now be reconfiguring.
+// The goroutines only write to their own reply; binding and copying into the
+// caller's result happen in the caller after fanout returns, so a late answer
+// has no effect.
 func fanout[R any](ctx context.Context, p *Pool, method string, params any, firstOnly bool) ([]fanoutReply[R], error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	// Marshal once: abandoned goroutines must not read the caller's params.
-	if params != nil {
-		b, err := json.Marshal(params)
-		if err != nil {
-			return nil, fmt.Errorf("marshal params: %w", err)
-		}
-		params = json.RawMessage(b)
+	paramsJSON, err := marshalParams(params)
+	if err != nil {
+		return nil, err
 	}
+	n := len(p.clients)
+	targets := make([]rpcTarget, n)
+	for i, c := range p.clients {
+		targets[i] = c.rpcTarget(true)
+	}
+
 	fctx, cancel := context.WithTimeout(ctx, p.fanoutTimeout)
 	defer cancel()
+	deadline, _ := fctx.Deadline()
 
-	n := len(p.clients)
 	ch := make(chan fanoutReply[R], n) // buffered: abandoned senders never block
-	for i := range p.clients {
+	for i, target := range targets {
 		release := p.track(i)
 		go func() {
 			r := fanoutReply[R]{idx: i}
-			r.err = p.clients[i].Call(fctx, method, params, &r.val)
+			r.err = target.call(fctx, method, paramsJSON, &r.val)
+			r.done = time.Now()
 			release()
 			ch <- r
 		}()
 	}
 
 	replies := make([]*fanoutReply[R], n)
+	record := func(r fanoutReply[R]) {
+		if r.err == nil && !r.done.Before(deadline) {
+			var zero R
+			r.val, r.err = zero, context.DeadlineExceeded
+		}
+		replies[r.idx] = &r
+	}
 	// decided reports whether the first success in constructor order is known.
 	decided := func() bool {
 		for _, r := range replies {
@@ -443,20 +467,17 @@ wait:
 	for pending := n; pending > 0; pending-- {
 		select {
 		case r := <-ch:
-			replies[r.idx] = &r
+			record(r)
 			if firstOnly && decided() {
 				break wait
 			}
 		case <-fctx.Done():
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return nil, ctx.Err()
-			}
-			// Keep answers that completed before the deadline but lost the
-			// select race.
+			// Keep answers that lost the select race; record still rejects
+			// the ones that completed too late.
 			for {
 				select {
 				case r := <-ch:
-					replies[r.idx] = &r
+					record(r)
 				default:
 					break wait
 				}
@@ -464,12 +485,17 @@ wait:
 		}
 	}
 
+	// Checked last, right before the outcome is handed back: whichever select
+	// case fired, a cancelled caller gets no result and no bindings.
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
 	var ok []fanoutReply[R]
 	var errs []error
 	for _, r := range replies {
 		switch {
 		case r == nil:
-			errs = append(errs, fctx.Err())
+			errs = append(errs, context.DeadlineExceeded)
 		case r.err != nil:
 			errs = append(errs, r.err)
 		default:
