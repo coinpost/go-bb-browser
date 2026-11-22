@@ -62,7 +62,11 @@ func waitInFlightZero(t *testing.T, p *Pool) {
 }
 
 func listIDs(list protocol.TabListResult) []string {
-	return tabIDsFromList(list)
+	ids := make([]string, 0, len(list.Tabs))
+	for _, item := range list.Tabs {
+		ids = append(ids, item.Tab)
+	}
+	return ids
 }
 
 func sameIDs(got []string, want ...string) bool {

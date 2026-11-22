@@ -31,10 +31,15 @@ type gateCtx struct {
 	done chan struct{}
 	err  error
 	held []func()
+
+	// stopped is closed when a derived context deregisters, which the fan-out
+	// does on its way out (after its own last look at the caller's context).
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 func newGateCtx(deadline time.Time) *gateCtx {
-	return &gateCtx{deadline: deadline, done: make(chan struct{})}
+	return &gateCtx{deadline: deadline, done: make(chan struct{}), stopped: make(chan struct{})}
 }
 
 func (c *gateCtx) Deadline() (time.Time, bool) { return c.deadline, !c.deadline.IsZero() }
@@ -51,15 +56,23 @@ func (c *gateCtx) AfterFunc(f func()) (stop func() bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.held = append(c.held, f)
-	return func() bool { return false }
+	return func() bool {
+		c.stopOnce.Do(func() { close(c.stopped) })
+		return false
+	}
 }
 
 // cancel marks the context done without telling derived contexts yet.
-func (c *gateCtx) cancel() {
+func (c *gateCtx) cancel() { c.finish(context.Canceled) }
+
+// expire is cancel for a caller whose deadline passed.
+func (c *gateCtx) expire() { c.finish(context.DeadlineExceeded) }
+
+func (c *gateCtx) finish(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err == nil {
-		c.err = context.Canceled
+		c.err = err
 		close(c.done)
 	}
 }
@@ -80,6 +93,7 @@ func (c *gateCtx) release() {
 // answer completes.
 type stubRT struct {
 	tab    string
+	extra  int                           // additional listed tabs "<tab>-<i>"
 	before func(req *http.Request) error // runs before the answer is built
 
 	mu  sync.Mutex
@@ -102,8 +116,12 @@ func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
-	out := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tab":%q,"focus":%q,"seq":7,"tabs":[{"tab":%q}]}}`,
-		in.ID, s.tab, s.tab, s.tab)
+	var more strings.Builder
+	for i := 0; i < s.extra; i++ {
+		fmt.Fprintf(&more, `,{"tab":"%s-%d"}`, s.tab, i)
+	}
+	out := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"tab":%q,"focus":%q,"seq":7,"tabs":[{"tab":%q}%s]}}`,
+		in.ID, s.tab, s.tab, s.tab, more.String())
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": {"application/json"}},
