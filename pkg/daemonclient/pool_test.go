@@ -382,6 +382,79 @@ func TestPool_concurrentTabNewWithOneBackendDown(t *testing.T) {
 	}
 }
 
+// A create that is still waiting on a failing backend must not, once it fails
+// over, take or skip the turn of a healthy backend that a concurrent create
+// has not used. The interleaving is pinned with channels: A blocks on backend
+// 0 (which then answers 503), B runs to completion, then A is released and
+// fails over. Repeated pairs must keep both healthy backends within one tab.
+func TestPool_tabNewConcurrentFailoverKeepsHealthySpread(t *testing.T) {
+	for _, cr := range poolCreators {
+		t.Run(cr.name, func(t *testing.T) {
+			arrived := make(chan struct{})
+			release := make(chan struct{})
+			var downHits atomic.Int64
+			down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				downHits.Add(1)
+				arrived <- struct{}{}
+				<-release
+				http.Error(w, "down", http.StatusServiceUnavailable)
+			}))
+			t.Cleanup(down.Close)
+			srv1, st1 := newFakeDaemon(t, "t")
+			srv2, st2 := newFakeDaemon(t, "t")
+			p, err := NewPool(NewClient(down.URL), NewClient(srv1.URL), NewClient(srv2.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			const pairs = 10
+			for pair := range pairs {
+				aDone := make(chan error, 1)
+				go func() { aDone <- cr.create(ctx, p) }()
+				blocked := false
+				select {
+				case <-arrived:
+					blocked = true
+				case err := <-aDone:
+					// A went straight to a healthy backend this round.
+					if err != nil {
+						t.Fatalf("pair %d: A: %v", pair, err)
+					}
+				}
+				// B runs to completion; if it lands on the down backend itself
+				// it is let through at once so only A's wait is held open.
+				bDone := make(chan error, 1)
+				go func() { bDone <- cr.create(ctx, p) }()
+				for bRunning := true; bRunning; {
+					select {
+					case <-arrived:
+						release <- struct{}{}
+					case err := <-bDone:
+						if err != nil {
+							t.Fatalf("pair %d: B: %v", pair, err)
+						}
+						bRunning = false
+					}
+				}
+				if blocked {
+					release <- struct{}{}
+					if err := <-aDone; err != nil {
+						t.Fatalf("pair %d: A after failover: %v", pair, err)
+					}
+				}
+			}
+			got := []int{st1.tabNewCount(), st2.tabNewCount()}
+			if got[0]+got[1] != 2*pairs {
+				t.Fatalf("tab_new total %d want %d (healthy=%v)", got[0]+got[1], 2*pairs, got)
+			}
+			if d := got[0] - got[1]; d < -1 || d > 1 {
+				t.Fatalf("healthy backends differ by more than 1: [0 %d %d] (down backend hit %d times)",
+					got[0], got[1], downHits.Load())
+			}
+		})
+	}
+}
+
 func TestPool_tabAffinity(t *testing.T) {
 	a, sa := newFakeDaemon(t, "a")
 	b, sb := newFakeDaemon(t, "b")

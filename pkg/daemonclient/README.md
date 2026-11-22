@@ -99,7 +99,7 @@ _, err = pool.Eval(ctx, protocol.EvalParams{Tab: out.Tab, Script: "document.titl
 |------|------|
 | **启动** | `NewPool` **不**探测后端。部分 daemon 当时不可用也可以构造成功。 |
 | **无 tab 的请求** | `Health` / `Ready` / `Live`、`tab_new`：选 **in-flight 最少**的后端（并列时 round-robin），失败则试下一个；全部失败返回 `*AllFailedError`。`tab_new` 的 failover 只表示「新 tab 开在另一个 daemon」，**不会**把已有 tab 挪走。 |
-| **tab_new 均摊** | `tab_new` 的轮询游标独立于 `Health` / `Ready` / `Live` 及其它无 tab 调用，「先探活再开 tab」不会让 tab 集中到同一个 daemon。某个后端失败时，下一次创建从实际成功的后端之后继续，故障后端的份额在其余健康后端间均分（顺序调用时差值 ≤1）；后端恢复后直接回到轮询，不补发。in-flight 最少优先不变。 |
+| **tab_new 均摊** | `tab_new` 的轮询游标独立于 `Health` / `Ready` / `Live` 及其它无 tab 调用，「先探活再开 tab」不会让 tab 集中到同一个 daemon。后端按**每次尝试**选取：在本请求尚未试过的后端中取 in-flight 最少者，并列时从游标起按环序取第一个；每次尝试（无论成败）都把游标移到所选后端之后，每个请求对每个后端最多尝试一次。因此故障后端的份额在其余健康后端间均分（顺序调用时差值 ≤1），并发请求在故障转移时也不会重复占用或跳过其它请求尚未用到的健康后端；后端恢复后直接回到轮询，不补发。选取只在一把短锁内完成，HTTP 调用不持锁。长时间挂起（不返回错误）的后端、长期不均的 in-flight 负载不在此保证之内。 |
 | **tab_list** | **查询每一个后端**（构造顺序），把各端短 id 加上前缀后合并。某端失败则 **跳过**（该端 tab 不会出现在结果里），其余端仍返回；全部失败才是 `*AllFailedError`。列出的 id 会写入映射，可直接用于后续 tab 操作。Pool 没有跨 daemon 的焦点：`tab` / `focus` 取构造顺序上第一个非空值。`seq` 为成功端中的最大值。 |
 | **tab_focus** | 构造顺序上 **第一个成功**的后端（跳过失败端），返回前缀化的 `tab` / `focus` 并绑定。不是池级焦点。全部失败返回 `*AllFailedError`。 |
 | **有 tab 的请求** | **硬性**：必须打到 **该前缀对应的同一个 daemon**（含 `tab_select`）。池对外 id 为 `<backendKey>:<daemonShortId>`（`TabNew` / `TabList` / `TabFocus` 成功时写入映射，`TabClose` 成功后删除）；发给 daemon 时去掉前缀。对端失败 **不会**改道到其它 daemon，也不做跨 daemon 转发。未知（未创建/未列出/已关闭）tab 返回 `*UnknownTabError`；格式错误或未知前缀返回 `*InvalidTabIDError`。省略 `tab` 会得到 `ErrTabRequired`。 |
