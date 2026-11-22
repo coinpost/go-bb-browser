@@ -1,6 +1,6 @@
 ---
 branch: factory/FT7-observation-writer-retirement
-round: 1
+round: 2
 ---
 # target释放与观测writer退役同步
 
@@ -92,3 +92,26 @@ notes:
 - 临时 overlay 共 7 个诊断用例复现上述 6 项缺陷，包括真实 Session+daemon 本地回环 CDP 协议桩。证据保留于 review run 的 evidence/FT7-4288fc7/：results.log、reused-id.log、close-attach.log、基线对照日志、browser_test.go、daemon_test.go、baseline-tests/、manager-test.log；overlay.json 仅保留当时映射，重新运行需将映射重定向到保留的测试文件。诊断不是已提交的永久回归。
 - 未验证真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、systemd；未操作用户窗口；无新增未 pin 工具或依赖。无链接 issue/PR，未发 GitHub 评论。
 - 第 1/3 轮发现 P1，review/ → new/，下一轮在原分支修复上述 fix 列表；P2 留作审查备注。未合并 main，未发布。
+
+
+## factory · plan · 2026-11-22 10:20
+第 2 轮补充计划（保留既有计划）：
+- Behaviour：attach 初始化与 targetDestroyed 并发时先禁写，再等待安全的初始化清理所有权交接；重复释放等待同一完成屏障；同 ID 重注册隔离旧桶与旧清理；tab_close 必须等已开始的清理完成才返回。
+- Scope：最新 review 四项 P1、直接相关的失败注册回滚与 Session.Close，以及 browser/daemon 永久回归。不改变公开 RPC、不处理其他工厂项。
+- Decisions：不以 registry 缺项替代清理完成，不持全局 observer 表锁等待 CDP/Record；初始化 attach 有界；原分支 merge 最新 main，不 rebase。
+- Checking：真实 Session + daemon + 本地回环 CDP 桩重写四个失败场景；先验证正确断言失败，再修复；重复 -race 和配置全量检查，不依赖真实外网。
+
+## factory · 2026-11-22 10:20
+第 2 轮构建完成。先以 b58d8e7 合并 main@7223e5aa905a70f2147801625bdece0d8893876d；保留双方意图并让 main 新增枚举测试显式注册观测桶。修复提交：11af2d36e02a8afec65901bb53d39dbae84bfc96。
+
+实现与决定：attachCancellation 在首次 Run 返回前不取消 chromedp child，并以 60s 操作超时约束 attach；observer/tab pool 共享安全取消逻辑。obsRetiring 保留退役完成信号，重复 ForgetTarget 等同一屏障；daemon 在 registry 移除同一临界区登记 targetReleases，新注册等待旧释放清桶完成，tab_close 等待既有释放。首次 attach 失败仅回滚本次新桶，Session.Close 标记关闭并拒绝新 attach；初始化方负责安全清理，避免关闭用户标签。RegisterTarget 返回是否新建并新增 HasTarget；更新生命周期文档。
+
+回归证据（coder 报告）：internal/daemon/obs_lifecycle_stub_test.go 走真实 Session+daemon+本地 CDP 桩。修复前 TestTargetDestroyedRacingObserverAttachReply 三次均 DATA RACE；TestRepeatedForgetTargetWaitsForInFlightRecord 第二次释放提前返回并污染新桶；TestReusedTargetIDWaitsForOldLifecycleRelease 新生命周期读到旧事件且旧清理丢弃新事件；TestTabCloseWaitsForReleaseStartedByTargetDestroyed 返回成功仍有旧桶/事件。四项修复后通过。Runtime.enable barrier 用例修复前也通过，不作为失败证据；browser 假 allocator 确定性 attach barrier 未跑旧代码，仅用移除等待的变异证明有效，CDP 桩也重新报 race。另以变异验证 attach 有界、Close 中 attach 和失败注册回滚。
+
+测试：coder 配置全量通过；生命周期 -race -count=30、browser/daemon/state 整包 -race -count=5 通过。manager 独立隔离 HOME/GOCACHE/TMPDIR、GOPROXY=off 运行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过，Go 1.27.4，10 个有测试包通过、2 个无测试包。git diff --check 通过；保护路径无变化；相对 main 的独有提交仅本项原提交、本轮 merge 与修复；工作树干净。
+
+安装：无。go.mod/go.sum 相对 main 未变。
+
+未检查：真实非 headless Chrome/CDP 端到端、真实 loadingFailed 事件流、Docker、systemd；未启动 Chrome，未操作用户窗口。没有单独测试 Session 父 context 取消、attach 刚成功撞上 Close、枚举路径独立 barrier（枚举复用释放登记实现）。原 review evidence 在当前机器未找到，永久回归按 review 描述独立重写。
+
+状态：分支已推送，new/ → review/，第 2/3 轮；仅 build，未进行 review、未合并 main、未发布。
