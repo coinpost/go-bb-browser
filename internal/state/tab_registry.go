@@ -1,6 +1,7 @@
 package state
 
 import (
+	"cmp"
 	"slices"
 	"sync"
 
@@ -28,10 +29,11 @@ type TabRegistry struct {
 	// Removals are remembered the same way, so an enumeration requested before
 	// a target was removed cannot register it again (INV-6). removedGen holds
 	// the generation of the latest removal of each recently removed target and
-	// removedLog the same removals in order, oldest first. Only the last
-	// maxRemovedTargets removals are kept; removedFloor is the highest
-	// generation among those already forgotten, so an enumeration older than
-	// it is known to be unverifiable instead of being trusted.
+	// removedLog the same removals in order, oldest first, one entry per id: a
+	// repeated removal moves the id to the end with a fresh generation. Only
+	// the last maxRemovedTargets removed ids are kept; removedFloor is the
+	// highest generation among those already forgotten, so an enumeration older
+	// than it is known to be unverifiable instead of being trusted.
 	removedGen   map[target.ID]uint64
 	removedLog   []removedTarget
 	removedFloor uint64
@@ -163,9 +165,14 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 
 // RemoveTarget removes one target and reports whether it was registered.
 //
-// The removal is remembered either way: a target the browser reported gone
-// before the registry ever saw it (its lifecycle event overtook the first
-// enumeration that lists it) must not be registered by that older snapshot.
+// The removal is remembered either way, and every call counts as a removal that
+// happened now: a target the browser reported gone before the registry ever saw
+// it must not be registered by an older snapshot, and neither must a target
+// that was already removed here (tab_close confirmed) when its destroyed
+// notification arrives after an enumeration that still lists it was requested.
+// Repeated reports for one id refresh its single slot in the removal memory
+// (non-page targets are reported on every info change), so they cannot crowd
+// other removals out of it.
 func (r *TabRegistry) RemoveTarget(id target.ID) bool {
 	if id == "" {
 		return false
@@ -173,12 +180,7 @@ func (r *TabRegistry) RemoveTarget(id target.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.targetGen[id]; !ok {
-		// Once is enough for an id that stays unregistered: repeated reports
-		// for it (non-page targets are reported on every info change) must
-		// not crowd real removals out of the bounded memory.
-		if _, known := r.removedGen[id]; !known {
-			r.noteRemovedLocked(id)
-		}
+		r.noteRemovedLocked(id)
 		return false
 	}
 	r.removeLocked(id)
@@ -247,8 +249,19 @@ func (r *TabRegistry) removeLocked(id target.ID) {
 	r.noteRemovedLocked(id)
 }
 
-// noteRemovedLocked records that id was removed now (caller holds lock).
+// noteRemovedLocked records that id was removed now (caller holds lock). The
+// memory holds one entry per id: an earlier removal of the same id is replaced,
+// not kept next to the new one, so removedLog stays in generation order with
+// exactly the ids of removedGen.
 func (r *TabRegistry) noteRemovedLocked(id target.ID) {
+	if prev, ok := r.removedGen[id]; ok {
+		// Superseded, not forgotten: removedFloor is unaffected.
+		if i, found := slices.BinarySearchFunc(r.removedLog, prev, func(e removedTarget, gen uint64) int {
+			return cmp.Compare(e.gen, gen)
+		}); found {
+			r.removedLog = slices.Delete(r.removedLog, i, i+1)
+		}
+	}
 	r.gen++
 	r.removedGen[id] = r.gen
 	r.removedLog = append(r.removedLog, removedTarget{id: id, gen: r.gen})
@@ -257,11 +270,9 @@ func (r *TabRegistry) noteRemovedLocked(id target.ID) {
 		// Shift instead of re-slicing so the backing array stays bounded.
 		r.removedLog = r.removedLog[:copy(r.removedLog, r.removedLog[1:])]
 		// The log is in generation order, so this is the highest generation
-		// forgotten so far. A later removal of the same id owns the map entry.
+		// forgotten so far.
 		r.removedFloor = oldest.gen
-		if r.removedGen[oldest.id] == oldest.gen {
-			delete(r.removedGen, oldest.id)
-		}
+		delete(r.removedGen, oldest.id)
 	}
 }
 

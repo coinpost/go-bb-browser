@@ -323,3 +323,140 @@ func TestConcurrentRemovalAndStaleApply(t *testing.T) {
 		r.RemoveTarget(fresh)
 	}
 }
+
+// A removal report for a target that is already unregistered (tab_close removed
+// it, then Target.targetDestroyed arrives) is still a removal: an enumeration
+// requested between the two predates the second one and must not register it.
+func TestRepeatedRemovalRefreshesRemovalGeneration(t *testing.T) {
+	r := NewTabRegistry()
+	r.SyncPageTargets(pageInfos(regIDA, regIDB))
+	if !r.RemoveTarget(regIDA) {
+		t.Fatal("first removal of a registered target must report true")
+	}
+
+	tok := r.BeginEnumeration()
+	stale := pageInfos(regIDA, regIDB) // the browser had not destroyed A yet
+	if r.RemoveTarget(regIDA) {
+		t.Fatal("repeated removal of an unregistered target must report false")
+	}
+	if tok2 := r.BeginEnumeration(); tok2.gen <= tok.gen {
+		t.Fatalf("repeated removal did not advance the generation (%d -> %d)", tok.gen, tok2.gen)
+	}
+
+	for i := 0; i < 2; i++ {
+		snaps, removed := r.ApplyEnumeration(tok, stale)
+		if ids := snapshotIDs(snaps); len(ids) != 1 || ids[0] != regIDB {
+			t.Fatalf("apply %d: snapshots = %v, want only %s", i, ids, regIDB)
+		}
+		if len(removed) != 0 || r.Has(regIDA) || !r.Has(regIDB) {
+			t.Fatalf("apply %d: A registered=%v B registered=%v removed=%#v", i, r.Has(regIDA), r.Has(regIDB), removed)
+		}
+	}
+	if _, ok := r.Lookup(string(regIDA)); ok {
+		t.Fatal("removed target resolves again")
+	}
+
+	// An enumeration requested after the last removal is current for A.
+	if snaps, _ := r.ApplyEnumeration(r.BeginEnumeration(), stale); len(snaps) != 2 || !r.Has(regIDA) {
+		t.Fatalf("current enumeration did not register A: %v", snapshotIDs(snaps))
+	}
+}
+
+// The same holds for an id the registry never registered: every report counts,
+// not only the first one.
+func TestRepeatedRemovalOfNeverRegisteredTargetRefreshes(t *testing.T) {
+	r := NewTabRegistry()
+	r.RegisterPageTarget(regIDB)
+	if r.RemoveTarget(regIDA) {
+		t.Fatal("unregistered target reported as removed")
+	}
+	tok := r.BeginEnumeration()
+	if r.RemoveTarget(regIDA) {
+		t.Fatal("unregistered target reported as removed")
+	}
+	snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA, regIDB))
+	if ids := snapshotIDs(snaps); len(ids) != 1 || ids[0] != regIDB || r.Has(regIDA) {
+		t.Fatalf("snapshots = %v, want only B", ids)
+	}
+}
+
+// Refreshing must not cost memory: however often one id is reported, it holds
+// one slot, and it neither evicts other removals nor makes older enumerations
+// unverifiable.
+func TestRepeatedRemovalStaysBounded(t *testing.T) {
+	r := NewTabRegistry()
+	r.SyncPageTargets(pageInfos(regIDA, regIDB))
+	other := target.ID("CCCC0000000000000000000000AB1234")
+	never := target.ID("DDDD0000000000000000000000AB1234")
+	r.RegisterPageTarget(other)
+
+	old := r.BeginEnumeration()
+	if !r.RemoveTarget(other) || !r.RemoveTarget(regIDA) {
+		t.Fatal("precondition: removals failed")
+	}
+	var tok EnumerationToken
+	const repeats = 3*maxRemovedTargets + 7
+	for i := 0; i < repeats; i++ {
+		if i == repeats-1 {
+			tok = r.BeginEnumeration()
+		}
+		if r.RemoveTarget(regIDA) {
+			t.Fatalf("repeat %d reported a registered target", i)
+		}
+	}
+	if len(r.removedLog) != 2 || len(r.removedGen) != 2 {
+		t.Fatalf("removal memory: log=%d index=%d, want 2 and 2", len(r.removedLog), len(r.removedGen))
+	}
+	if c := cap(r.removedLog); c > 4*maxRemovedTargets {
+		t.Fatalf("removal log capacity grew to %d", c)
+	}
+	if r.removedFloor != 0 {
+		t.Fatalf("removedFloor = %d: repeated reports evicted real removals", r.removedFloor)
+	}
+	if last := r.removedLog[len(r.removedLog)-1]; last.id != regIDA || last.gen != r.removedGen[regIDA] || last.gen <= tok.gen {
+		t.Fatalf("latest removal = %+v (index %d), want A newer than %d", last, r.removedGen[regIDA], tok.gen)
+	}
+
+	// The enumeration requested before the very last report is still stale for A.
+	if snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA, regIDB)); len(snaps) != 1 || r.Has(regIDA) {
+		t.Fatalf("snapshots = %v, want only B", snapshotIDs(snaps))
+	}
+	// The older removal was not crowded out, and the old token stays exact: it
+	// filters both removed ids and still registers a target never removed.
+	snaps, _ := r.ApplyEnumeration(old, pageInfos(regIDA, other, never, regIDB))
+	if ids := snapshotIDs(snaps); len(ids) != 2 || r.Has(regIDA) || r.Has(other) || !r.Has(never) {
+		t.Fatalf("old enumeration snapshots = %v, want B and the never-removed target", ids)
+	}
+}
+
+// Past the bound, a refreshed id keeps its place among the newest removals
+// while the oldest ones are forgotten.
+func TestRepeatedRemovalSurvivesOverflow(t *testing.T) {
+	r := NewTabRegistry()
+	r.RegisterPageTarget(regIDA)
+	r.RemoveTarget(regIDA)
+	id := func(i int) target.ID { return target.ID(fmt.Sprintf("CCCC%024X1234", i)) }
+	var tok EnumerationToken
+	for i := 0; i < 2*maxRemovedTargets; i++ {
+		r.RegisterPageTarget(id(i))
+		r.RemoveTarget(id(i))
+		if i == 2*maxRemovedTargets-3 {
+			tok = r.BeginEnumeration()
+		}
+		r.RemoveTarget(regIDA) // reported again and again
+	}
+	if n := len(r.removedLog); n != maxRemovedTargets {
+		t.Fatalf("removal log holds %d entries, want %d", n, maxRemovedTargets)
+	}
+	if n := len(r.removedGen); n != maxRemovedTargets {
+		t.Fatalf("removal index holds %d entries, want %d", n, maxRemovedTargets)
+	}
+	for i := 1; i < len(r.removedLog); i++ {
+		if r.removedLog[i-1].gen >= r.removedLog[i].gen {
+			t.Fatalf("removal log out of generation order at %d", i)
+		}
+	}
+	if snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA)); len(snaps) != 0 || r.Has(regIDA) {
+		t.Fatal("refreshed removal forgotten")
+	}
+}

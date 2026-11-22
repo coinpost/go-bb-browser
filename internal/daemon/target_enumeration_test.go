@@ -37,6 +37,10 @@ type enumConn struct {
 	created       int
 	listErr       error
 	afterSnapshot func()
+	// closeLingers makes CloseTarget succeed while the page stays listed until
+	// removeExternally: the browser confirms Target.closeTarget before the
+	// target is destroyed.
+	closeLingers bool
 }
 
 func newEnumConn(ids ...target.ID) *enumConn {
@@ -78,6 +82,12 @@ func (c *enumConn) CreatePageTarget(initialURL string, _ bool) (target.ID, error
 }
 
 func (c *enumConn) CloseTarget(id target.ID) error {
+	c.mu.Lock()
+	lingers := c.closeLingers
+	c.mu.Unlock()
+	if lingers {
+		return nil
+	}
 	c.removeExternally(id)
 	return nil
 }
