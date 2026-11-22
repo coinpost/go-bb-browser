@@ -161,8 +161,8 @@ func TestTargetReleaseRetiresWriterThenClearsObservation(t *testing.T) {
 	}
 }
 
-// A target released while a query is enabling observation must not keep the
-// buffers that the query registered.
+// A query whose target is not (or no longer) registered must not set up
+// anything for it: there is nothing left that would ever release it again.
 func TestEnableObservationForReleasedTargetLeavesNoBuffers(t *testing.T) {
 	fc := &fakeConn{}
 	srv := newIdleTestServer(fc, time.Minute)
@@ -174,8 +174,8 @@ func TestEnableObservationForReleasedTargetLeavesNoBuffers(t *testing.T) {
 	if !errors.Is(err, errObservationTargetGone) {
 		t.Fatalf("err = %v, want errObservationTargetGone", err)
 	}
-	if got := conn.forgotten(); len(got) != 1 || got[0] != tid {
-		t.Fatalf("ForgetTarget calls = %v", got)
+	if got := conn.forgotten(); len(got) != 0 {
+		t.Fatalf("ForgetTarget calls = %v, want none: nothing was set up", got)
 	}
 	recordAllKinds(srv.obsSink, tid, 1)
 	assertObservationReleased(t, srv, tid)

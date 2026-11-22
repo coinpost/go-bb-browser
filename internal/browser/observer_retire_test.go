@@ -466,17 +466,20 @@ func TestForgetTargetDuringAttachCancelsChildOnlyAfterAttachReturns(t *testing.T
 	})
 }
 
-// An attach the browser never answers ends by itself, releases its child
-// context and does not stick: the next call starts a fresh one.
+// An attach the browser never answers fails its callers at the bound, is ended
+// after the late-reply grace, releases its child context and does not stick:
+// the next call starts a fresh one.
 func TestAttachIsBounded(t *testing.T) {
 	orig := attachTimeout
 	attachTimeout = 30 * time.Millisecond
-	t.Cleanup(func() { attachTimeout = orig })
+	origGrace := lateAttachGrace
+	lateAttachGrace = 30 * time.Millisecond
+	t.Cleanup(func() { attachTimeout, lateAttachGrace = orig, origGrace })
 	attachKinds(t, func(t *testing.T, s *Session, allocator *parkedAttachAllocator, attach func(context.Context) error, child func() context.Context) {
 		result := make(chan error, 1)
 		go func() { result <- attach(context.Background()) }()
 		attempt := awaitAttachValue(t, allocator.attempts)
-		close(attempt.release) // return as soon as the bound ends the Run
+		close(attempt.release) // return as soon as the Run is ended
 		childCtx := child()
 		err := awaitAttachValue(t, result)
 		if !errors.Is(err, context.DeadlineExceeded) || ErrorKindOf(err) != ErrorTimeout {
@@ -496,6 +499,7 @@ func TestAttachIsBounded(t *testing.T) {
 		if err := awaitAttachValue(t, result); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("retry error = %v, want a fresh attach timeout", err)
 		}
+		awaitAttachValue(t, retry.ctx.Done()) // ended after the grace as well
 	})
 }
 
@@ -530,4 +534,98 @@ func TestSessionCloseDuringAttach(t *testing.T) {
 		default:
 		}
 	})
+}
+
+// Review P1: Close finds a child that is already in the table while its
+// initializer has not reached the attach yet. Close must be remembered: once it
+// has returned, that initializer may not start an attach (and sit in it for the
+// whole bound); it fails at once and releases the child.
+func TestSessionCloseBeforeAttachRunPreventsTheAttach(t *testing.T) {
+	const id target.ID = "TAB"
+	for _, kind := range []string{"observer", "pool"} {
+		t.Run(kind, func(t *testing.T) {
+			allocator := &parkedAttachAllocator{attempts: make(chan *parkedAttach, 4)}
+			parent, cancel := chromedp.NewContext(context.Background(), func(c *chromedp.Context) { c.Allocator = allocator })
+			t.Cleanup(cancel)
+			s := newSession(parent, func() {})
+			childCtx, cleanup := newAttachContext(s.ctx, id)
+
+			// The state between the table insert and the initializer goroutine.
+			var initialize func()
+			var ready chan struct{}
+			var initErr func() error
+			if kind == "observer" {
+				obs := &tabObserver{
+					tid: id, ctx: childCtx, cleanup: cleanup, rec: &barrierRecorder{obs: state.NewTabObsStore()},
+					queue: make(chan queuedObservation, 1), ready: make(chan struct{}), stop: make(chan struct{}),
+				}
+				s.observers = map[target.ID]*tabObserver{id: obs}
+				initialize, ready, initErr = func() { s.initializeObserver(obs) }, obs.ready, func() error { return obs.initErr }
+			} else {
+				ent := &tabPoolEntry{ctx: childCtx, cleanup: cleanup, ready: make(chan struct{})}
+				s.tabPool = map[target.ID]*tabPoolEntry{id: ent}
+				initialize, ready, initErr = func() { s.initializeTabPoolEntry(id, ent) }, ent.ready, func() error { return ent.err }
+			}
+
+			s.Close()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				initialize()
+			}()
+			select {
+			case attempt := <-allocator.attempts:
+				t.Error("an attach started after Session.Close had returned")
+				cleanup.abort()
+				close(attempt.release)
+				awaitAttachValue(t, done)
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("initializer neither attached nor returned")
+			}
+			awaitAttachValue(t, ready)
+			if err := initErr(); !errors.Is(err, errSessionClosed) && !errors.Is(err, context.Canceled) {
+				t.Errorf("initialization after Close returned %v", err)
+			}
+			awaitAttachValue(t, childCtx.Done()) // released by the initializer
+		})
+	}
+}
+
+// The same guarantee one level down: an abort (Close) or a cancel (release)
+// that precedes run is permanent.
+func TestAttachAbortBeforeRunIsPermanent(t *testing.T) {
+	for _, action := range []string{"abort", "cancel"} {
+		t.Run(action, func(t *testing.T) {
+			allocator := &parkedAttachAllocator{attempts: make(chan *parkedAttach, 1)}
+			parent, cancel := chromedp.NewContext(context.Background(), func(c *chromedp.Context) { c.Allocator = allocator })
+			t.Cleanup(cancel)
+			ctx, cleanup := newAttachContext(parent, "TAB")
+			// A child without a browser may be cancelled only once.
+			if action == "abort" {
+				cleanup.abort()
+				if ctx.Err() != nil {
+					t.Error("abort cancelled the child context")
+				}
+				t.Cleanup(cleanup.cancel)
+			} else {
+				cleanup.cancel()
+			}
+			result := make(chan error, 1)
+			go func() { result <- cleanup.run(ctx) }()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("run after %s returned %v, want context.Canceled", action, err)
+				}
+			case attempt := <-allocator.attempts:
+				t.Errorf("run started an attach after %s", action)
+				cleanup.abort()
+				close(attempt.release)
+				<-result
+			case <-time.After(3 * time.Second):
+				t.Fatal("run neither attached nor returned")
+			}
+		})
+	}
 }

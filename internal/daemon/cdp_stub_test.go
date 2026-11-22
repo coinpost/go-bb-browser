@@ -38,6 +38,7 @@ type cdpStub struct {
 	holds       map[string][]*cdpStubHold
 	failures    map[string]int         // upcoming commands per method answered with an error
 	sessions    map[target.ID][]string // flat sessions attached per target, oldest first
+	detached    map[string]bool        // flat sessions detached again by the client
 }
 
 // cdpStubHold parks one upcoming command of a given method: arrived is closed
@@ -157,6 +158,20 @@ func (st *cdpStub) sessionCount(id target.ID) int {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return len(st.sessions[id])
+}
+
+// liveSessions returns the flat sessions attached to id that the client has not
+// detached, oldest first.
+func (st *cdpStub) liveSessions(id target.ID) []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var live []string
+	for _, sid := range st.sessions[id] {
+		if !st.detached[sid] {
+			live = append(live, sid)
+		}
+	}
+	return live
 }
 
 // emitSession delivers a target-scoped event on a flat session.
@@ -358,6 +373,18 @@ func (st *cdpStub) dispatch(msg cdpStubMessage) {
 		st.sessions[p.TargetID] = append(st.sessions[p.TargetID], sid)
 		st.mu.Unlock()
 		st.reply(msg, map[string]any{"sessionId": sid})
+	case "Target.detachFromTarget":
+		var p struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
+		st.mu.Lock()
+		if st.detached == nil {
+			st.detached = make(map[string]bool)
+		}
+		st.detached[p.SessionID] = true
+		st.mu.Unlock()
+		st.reply(msg, map[string]any{})
 	case "Target.closeTarget":
 		var p struct {
 			TargetID target.ID `json:"targetId"`

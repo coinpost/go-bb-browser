@@ -111,7 +111,8 @@ var errObservationTargetGone = errors.New("target released while enabling observ
 // Target removal does not take the keyed tab lock, so it can run concurrently.
 // Registration first waits for every release of the same target id that is
 // still running, so a reused id never sees the buffers of its previous
-// lifecycle and that release never clears the new ones. Afterwards the
+// lifecycle and that release never clears the new ones, and it refuses a target
+// that is no longer registered, however long ago it was released. Afterwards the
 // lifecycle is confirmed: if the target left the registry, or a release took
 // the buffers, while the observer was attaching, whatever this call set up is
 // retired again, leaving no buffers or observer behind for a released target.
@@ -150,11 +151,21 @@ func (s *Server) enableObservation(ctx context.Context, conn tabConn, tid target
 
 // registerObservation registers tid's buffers once no release of that id is
 // running, and reports whether it created them.
+//
+// The caller resolved tid earlier and without obsLifeMu, so the target may have
+// been released, completely, since then. The registry is therefore consulted
+// again here: removals and their release announcements happen under obsLifeMu,
+// so a target that is registered and has no release running is alive, and
+// nothing else may get buffers or an observer.
 func (s *Server) registerObservation(ctx context.Context, tid target.ID) (created bool, err error) {
 	for {
 		s.obsLifeMu.Lock()
 		running := s.targetReleases[tid]
 		if running == nil {
+			if _, live := s.tabs.ShortForTarget(tid); !live {
+				s.obsLifeMu.Unlock()
+				return false, errObservationTargetGone
+			}
 			if s.obsStore != nil {
 				created = s.obsStore.RegisterTarget(tid)
 			}

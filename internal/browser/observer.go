@@ -101,7 +101,7 @@ func (s *Session) EnsureObservation(ctx context.Context, tid target.ID, kind Obs
 	}
 	obs := s.observers[tid]
 	if obs == nil {
-		tabCtx, cleanup := newAttachContext(s.ctx, tid)
+		tabCtx, cleanup := s.newAttachContext(tid)
 		obs = &tabObserver{
 			tid: tid, ctx: tabCtx, cleanup: cleanup, rec: rec, logger: lg,
 			queue: make(chan queuedObservation, observationQueueCapacity), ready: make(chan struct{}),
@@ -119,10 +119,24 @@ func (s *Session) EnsureObservation(ctx context.Context, tid target.ID, kind Obs
 	case <-ctx.Done():
 		return wrapCDPError("Target.attachObserver", tid, ctx.Err())
 	}
-	if err := obs.disableUntilLeased(ctx); err != nil {
-		return err
+	err := obs.disableUntilLeased(ctx)
+	if err == nil {
+		err = obs.activate(ctx, kind)
 	}
-	return obs.activate(ctx, kind)
+	// Activation commits only while the observer is still installed. Close and
+	// ForgetTarget take it out of the table before they retire its writer, so a
+	// retirement that won the race is reported instead of a working observation.
+	s.obsMu.Lock()
+	installed, closed := s.observers[tid] == obs, obs.sessionClosed
+	s.obsMu.Unlock()
+	switch {
+	case installed:
+		return err
+	case closed:
+		return wrapCDPError("Target.attachObserver", tid, errSessionClosed)
+	default:
+		return &CDPError{Kind: ErrorTargetGone, Op: "Target.attachObserver", Target: tid, Err: fmt.Errorf("target removed while enabling observation")}
+	}
 }
 
 var disableObservationDomains = func(tabCtx, requestCtx context.Context) error {
@@ -132,8 +146,8 @@ var disableObservationDomains = func(tabCtx, requestCtx context.Context) error {
 func (s *Session) initializeObserver(o *tabObserver) {
 	// Bind chromedp's Target.run to the observer's long-lived context, never to a
 	// request timeout child. Cancelling the latter would otherwise kill the session.
-	// The Run is bounded and can be cut short by a release or by Close; neither
-	// cancels o.ctx while it is in flight.
+	// The wait is bounded and the Run can be cut short by a release or by Close;
+	// neither cancels o.ctx while it is in flight.
 	err := o.cleanup.run(o.ctx)
 	s.obsMu.Lock()
 	current := s.observers[o.tid] == o
