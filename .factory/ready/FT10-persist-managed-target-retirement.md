@@ -96,3 +96,24 @@ Codex 只读审查 origin/main...HEAD；配置完整 gofmt/vet/race 在 HEAD 与
 未检查：UI、真实非 headless Chrome/CDP、Docker、systemd 均未验证。connectBrowserLocked 候选接线没有专门阻塞时序测试（启动持有 tabMu 阻止 tab_new 交错），分步测试及既有启动测试通过。真实 Session stub 未注入 getTargets 失败，该分支使用 fake conn/syncInitialTargets 覆盖。
 
 状态：分支已推送；new/ → review/，第2/3轮。仅 build，未进行 review、未合并 main、未发布。
+
+## factory · review · 2026-11-22 11:18
+head: 26f38df4dcb57dd16ed375ef2efdd81a90311890
+verdict: pass
+notes:
+- [P2] internal/daemon/tab_idle.go:206: ManagedTabs 快照读取后若 tab_close 完成，恢复循环仍能重新加入已关闭 target 的 idle 跟踪；探针 HEAD 为 browser=0 persisted=0 idle=true，main 为 idle=false。应按完整 target 串行化恢复与退役；磁盘退役仍有效。
+- [P2] internal/daemon/tab_idle.go:307: 清扫器按完整 target 检查过期，却在关闭时重新解析短别名；检查后销毁旧目标并复用别名可关闭用户 tab。HEAD 与 main 均复现，属既有窄窗口竞争；应关闭已检查的完整 target。
+- [P2] internal/daemon/v1.go:481: 创建与销毁事件均早于 tab_new 返回处理时，迟到登记仍持久化已销毁 target；应使确认销毁优先于在途创建登记。
+- [P2] internal/daemon/v1.go:244: 成功响应按请求短别名重新定位审计身份；tab_focus 返回5678但多余 params.tab=1234可记录错误 target，成功 tab_close 审计缺 target。应在实际操作解析时固定完整身份，focus使用返回目标，close在删映射前保存身份。
+- [P2] internal/daemon/tab_idle.go:126: 启动回放后注册表未填充时，销毁事件因 RemoveTarget 未命中而不退役持久成员；应总按完整 target 幂等退役。
+- [P2] internal/daemon/tab_idle.go:234: 显式关闭收到 No target with given id found 仍保留 managed；应识别 ErrorTargetGone，退役完整身份并保留原RPC错误。
+- [P2] internal/store/store.go:385: 轮转快照写入 ENOSPC 仅 warn，RegisterManagedTab 返回nil而重开 managed=0；应先准备可恢复快照再替换，并向生命周期调用者返回失败。
+- [P3] internal/daemon/tab_idle.go:74: 生命周期写入 ErrClosed 仍仅debug；应按约定warn或在关闭store前等待生命周期写入完成。
+
+Codex 只读审查 origin/main@7223e5a...HEAD 全部13个变更文件。上轮唯一P1已修复：启动与dirty retry均在CDP枚举前固定可退役完整target候选，保留FT11枚举token。相同时序探针在修复前合并提交aff9a50得到 browser=1 idle=false managed=0，最终HEAD为 browser=1 idle=true managed=1。无P0/P1，以上均为非阻塞项；未因诊断探针预期失败而将配置测试误判为失败。
+
+配置完整 gofmt/vet/go test -race ./... 通过（10个测试包、2个无测试包）；daemon定向race重复30次、state/store定向race重复20次通过，含FT11/FT18回归。诊断问题除ErrClosed静态核对外均有独立探针。manager确认工作树干净、diff --check通过，远端跟踪head未变；分支与main合并干净。未找到review-code skill。
+
+安装：无新增工具/非固定依赖，使用现有Go1.27.4和固定模块；测试HOME、缓存、overlay与基线快照均隔离在本run tmp并清理。未验证真实非headless Chrome/CDP、Docker、systemd。无source或owner签名关联issue/PR，无GitHub评论。
+
+第2/3轮审查通过，review/ → ready/；owner请关注上述生命周期、别名竞争及写盘失败的非阻塞风险。本次未修改代码、未合并main、未发布。
