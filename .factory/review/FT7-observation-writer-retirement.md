@@ -1,6 +1,6 @@
 ---
 branch: factory/FT7-observation-writer-retirement
-round: 4
+round: 5
 ---
 # target释放与观测writer退役同步
 
@@ -250,3 +250,21 @@ owner 本次明确要求：「补充合理边界，把任务移回 new 再来一
 - Checking：永久 barrier 覆盖已取出待 Record 的事件与释放并发、三域清空和桶数归零、迟到查询/attach 不重建已释放 ID、重复释放及 Close/Forget；-race 反复创建/关闭不同完整 ID 的 tab，区分相同完整 ID 的范围外压力测试。执行配置完整 gofmt/vet/race，并如实报告未验证的真实 Chrome/CDP、loadingFailed、Docker/systemd。
 
 状态：按 owner 要求 review/ → new/，授权额外一次构建（下一轮为第 5 轮）；header round 保留 4，待实际构建完成再递增。全局 max_rounds=3 不变，不授权无限重试、不自动 ship。
+
+
+## factory · 2026-11-22 18:19
+第 5 轮构建完成，遵守 17:58 收窄边界：daemon 生命周期内完整 CDP target ID 不复用，短 alias 可被不同完整 ID 接替。原分支新增 209ee623974ba0a5df585f4743bb4e21ef273ec5；main@2be49f8 已是祖先，无需 merge。仅 build，不表示 review 通过。
+
+实现与决定：删除 Close 对未同步 cancel 字段的写入，保留共享 writer 屏障；首次 attach 清理 detach 被拒时保留 session ID，让 cancel watcher 再尝试一次（非无限重试）；移除 5 分钟迟到 attach 宽限期，保留回包清理所有权直到回包/取消/连接结束；观测查询固定首次解析的完整 target ID，避免短 alias 易主后错误续期另一页和审计错记。新增 obsStepRead 测试缝并澄清 AGENTS.md 边界。未新增跨 RPC 代次/会话架构，未重构 eval/click/fill，保留已有保护和回归。
+
+永久回归与证据（Claude Code 报告）：9dfe0a4 加新测试及测试缝对照，四次并发 Close 的 race 在两批 -count=3 各捕获一次；detach 拒绝一次的 observer/pool 泄漏、不同完整 ID 复用短 alias 后误续期均 3/3 失败，修复后通过。迟到 attach 对照仅以临时 shim 将旧 5 分钟宽限期缩为 30ms，未等待生产默认 60s+5min，不冒称生产时限实测。不同完整 ID/短 alias 碰撞下的在途 Record 释放，以及 tab_close/用户关闭/枚举消失/idle 四路径反复带事件开关，旧三环与桶归零、迟到 Push 被拒：修复前已通过，属契约证明而非新 bug；跳过 ClearTarget、跳过 ForgetTarget、允许 Push 重建的三种变异均使这些回归失败。初版 churn 用例自身 ID 格式错误的失败不算产品缺陷。
+
+测试：coder 配置全量通过，browser/daemon 定向生命周期 -race -count=20、browser/daemon/state 整包 -race -count=5 通过；manager 独立隔离 HOME/GOCACHE/GOTMPDIR，GOPROXY=off、GOSUMDB=off 执行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过，Go 1.27.4，11 个有测试包、1 个无测试包。diff --check、提交范围、保护路径、工作树检查通过。安装：无；go.mod/go.sum 未变。证据保留本机 build evidence/FT7-209ee62/，含 before-*.log、mutations.log、repeat.log、full-final.log、manager-full.log。
+
+审查边界/未修复：17:41 五项 P1 仍保留，原始调度依赖完整 ID 复用，按 owner 边界不作为本轮阻塞，未声称修复，也未逐一改造为不同 ID 诊断。旧路由/pool/managed 清理和等待接替注册释放的 P2 同样依赖完整 ID 复用。并发 Close、超宽限期 attach、detach 拒绝一次、观测审计 alias 误续期已处理；Close 后 attach 漏 detach/继续启用域未修，coder 判断 daemon 退出时连接终结、无 writer/桶影响，需独立 review 核实，不以此直接宣告安全。其它 RPC 的短 alias 审计仍用旧逻辑。
+
+重要权衡：移除宽限期后，不回 attach 的浏览器可导致每次重试留下一条待回包 goroutine/请求直到取消或断连；main 相同等待不超时但复用单个 attach，本分支重试可能积累更多。保留回包所有权避免远端 session 泄漏，但此资源增长风险尚未进一步消除，交 review 明确检查。detach 仅额外重试一次，连续拒绝不保证回收。
+
+未检查：真实非 headless Chrome/CDP、真实 loadingFailed 流、真实完整 ID 复用频率、生产默认超时的迟到回包、Docker、运行中的 systemd；未启动 Chrome、未操作用户窗口；click/fill 等 RPC 未注入短 alias 易主调度。
+
+状态：代码已推送，new/ → review/，round=5。owner 仅授权额外一次构建，max_rounds=3 保持不变，不自动追加修复；等待独立 review，未合并 main、未发布。
