@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 5
+round: 6
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -288,3 +288,15 @@ owner 本次明确要求：
 
 ## factory · plan · 2026-11-23 14:46
 在途创建须受已读到的销毁证据或溢出后有界核验约束；区分真实创建与交叠枚举发现，矛盾快照不能把已销毁目标保持可解析，需冲突后新证据确认。保持正常并发创建不被早期空快照误删、内存随请求结束释放、不回归 idle/持久化一致性。将最新 review 的生产同步循环与本地 CDP stub 两项诊断提升为永久确定性回归，保存修复前失败/修复后通过证据，关键 race 重复20次及全量 gofmt/vet/race。关联 P3 文档/纯空白 ID 可一并澄清，不扩张其他任务。
+
+
+## factory · 2026-11-23 15:02
+Claude Code 完成 owner 人工授权第6轮，提交 39f1a6151636bfc64ba91dd4061e11f5e2f24af7。origin/main@2be49f8 已为祖先，无额外合并，未重写历史。
+- 两项P1：连接读线程收到destroyed即向所有在途窗口记录失效，事件是否成功入队均如此；丢弃时也约束更早排队的exists事件。登记区分真实创建/事件与枚举发现，交叠枚举冲突的发现不再享受并发新建保护，暂停解析并请求冲突后新枚举；Contested不当作已确认销毁，保留在途真实创建提交。
+- 两条P3同时处理：daemon/CLI仅空串算缺失，纯空白完整ID逐字节传递；文档澄清关闭后发起的新枚举或之后读到的page事件都可重新登记浏览器仍报告的目标。无短ID兼容路径。
+- 永久回归：真实chromedp读取器+生产同步循环+本地CDP stub两项溢出调度，生产读线程接线、存活目标冲突后恢复、纯空白ID，以及registry/Session单元与并发检查。旧“较新枚举发现享受保护”的断言改为冲突暂停解析，CLI纯空白本地拒绝改为原样转发，独立review须核对语义。
+- 红绿：dab7d41导出副本中两个新永久P1测试、两个原review探针及纯空白探针各5/5失败，CLI失败；修复后7个review探针文件原样运行，12个TestReview各20/20通过。新API单元测试无独立红证据；红测有不提交shim以编译新文件。CC执行state/browser/daemon整包race重复20次通过，全量gofmt/vet/race通过。
+- manager独立执行 test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./... 全通过（Go1.27.4，11测试包、1无测试包）；diff --check通过，never路径及go.mod/go.sum未变，工作树干净。证据本机build/evidence/FT28-round6/：design.md、red/green/race-repeat/full/manager-full.log、原review探针及复现说明。
+- 安装：无。HOME/TMPDIR/缓存隔离，复用已有模块，GOPROXY=off/GOSUMDB=off，无真实外网，仅回环stub。
+- 未验：真实Chrome、Go1.26、部署、跨浏览器会话ID唯一性。仍依赖destroyed通知与chromedp连接顺序；非page info事件未在读时记录删除。Contested存活外部tab可能短暂不可解析并丢失新观测缓冲，约1秒重枚举恢复；已登记目标在销毁通知丢弃到补偿枚举前仍短暂可解析。创建超时无ID不能回滚、回滚失败不重试沿用既有边界。无UI变更、未操作用户窗口。
+状态：代码已推送，new/ → review/，round=6（本次owner授权，不改max_rounds），等待独立review，不以测试通过视为验收。未合并main、未发布、不启动FT7、不改定时任务。
