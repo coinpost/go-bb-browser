@@ -414,3 +414,15 @@ Codex独立只读审查origin/main@2be49f8...HEAD全66文件，重点第8轮11�
 独立解析构建方90份Chrome轨迹：85次成功启动daemon各一次root discovery，20次只读冲突零close，反向恢复5/5在eval前额外完成一次getTargets，eval期间未新增枚举。证据来自8cb5f39，最终HEAD仅两个普通测试文件变化。本次未独立启动真实Chrome，不将轨迹检查写成独立浏览器验证。两种零页面各5次SKIP仍未验；新调度真实Chrome可达性、频率、其他宿主、Go1.26、部署、跨会话ID唯一性未验。
 证据保留本机review/evidence/FT28-2af47a5/：REVIEW.md、reproduce.md、sources/、configured.log、counts.txt、adjacent-*.log、round7-*.log、chrome-traces.log、manager-diagnostics.log。临时探针尚非永久回归。工作树与索引干净，无代码修改、提交、安装或依赖变更，保护路径未改。HOME/TMPDIR/缓存隔离在run内，复用固定模块，GOPROXY=off/GOSUMDB=off，仅回环stub，不操作用户窗口、不扩张FT7。无链接issue/PR，不发GitHub评论。
 round=8，超过max_rounds=3；owner只授权本轮build，不自动追加修复。发现P1，留在review/等owner决定；继续须追加说明并移至new/。未合并main、未发布、未修改定时任务。
+
+
+## factory · 2026-11-23 23:19
+owner 本次明确要求：
+> 移到 new 让 CC 继续处理
+
+本次人工授权 review/ → new/，Claude Code 沿用原分支继续第9轮；超过max_rounds为本次授权，不改配置。修复最新review的P1，关联P2与P3验收缺口一并处理。保持完整target ID、不兼容短ID及历轮有效回归。不得合并main、发布、启动FT7或修改定时任务。
+
+## factory · plan · 2026-11-23 23:19
+Behaviour：保留在途存在证据与缺席查询的可比较时刻；列表先应用也不得使迟到创建或旧created复活死A；真正查询后创建的存活目标保持可用。创建期间的退役事实保持到核验结束，即使枚举再次发现关闭中的A也不得返回成功。解析枚举失败透传真实错误，不伪装成unknown tab id。
+Scope：registry因果证据与回收、创建核验/退役生命周期、解析错误传播、永久回归与真实Chrome验收断言。沿用清晰所有权，不引入无界历史缓存。
+Checking：最新P1及关联P2诊断提升永久回归，保存红绿证据；修正存活控制为eval前断言registry/idle及枚举计数。关键race重复20轮、全量gofmt/vet/race；相关真实Chrome场景使用隔离非headless生产路径各5轮，代理不注入discovery，未覆盖如实记录。所有临时HOME/缓存/TMPDIR均在本run内。
