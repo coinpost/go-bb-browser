@@ -300,3 +300,20 @@ Claude Code 完成 owner 人工授权第6轮，提交 39f1a6151636bfc64ba91dd406
 - 安装：无。HOME/TMPDIR/缓存隔离，复用已有模块，GOPROXY=off/GOSUMDB=off，无真实外网，仅回环stub。
 - 未验：真实Chrome、Go1.26、部署、跨浏览器会话ID唯一性。仍依赖destroyed通知与chromedp连接顺序；非page info事件未在读时记录删除。Contested存活外部tab可能短暂不可解析并丢失新观测缓冲，约1秒重枚举恢复；已登记目标在销毁通知丢弃到补偿枚举前仍短暂可解析。创建超时无ID不能回滚、回滚失败不重试沿用既有边界。无UI变更、未操作用户窗口。
 状态：代码已推送，new/ → review/，round=6（本次owner授权，不改max_rounds），等待独立review，不以测试通过视为验收。未合并main、未发布、不启动FT7、不改定时任务。
+
+
+## factory · review · 2026-11-23 15:27
+head: 39f1a6151636bfc64ba91dd4061e11f5e2f24af7
+verdict: fix
+fix:
+- [P1] internal/daemon/tab_idle.go:186: 两次只读列表冲突可关闭存活用户标签。旧列表只含B，新列表发现A且eval已附着，旧回复将A标Contested后调用ForgetTarget，chromedp取消子上下文实际发出closeTarget(A)。争议仅暂停解析并重枚举，确认消失前不得执行会关闭页面的释放；提前解绑必须使用不关页的detach，增加已eval存活页的线上零close断言。第6轮新增，前版/main通过。
+- [P1] internal/state/tab_registry.go:233: 争议暂停解析丢失A已被发现的证据；冲突后重新请求的独立列表明确确认A缺席，迟到tab_new仍在375–376行登记死A，三种clear成功且idle/磁盘重放保留A。在途创建窗口保留发现及因果先后，让发现后新请求确认缺席能拒绝迟到提交并有界回滚，交叠歧义仍保护真实创建。相对前版回归，main同样失败。
+- [P1] internal/browser/session.go:382: 队列满先发布dirty再记录destroyed；同步循环可先消费dirty并开启补偿窗口，创建在失效证据记账前提交。唯一补偿回复将死A当并发新建保留，三种clear/idle/磁盘重放仍接受。先记录失效并约束旧事件，再发布dirty，保证每次丢弃留下后续核验；增加发布边界屏障。底层契约缺口main及前版已有，不称新增。
+- [P1] internal/state/tab_registry.go:449: 请求前已读入队的targetCreated(A)晚处理获得较新登记代数，压过因果更晚的缺席列表，完成后clear仍接受死A。事件读取与枚举开始须有可比较顺序，早已读到的存在证据必须服从随后请求的确认缺席，同时保护真正晚于请求的新建；当前只读时钟可能不变，不能仅调整赋值。HEAD/前版/main均复现。
+notes:
+- [P2] internal/state/tab_registry.go:247: 两份矛盾快照反向应用时，vouchesFor拒绝存活A却不报告Contested/重枚举需求；生产循环两个tick后仍无A且未发新枚举。对因冲突跳过的行同样返回重试信号，两个应用方向都须自动恢复；前版同样失败、main通过。
+
+Codex独立只读审查origin/main@2be49f8...HEAD全59文件，重点核查第6轮15文件；无可用review-code skill。第5轮两个原始P1调度前版各20/20失败、HEAD各20/20通过，接入生产读取器的变体亦通过；本次为相邻新调度，不重复已修finding。五项诊断HEAD各-race-count=20失败；前版及main对照如上，完整ID从未复用、同后缀B保持存活。首项回环stub确实收到closeTarget(A)，不是仅根据registry推断关页。manager核对源码/全量日志，并独立导出HEAD、-race-count=3重跑五项全部失败。
+配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过，11测试包、1无测试包；关键身份/锁/18方法/Pool/CLI/恢复/16目标idle轮转及窗口释放等永久回归各20轮通过。配置通过不覆盖诊断失败，manager未另行重复全量。工作树干净，无代码修改、提交、安装或依赖清单变化，保护路径及go.mod/go.sum相对base未变。
+证据保留本机review/evidence/FT28-39f1a61/：REVIEW.md、reproduce.md、sources/、counts.txt、configured.log、diagnostics-head/pre/base-20.log、original-pre-20.log、key-head-20.log、manager-diagnostics.log。诊断在工作树外导出副本执行，尚非永久回归。Go1.27.4，隔离HOME/TMPDIR/缓存，复用固定模块，GOPROXY=off/GOSUMDB=off，仅fake CDP/本地回环stub；未验真实Chrome、Go1.26、部署、线上频率或跨浏览器ID唯一性，未操作用户窗口，不扩张FT7。无链接issue/PR，不发GitHub评论。
+round=6，超过max_rounds=3，owner仅授权本次build；发现P1，留在review/等待owner决定，不自动追加修复。若继续请添加说明并移至new/。未改代码、未合并main、未发布、未改定时任务。
