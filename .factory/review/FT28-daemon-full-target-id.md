@@ -261,3 +261,20 @@ Claude Code 完成本次整体重做（round 5，人工授权，不修改配置�
 - 设计边界：窗口证据内存随在途请求数及期间失效数增长，靠操作期限释放，非固定容量硬上限；事件顺序依赖chromedp连接监听回调顺序，尚未真实Chrome验证。关闭后才发起的新枚举若浏览器仍列旧target，仍可暂时再登记直至destroyed（保留旧行为，review核对契约）。创建请求失败/超时拿不到ID无法回滚，可能留下未受管tab；回滚失败仅报告不重试。交叠证据保守拒绝时存活外部tab可能晚一次枚举登记。
 - 未验真实Chrome、Go1.26、部署、跨浏览器会话ID唯一性；只有fake CDP/本地回环stub。无UI变更，未启动浏览器或操作用户窗口。
 已推送代码，new/ → review/，等待独立审查，不能据测试通过视为验收完成。未合并main、未发布、不启动FT7、不修改定时任务。
+
+
+## factory · review · 2026-11-23 14:13
+head: dab7d41a67aaddb4192d7e4abe02208a4e56ff4d
+verdict: fix
+fix:
+- [P1] internal/state/tab_registry.go:319: 生命周期队列满时 A 的创建/销毁通知被丢弃，补偿枚举已确认 A 缺席，但迟到 tab_new 仍成功，三种 clear 接受死 A，idle 与磁盘重放也保留 A。让读到的销毁证据约束在途创建，或对溢出影响的创建在提交前有界核验；保留正常并发创建不受早期空快照删除的保证。
+- [P1] internal/state/tab_registry.go:189: 普通旧列表先拍到 A，A 已销毁且通知因队列满丢弃，补偿枚举只含 B；先应用旧列表再应用补偿枚举，gen > w.gen 将旧列表发现误当并发新增保护，三种 clear 仍接受死 A。区分真实创建和交叠列表发现，对矛盾证据暂停解析并用冲突后新枚举确认，保留并发新建保护。
+notes:
+- [P3] AGENTS.md:33: 文档称关闭后只能新枚举重新登记，实际新读到的 page info 事件也可登记仍存活的 A；统一失效时点与两类新证据说明。该滞留边界无错目标或受管身份恢复证据。
+- [P3] internal/daemon/v1.go:255: 合成纯空白完整 ID 可由 tab_new 返回，却被 clear/close 和 CLI TrimSpace 判空拒绝；仅拒绝空串并逐字节查找。非真实 Chrome 已观察值，前一 head 已有此限制。
+
+Codex 独立只读审查 origin/main@2be49f8...HEAD 全56文件，无可用 review-code skill。两个P1均以真实chromedp连接、生产同步循环和本地CDP stub确定性复现：HEAD各20/20失败，f1bd045与main各5/5失败，属于既有缺陷遗漏，不称本轮新增回归。A完整ID未复用、浏览器已实际移除A、同后缀B存活，不依赖关闭后浏览器仍列A假设。manager核对探针源码、配置日志，并在独立导出副本-race -count=3复现两项全部失败。诊断尚非永久回归。
+上轮两项P1原始调度HEAD各20/20通过，更早销毁后创建及较新缺席先应用亦各20/20通过。独立检查移除历史环后的外部语义：1025次无关删除、并发列表、瞬时枚举失败后存活受管A仍恢复idle/重放；旧排队事件、target-gone、select/idle互斥、有界回滚、16目标idle关闭后轮转、18定向方法、Pool与CLI对应永久回归通过。
+配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过，11测试包、1无测试包；关键永久回归与补充race各20轮通过。manager核对全量日志，未另行重复全量；配置通过不覆盖新增诊断缺陷。
+证据保留本机review/evidence/FT28-dab7d41/：REVIEW.md、reproduce.md、probes/、configured.log、overflow-head/pre/main.log、list-head/pre/main.log、original-head.log、permanent-20.log、supplement-20.log、boundaries.log、manager-diagnostics.log。工作树干净，无代码修改、提交、安装、依赖清单变化。Go1.27.4，隔离HOME/TMPDIR/缓存，复用已有固定模块，GOPROXY=off/GOSUMDB=off，无真实外网；未验真实非headless Chrome、Go1.26、线上频率、部署或跨浏览器会话ID唯一性，未启动浏览器或操作用户窗口。不扩张FT7 writer重设计，无链接issue/PR不发GitHub评论。
+round=5，超过max_rounds=3；owner授权本轮整体重做，不自动追加修复。发现P1，留在review/等待owner决定；如需继续请追加说明并移至new/。本次仅review，未改代码、未合并main、未发布、未修改定时任务。
