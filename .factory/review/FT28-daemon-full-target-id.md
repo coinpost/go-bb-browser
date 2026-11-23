@@ -356,3 +356,21 @@ Claude Code 续做完成已授权第7轮，未另起修复轮。本次未再遇�
 - 需独立review核对旧断言改写：“冲突按缺席移除”改为“暂停解析/保留资源并核验”；destroyed读出即不可解析。配置测试通过不等于独立验收。
 证据本机build/evidence/FT28-round7/：README.md、design.md、red.log、race-repeat.log、full.log、manager-full.log、review-probes/与real-chrome/final/runs/*/cdp.jsonl。
 状态：代码已推送，new/ → review/，round=7（owner人工授权，不改max_rounds），等待独立review。未合并main、未发布、不动FT7或定时任务。
+
+
+## factory · review · 2026-11-23 19:25
+head: ca7191b4c86afe47e5caf182b1b95ff59037d792
+verdict: fix
+fix:
+- [P1] internal/state/tab_registry.go:383: CommitCreated 在创建事件已登记 A 时跳过创建窗口的缺席冲突证据。旧仅含 B 的快照与 A 通知冲突、A 已关闭、后台核验回复仍挂起时，迟到创建回包直接成功，未发同步核验；三种 clear 接受死 A，idle 和磁盘重放仍保留 A。已知目标分支也须检查窗口缺席证据，解决冲突后才能成功返回 tab_new。
+- [P1] internal/state/tab_registry.go:452: created(A) 已读入队，但创建回包先登记 A，随后处理事件时丢掉更早的读取时间。晚于事件读出才请求、明确仅含 B 的列表应用后，A 因较晚提交的 seen 被误作并发新建保护，三种 clear 仍成功。保留已知目标最早有效存在证据，不用较晚创建提交覆盖事件因果时间；保持真正晚于请求的新建保护。
+notes:
+- [P2] internal/state/tab_registry.go:416: A 尚未登记时已读到 destroyed，之前排队的 created 仍可登记死 A；消费者等待生命周期锁完成删除期间三种 clear 成功。销毁读取时也应约束未知 A 的旧存在事件，证据随在途工作回收。
+- [P2] internal/daemon/tab_idle.go:95: 创建同步核验期间另一调用已成功 tab_close(A)，核验返回错误后仍无条件返回创建成功。错误分支复核登记已失效则报错；存活目标控制组须继续成功并后台重试。
+- [P2] internal/daemon/real_chrome_test.go:371: 反向冲突验收在 eval 后才查登记，eval 自身可触发枚举恢复，掩盖缺失自动恢复。应在 eval 前断言已恢复且 daemon 已额外发出枚举；已有5条真实Chrome构建轨迹确有自动查询，不据测试漏洞否认已有观测。
+
+Codex 独立只读审查 origin/main@2be49f8...HEAD 全64文件，重点第7轮修改；无可用 review-code skill。四项生命周期诊断 HEAD 各 -race -count=20 失败，manager 独立导出副本 -race -count=3 重跑四项全部失败，核验错误的存活控制组均通过。A 仅创建一次、不复用完整ID、同后缀 B 存活；两项 P1 检查后台回复/通知到达前的已知缺席窗口，不声称永久分歧或自然发生频率。旧39f1a61/main严格订阅桩均无root discovery、未收到A事件，不能将注入discovery后的旧算法行为冒称既有生产可达；HEAD有一次root discovery及实际事件。第四项核验错误分支为本轮新增。上轮四个原诊断及dirty发布顺序永久回归各20轮通过，不重复已修调度。
+配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过，Go1.27.4，11测试包、protocol无测试；18方法、锁/等待、Client/Pool/CLI、审计/恢复/轮转等定向通过，realchrome标签vet通过。manager核对全量日志，未另行重复全量；配置通过不覆盖诊断失败。
+只审阅构建方70条Chrome轨迹，65次成功daemon启动均一次root discovery、20次只读冲突零close；本次未独立启动Chrome，不将轨迹审阅写作独立真实浏览器验证。两种零页面场景各5次SKIP，仍未验证；Go1.26、其他Chrome/宿主、部署、自然概率及跨会话ID唯一性未验。未操作用户窗口、不扩张FT7。
+证据保留本机 review/evidence/FT28-ca7191b/：REVIEW.md、reproduce.md、sources/、configured.log、diagnostics-ca7191b/39f1a61/2be49f8.log、previous-schedules.log、acceptance-control.log、inspected-chrome.log、manager-diagnostics.log。诊断为工作树外导出副本，尚非永久回归。工作树干净，无代码修改、提交、安装或清单变更；HOME/TMPDIR/缓存隔离，固定模块缓存、GOPROXY=off/GOSUMDB=off，仅回环stub。无链接issue/PR，不发GitHub评论。
+round=7，超过max_rounds=3；owner仅授权续做本轮build，发现P1后留在review/等待owner决定，不自动追加修复。如需继续请追加说明并移至new/。本次仅review，未合并main、未发布、未改定时任务。
