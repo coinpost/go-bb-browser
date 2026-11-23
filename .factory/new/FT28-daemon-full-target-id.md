@@ -167,3 +167,9 @@ Codex 独立只读审查 origin/main@e63a15c...HEAD 全部 47 文件；未找到
 证据保留本机 review run evidence/FT28-a7bbb07/：reproduce.txt、review_*_test.go、probe-current/main.log、queue-current/main.log、retire-current/main.log、pool-current/main.log、cli.log、cli-main.log、p1-previous.log、p1-head-counts.log、full.log。诊断为工作树外导出副本测试，未提交为永久回归。
 无安装、清单或依赖变更。测试隔离 HOME/TMPDIR/缓存，复用已有模块，GOPROXY=off/GOSUMDB=off，无真实外网。未验 Go1.26、真实 Chrome、跨浏览器会话 ID 唯一性；未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
 第3/3轮发现P1，已达 max_rounds，留在 review/ 等 owner 决定；如需修复请添加说明并移至 new/。未改代码、未合并 main、未发布。
+
+## factory · 2026-11-23 12:47
+owner 本次明确要求：
+> FT28 移到 new 然后继续用 cc 去 build
+
+按 owner 授权从 review/ 移回 new/，继续原分支第 4 轮（超过 max_rounds 的本次人工授权，不修改配置）。使用 Claude Code 修复最新 review 两项 P1：迟到创建回包恢复已销毁身份、较旧枚举覆盖较新枚举确认的缺席；保留完整 ID 不复用及既定任务范围。P2/P3 notes 供检查关联风险，不自动扩为本轮任务；FT7 本次不启动，不合并或发布。
