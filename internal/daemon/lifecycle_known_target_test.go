@@ -414,6 +414,10 @@ func TestFailedCreateVerificationRechecksTheCommittedTab(t *testing.T) {
 			}
 			if closed {
 				causalRefusedCreate(t, r)
+				// A refusal is "unknown tab id" from an enumeration that
+				// succeeded; while the lookup itself fails nothing is said
+				// about the id (TestTabLookupFailureIsNotAnUnknownTabID).
+				c.setListErr(nil)
 				ovfClearsRefuse(t, s, string(ovfA))
 				if s.tabs.Known(ovfA) || idle || s.tabs.Selected() == ovfA {
 					t.Errorf("closed A kept: known=%v idle=%v selected=%v", s.tabs.Known(ovfA), idle, s.tabs.Selected() == ovfA)

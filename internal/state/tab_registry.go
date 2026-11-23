@@ -45,9 +45,18 @@ import (
 //     overlapped (listed), so the conflict is settled by the entry that learns
 //     the order later: gone when seen turns out to be older, verify otherwise.
 //
+// Evidence that a target existed is not lost because the target is not known
+// yet: a page event read about an unknown target is remembered with its read
+// instant (announced) until the target is registered, reported gone, or an
+// enumeration requested after that instant is applied. Such an enumeration
+// settles it either way — listing it registers it; not listing it proves it
+// gone exactly as for a known target, which is recorded in the windows in
+// flight so that a creation reply still on its way cannot register it.
+//
 // There is no history: the registry holds the known targets, the Windows of
-// the requests in flight and the destroyed notifications read but not yet
-// handled by the queue consumer, nothing else.
+// the requests in flight, the destroyed notifications read but not yet handled
+// by the queue consumer and the announcements no enumeration has answered yet,
+// nothing else.
 type TabRegistry struct {
 	mu sync.Mutex
 
@@ -76,6 +85,20 @@ type TabRegistry struct {
 	// advances, which outdates every event read so far: it is bounded by the
 	// destroyed notifications in the queue.
 	destroyedRead map[target.ID]uint64
+
+	// announced holds, per target that is NOT known, the earliest instant at
+	// which a page event (created, info changed) read from the connection
+	// proved it existed. The proof is kept while the event waits in the queue
+	// and also when the consumer could not register the target from it
+	// (RegisterEvent refused: the caller requests an enumeration), because
+	// what it must be compared with may be applied before the target is
+	// registered: an enumeration requested after that instant that does not
+	// list the target proves it gone (applyLocked). An entry is released when
+	// the target becomes known (its instant becomes seen), when the target is
+	// reported gone, and by the first applied enumeration that was requested
+	// after the instant. Every entry therefore belongs to an event still
+	// queued or to an enumeration that event made the daemon request.
+	announced map[target.ID]uint64
 }
 
 // knownTarget is a page target the browser reported and that has not been
@@ -139,6 +162,7 @@ func NewTabRegistry() *TabRegistry {
 		targets:       make(map[target.ID]*knownTarget),
 		windows:       make(map[*Window]struct{}),
 		destroyedRead: make(map[target.ID]uint64),
+		announced:     make(map[target.ID]uint64),
 	}
 }
 
@@ -202,6 +226,38 @@ func (r *TabRegistry) PendingDestroyed() int {
 	return len(r.destroyedRead)
 }
 
+// PendingAnnounced reports how many unknown targets the registry remembers a
+// page event about (see announced).
+func (r *TabRegistry) PendingAnnounced() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.announced)
+}
+
+// ReportedGone reports whether id was reported gone while w was open: by a
+// command reply, a destroyed notification, or an enumeration — the one w was
+// opened for included. w may have ended; what it recorded until then stays.
+func (r *TabRegistry) ReportedGone(w *Window, id target.ID) bool {
+	if w == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, gone := w.removed[id]
+	return gone
+}
+
+// provenLocked returns the earliest instant id is proven to have existed at,
+// given a proof at at, and releases the announcement about it: the caller
+// registers id with the result as seen (caller holds lock).
+func (r *TabRegistry) provenLocked(id target.ID, at uint64) uint64 {
+	if read, ok := r.announced[id]; ok {
+		delete(r.announced, id)
+		return min(read, at)
+	}
+	return at
+}
+
 // absenceLocked records that evidence which did not come through the
 // lifecycle queue was applied at now: every event read so far is older than
 // it and can no longer register an unknown target, so the per-target
@@ -258,6 +314,14 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 // A doomed target is removed whether listed or not: its destroyed notification
 // was read and this is the pending cleanup.
 //
+// A target that is not known but announced (a page event about it was read,
+// see announced) before w opened is judged the same way: not listed, it is
+// gone — nothing is registered, so nothing is reported in removed, but it is
+// recorded in the windows in flight, and a Target.createTarget reply that is
+// still on its way cannot register it; listed, it is registered below with the
+// announcement as seen. An announcement read after w opened cannot be ordered
+// against this reply and is kept for the enumeration its event requests.
+//
 // A listed target:
 //   - reported gone while w was open (close reply, destroyed notification, an
 //     enumeration that removed it): not registered, the reply predates that;
@@ -298,6 +362,9 @@ func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapsho
 	verify := false
 	if live {
 		now := r.tickLocked()
+		if w.removed == nil {
+			w.removed = make(map[target.ID]struct{})
+		}
 		gone := w.removed
 		for id, k := range r.targets {
 			_, listed := present[id]
@@ -305,9 +372,6 @@ func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapsho
 			case k.doomed, !listed && k.seen < w.opened:
 				removed = append(removed, RemovedTab{TargetID: id})
 				r.removeLocked(id)
-				if gone == nil {
-					gone = make(map[target.ID]struct{})
-				}
 				gone[id] = struct{}{}
 			case listed:
 			default:
@@ -320,6 +384,18 @@ func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapsho
 		}
 		slices.SortFunc(removed, func(a, b RemovedTab) int { return cmp.Compare(a.TargetID, b.TargetID) })
 
+		// Existence proofs about targets that are not known, read before this
+		// enumeration was requested: the snapshot is newer than each of them.
+		for id, read := range r.announced {
+			if read > w.opened {
+				continue
+			}
+			if _, listed := present[id]; !listed {
+				delete(r.announced, id)
+				r.noteRemovedLocked(id)
+			}
+		}
+
 		for id := range present {
 			if _, isGone := gone[id]; isGone {
 				continue
@@ -328,7 +404,7 @@ func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapsho
 			k := r.targets[id]
 			switch {
 			case k == nil:
-				r.targets[id] = &knownTarget{seen: now, suspended: contradicted}
+				r.targets[id] = &knownTarget{seen: r.provenLocked(id, now), suspended: contradicted}
 				verify = verify || contradicted
 			case k.suspended && contradicted:
 				verify = true
@@ -430,7 +506,8 @@ func (r *TabRegistry) remove(id target.ID, outOfQueue bool, destroyedStamp uint6
 //     Neither is a doomed one.
 //   - A known target keeps its seen, so an enumeration requested after that
 //     still removes it when it does not list it; an unknown one is registered
-//     with seen = now. Either way it is first-hand from here on — the daemon
+//     with seen = now, or with the instant its creation event was read when
+//     that is still remembered (announced). Either way it is first-hand from here on — the daemon
 //     knows it was created while w was open — and resolves.
 //   - verify asks for a fresh enumeration when absence evidence exists that
 //     cannot be ordered against the creation: the target was suspended, or an
@@ -458,7 +535,7 @@ func (r *TabRegistry) CommitCreated(w *Window, id target.ID) (ok, verify bool) {
 	case k == nil && w != nil && !live:
 		return false, false
 	case k == nil:
-		k = &knownTarget{seen: r.tickLocked()}
+		k = &knownTarget{seen: r.provenLocked(id, r.tickLocked())}
 		r.targets[id] = k
 	case k.doomed:
 		return false, false
@@ -473,6 +550,14 @@ func (r *TabRegistry) CommitCreated(w *Window, id target.ID) (ok, verify bool) {
 // from the browser connection, in connection order and before the event is
 // queued. It returns the event's stamp: its instant on the registry clock.
 //
+// page is the target a created / info changed event reports as a page (empty
+// for other events). When that target is not known, the read is remembered
+// (announced, earliest read wins) until the target is registered, reported
+// gone, or answered by an enumeration requested after this instant: the proof
+// that it existed at this instant must not depend on how soon the queue
+// consumer gets to the event, because an enumeration requested later that
+// does not list the target may be applied first.
+//
 // destroyed is the target a Target.targetDestroyed notification names (empty
 // for other events). The report takes effect here, not when the queue gets to
 // it: a known target is doomed — it stops resolving at once — and the id is
@@ -483,13 +568,18 @@ func (r *TabRegistry) CommitCreated(w *Window, id target.ID) (ok, verify bool) {
 // and is still queued registers nothing either. Unregistering is left to the
 // consumer because it also clears daemon state under the lifecycle mutex,
 // which the connection reader must not take.
-func (r *TabRegistry) NoteEventRead(destroyed target.ID) uint64 {
+func (r *TabRegistry) NoteEventRead(page, destroyed target.ID) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	stamp := r.tickLocked()
 	if destroyed != "" {
 		r.doomLocked(destroyed)
 		r.destroyedRead[destroyed] = stamp
+	}
+	if page != "" && r.targets[page] == nil {
+		if _, ok := r.announced[page]; !ok {
+			r.announced[page] = stamp
+		}
 	}
 	return stamp
 }
@@ -502,6 +592,7 @@ func (r *TabRegistry) doomLocked(id target.ID) {
 	if k := r.targets[id]; k != nil {
 		k.doomed = true
 	}
+	delete(r.announced, id)
 	r.noteRemovedLocked(id)
 }
 
@@ -533,10 +624,15 @@ func (r *TabRegistry) EventDropped() {
 //     that does not list the target proves it gone. If such an enumeration was
 //     applied already (unlisted > stamp), the target is gone now: it is doomed
 //     and false is returned so the cleanup enumeration is requested;
-//   - the target is unknown: it is registered first-hand with seen = stamp,
-//     unless an enumeration, a removal learned from a command reply or a queue
-//     overflow was applied after stamp: the event is older than that evidence
-//     and cannot bring an id back (INV-6).
+//   - the target is unknown: it is registered first-hand with seen = stamp
+//     (or an earlier read still remembered about it), unless an enumeration,
+//     a removal learned from a command reply or a queue overflow was applied
+//     after stamp: the event is older than that evidence and cannot bring an
+//     id back (INV-6). The proof itself is not discarded with the refusal: an
+//     enumeration requested after stamp that did not list the target has
+//     already recorded it as gone (applyLocked), and one that could not be
+//     ordered leaves the announcement in place for the enumeration the caller
+//     requests now.
 func (r *TabRegistry) RegisterEvent(stamp uint64, id target.ID) (settled bool) {
 	if id == "" {
 		return false
@@ -552,7 +648,7 @@ func (r *TabRegistry) RegisterEvent(stamp uint64, id target.ID) (settled bool) {
 		if r.lastAbsence > stamp {
 			return false
 		}
-		r.targets[id] = &knownTarget{seen: stamp, firstHand: true}
+		r.targets[id] = &knownTarget{seen: r.provenLocked(id, stamp), firstHand: true}
 	case k.doomed:
 	case stamp < k.seen:
 		k.seen = stamp
@@ -575,7 +671,7 @@ func (r *TabRegistry) RegisterPageTarget(id target.ID) {
 	if _, ok := r.targets[id]; ok {
 		return
 	}
-	r.targets[id] = &knownTarget{seen: r.tickLocked(), firstHand: true}
+	r.targets[id] = &knownTarget{seen: r.provenLocked(id, r.tickLocked()), firstHand: true}
 }
 
 // isPageTarget matches top-level browsing targets we expose as tabs.
@@ -602,6 +698,7 @@ type TabSnapshot struct {
 // window in flight (caller holds lock).
 func (r *TabRegistry) removeLocked(id target.ID) {
 	delete(r.targets, id)
+	delete(r.announced, id)
 	if r.selected == id {
 		r.selected = ""
 	}

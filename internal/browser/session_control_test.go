@@ -100,7 +100,7 @@ type recordingObserver struct {
 	queuedAtRead []int
 }
 
-func (o *recordingObserver) NoteEventRead(destroyed target.ID) uint64 {
+func (o *recordingObserver) NoteEventRead(page, destroyed target.ID) uint64 {
 	o.clock++
 	o.calls = append(o.calls, "read:"+string(destroyed))
 	o.queuedAtRead = append(o.queuedAtRead, len(o.s.targetEvents))

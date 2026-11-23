@@ -21,7 +21,7 @@ func TestCommitCreatedChecksWindowAbsenceForKnownTarget(t *testing.T) {
 			old := r.OpenWindow()    // B-only list, in flight
 			create := r.OpenWindow() // tab_new
 			if known {
-				if !r.RegisterEvent(r.NoteEventRead(""), regIDA) {
+				if !r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA) {
 					t.Fatal("creation event refused")
 				}
 			}
@@ -43,7 +43,7 @@ func TestCommitCreatedChecksWindowAbsenceForKnownTarget(t *testing.T) {
 	t.Run("no enumeration applied meanwhile", func(t *testing.T) {
 		r := NewTabRegistry()
 		create := r.OpenWindow()
-		r.RegisterEvent(r.NoteEventRead(""), regIDA)
+		r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA)
 		if ok, verify := r.CommitCreated(create, regIDA); !ok || verify {
 			t.Fatalf("CommitCreated = %v, verify = %v, want a plain commit", ok, verify)
 		}
@@ -51,7 +51,7 @@ func TestCommitCreatedChecksWindowAbsenceForKnownTarget(t *testing.T) {
 	t.Run("an enumeration applied meanwhile listed it", func(t *testing.T) {
 		r := NewTabRegistry()
 		create := r.OpenWindow()
-		r.RegisterEvent(r.NoteEventRead(""), regIDA)
+		r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA)
 		r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA))
 		if ok, verify := r.CommitCreated(create, regIDA); !ok || verify {
 			t.Fatalf("CommitCreated = %v, verify = %v, want a plain commit", ok, verify)
@@ -60,7 +60,7 @@ func TestCommitCreatedChecksWindowAbsenceForKnownTarget(t *testing.T) {
 	t.Run("known again after it was reported gone", func(t *testing.T) {
 		r := NewTabRegistry()
 		create := r.OpenWindow()
-		r.RegisterEvent(r.NoteEventRead(""), regIDA)
+		r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA)
 		r.RemoveTarget(regIDA)
 		r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA)) // Chrome still lists it
 		if ok, _ := r.CommitCreated(create, regIDA); ok {
@@ -69,8 +69,8 @@ func TestCommitCreatedChecksWindowAbsenceForKnownTarget(t *testing.T) {
 	})
 	t.Run("doomed", func(t *testing.T) {
 		r := NewTabRegistry()
-		r.RegisterEvent(r.NoteEventRead(""), regIDA)
-		r.NoteEventRead(regIDA)
+		r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA)
+		r.NoteEventRead("", regIDA)
 		if ok, _ := r.CommitCreated(nil, regIDA); ok || r.Has(regIDA) {
 			t.Fatal("a doomed target was committed")
 		}
@@ -87,7 +87,7 @@ func TestRegisterEventKeepsEarliestProofOfKnownTarget(t *testing.T) {
 		r = NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDB))
 		create := r.OpenWindow()
-		stamp = r.NoteEventRead("")
+		stamp = r.NoteEventRead(regIDA, "")
 		absent = r.OpenWindow()
 		if ok, verify := r.CommitCreated(create, regIDA); !ok || verify {
 			t.Fatalf("CommitCreated = %v, %v", ok, verify)
@@ -109,9 +109,41 @@ func TestRegisterEventKeepsEarliestProofOfKnownTarget(t *testing.T) {
 	t.Run("event handled after the list is applied", func(t *testing.T) {
 		r, stamp, absent := setup(t)
 		late := r.OpenWindow() // a request in flight: must learn that A is gone
+		// The commit took the read of the creation event as the proof that A
+		// existed, so the list is ordered against it without waiting for the
+		// queue consumer.
 		_, removed, verify := r.ApplyEnumeration(absent, pageInfos(regIDB))
-		if len(removed) != 0 || !verify || !r.Has(regIDA) {
-			t.Fatalf("removed = %#v verify = %v: nothing orders the list against the commit yet", removed, verify)
+		if len(removed) != 1 || removed[0].TargetID != regIDA || verify || r.Known(regIDA) {
+			t.Fatalf("removed = %#v verify = %v known = %v: the list requested after the event was read proves A gone", removed, verify, r.Known(regIDA))
+		}
+		if r.RegisterEvent(stamp, regIDA) || r.Known(regIDA) {
+			t.Fatal("the queued event registered a target the list proved gone")
+		}
+		if _, _, _ = r.ApplyEnumeration(late, pageInfos(regIDA, regIDB)); r.Known(regIDA) {
+			t.Fatal("a reply requested before the target was proven gone registered it again")
+		}
+		if r.PendingAnnounced() != 0 {
+			t.Fatalf("announcements left: %d", r.PendingAnnounced())
+		}
+	})
+
+	// The proof a queued event carries can still be older than seen: a report
+	// that the target is gone released its announcement, and something newer
+	// than that report registered it again (Chrome lists a closing target for
+	// a while). The event then lowers seen when it is handled, and a list that
+	// could not be ordered before turns out to be newer than the target.
+	t.Run("event older than a re-registration dooms a target an unordered list did not show", func(t *testing.T) {
+		r := NewTabRegistry()
+		r.SyncPageTargets(pageInfos(regIDB))
+		stamp := r.NoteEventRead(regIDA, "") // created(A) read, queued
+		r.RemoveTarget(regIDA)               // close confirmed before the daemon knew A
+		relisted := r.OpenWindow()
+		absent := r.OpenWindow()
+		late := r.OpenWindow()
+		r.ApplyEnumeration(relisted, pageInfos(regIDA, regIDB)) // still listed: registered
+		_, removed, verify := r.ApplyEnumeration(absent, pageInfos(regIDB))
+		if len(removed) != 0 || !verify || !r.Known(regIDA) {
+			t.Fatalf("removed = %#v verify = %v: nothing orders the two lists yet", removed, verify)
 		}
 		if r.RegisterEvent(stamp, regIDA) {
 			t.Fatal("RegisterEvent must ask for an enumeration: the event proves the applied list newer than the tab")
@@ -138,7 +170,7 @@ func TestRegisterEventKeepsEarliestProofOfKnownTarget(t *testing.T) {
 		r.SyncPageTargets(pageInfos(regIDB))
 		create := r.OpenWindow()
 		stale := r.OpenWindow()
-		stamp := r.NoteEventRead("")
+		stamp := r.NoteEventRead(regIDA, "")
 		if ok, verify := r.CommitCreated(create, regIDA); !ok || verify {
 			t.Fatalf("CommitCreated = %v, %v", ok, verify)
 		}
@@ -152,7 +184,7 @@ func TestRegisterEventKeepsEarliestProofOfKnownTarget(t *testing.T) {
 		// Same in the other handling order.
 		q := NewTabRegistry()
 		create, stale = q.OpenWindow(), q.OpenWindow()
-		stamp = q.NoteEventRead("")
+		stamp = q.NoteEventRead(regIDA, "")
 		q.CommitCreated(create, regIDA)
 		q.ApplyEnumeration(stale, nil)
 		if !q.RegisterEvent(stamp, regIDA) || !q.Has(regIDA) {
@@ -162,9 +194,9 @@ func TestRegisterEventKeepsEarliestProofOfKnownTarget(t *testing.T) {
 
 	t.Run("a later event renews nothing", func(t *testing.T) {
 		r := NewTabRegistry()
-		r.RegisterEvent(r.NoteEventRead(""), regIDA)
+		r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA)
 		absent := r.OpenWindow()
-		if !r.RegisterEvent(r.NoteEventRead(""), regIDA) { // info changed, read later
+		if !r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA) { // info changed, read later
 			t.Fatal("event refused")
 		}
 		if _, removed, _ := r.ApplyEnumeration(absent, nil); len(removed) != 1 {
@@ -175,7 +207,7 @@ func TestRegisterEventKeepsEarliestProofOfKnownTarget(t *testing.T) {
 	t.Run("an earlier event does not resume a suspended discovery", func(t *testing.T) {
 		r := NewTabRegistry()
 		w1 := r.OpenWindow()
-		stamp := r.NoteEventRead("") // read after both requests below could have been sent
+		stamp := r.NoteEventRead(regIDA, "") // read after both requests below could have been sent
 		w2 := r.OpenWindow()
 		r.ApplyEnumeration(w2, pageInfos(regIDA))
 		r.ApplyEnumeration(w1, nil) // cannot be ordered: suspended
@@ -215,7 +247,7 @@ func TestDestroyedReadIsRememberedOnlyWhileQueued(t *testing.T) {
 	} {
 		t.Run("released by newer absence: "+name, func(t *testing.T) {
 			r := NewTabRegistry()
-			old := r.NoteEventRead("") // created(A)
+			old := r.NoteEventRead(regIDA, "") // created(A)
 			readDestroyed(r, regIDA, true)
 			newer(r)
 			if got := r.PendingDestroyed(); got != 0 {
@@ -231,8 +263,8 @@ func TestDestroyedReadIsRememberedOnlyWhileQueued(t *testing.T) {
 
 	t.Run("kept across an earlier event about the same target", func(t *testing.T) {
 		r := NewTabRegistry()
-		created := r.NoteEventRead("") // created(A)
-		r.NoteEventRead("")            // info changed(A): not a page any more
+		created := r.NoteEventRead(regIDA, "") // created(A)
+		r.NoteEventRead("", "")                // info changed(A): not a page any more
 		destroyed := readDestroyed(r, regIDA, true)
 		if r.RegisterEvent(created, regIDA); r.Known(regIDA) {
 			t.Fatal("created registered a destroyed target")
@@ -256,7 +288,7 @@ func TestDestroyedReadIsRememberedOnlyWhileQueued(t *testing.T) {
 	t.Run("a doomed target needs no enumeration for its older events", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDA))
-		info := r.NoteEventRead("") // info changed(A), queued
+		info := r.NoteEventRead(regIDA, "") // info changed(A), queued
 		readDestroyed(r, regIDA, true)
 		if !r.RegisterEvent(info, regIDA) || r.Has(regIDA) {
 			t.Fatal("the older event of a doomed target must be a no-op")
@@ -265,12 +297,12 @@ func TestDestroyedReadIsRememberedOnlyWhileQueued(t *testing.T) {
 
 	t.Run("not held against events read afterwards or other targets", func(t *testing.T) {
 		r := NewTabRegistry()
-		before := r.NoteEventRead("")
+		before := r.NoteEventRead(regIDB, "")
 		readDestroyed(r, regIDA, true)
 		if !r.RegisterEvent(before, regIDB) || !r.Has(regIDB) {
 			t.Fatal("the destroyed read of A refused an event about B")
 		}
-		if !r.RegisterEvent(r.NoteEventRead(""), regIDX) || !r.Has(regIDX) {
+		if !r.RegisterEvent(r.NoteEventRead(regIDX, ""), regIDX) || !r.Has(regIDX) {
 			t.Fatal("an event read after the destroyed notification was refused")
 		}
 	})

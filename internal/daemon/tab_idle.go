@@ -15,7 +15,11 @@ import (
 var (
 	errTabCloseNoConn    = errors.New("browser session not ready")
 	errTabCloseUnknownID = errors.New("unknown tab id")
-	errTabLockTimeout    = fmt.Errorf("tab lock timeout: %w", context.DeadlineExceeded)
+	// errTabLookup wraps the failure of the enumeration a request needed to
+	// resolve its tab id: nothing is known about the id, in particular not
+	// that it is invalid.
+	errTabLookup      = errors.New("list targets to resolve tab")
+	errTabLockTimeout = fmt.Errorf("tab lock timeout: %w", context.DeadlineExceeded)
 )
 
 // Lifecycle evidence — replies to Target.getTargets / Target.createTarget /
@@ -79,25 +83,38 @@ func (s *Server) markTabManagedLocked(tid target.ID) {
 // once more before tab_new answers: that enumeration is requested after the
 // commit, so a tab it does not list is gone, and it removes the tab together
 // with its managed record. If the question cannot be asked, the answer is left
-// to the sync loop of conn and the commit stands — unless the tab stopped
-// resolving meanwhile for a reason of its own (another caller closed it, its
-// destroyed notification was read): whatever the verification would have
-// said, it is not a created tab any more. The registry is asked after the
-// round trip on both paths; nothing is concluded from the failed enumeration.
+// to the sync loop of conn and the commit stands.
+//
+// The creation is reported as a success only if nothing reported the tab gone
+// between the commit and the end of that round trip, whether it succeeded or
+// failed: the window of the verification is opened in the critical section of
+// the commit and records every such report (another caller's tab_close, a
+// destroyed notification, an enumeration). That the id resolves afterwards is
+// not enough — an enumeration requested after a confirmed close registers a
+// target Chrome still lists as a discovery, which is not the managed tab this
+// call created: its managed lifecycle ended with the close. Nothing is
+// concluded from the failed enumeration itself.
 func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Window, tid target.ID) bool {
 	s.lifeMu.Lock()
 	ok, verify := s.tabs.CommitCreated(w, tid)
+	var check *state.Window
 	if ok {
 		s.markTabManagedLocked(tid)
+		if verify {
+			check = s.tabs.OpenWindow()
+		}
 	}
 	s.lifeMu.Unlock()
-	if !ok || !verify {
+	if check == nil {
 		return ok
 	}
-	if _, err := s.enumerateTabs(ctx, conn); err != nil {
+	if infos, err := pageTargets(ctx, conn); err != nil {
+		s.tabs.Abandon(check)
 		requestEnumeration(conn)
+	} else {
+		s.applyEnumeration(conn, check, infos)
 	}
-	return s.tabs.Has(tid)
+	return !s.tabs.ReportedGone(check, tid) && s.tabs.Has(tid)
 }
 
 // rollbackCreatedTab closes a tab this daemon just created but could not
@@ -348,13 +365,14 @@ func (s *Server) closeTab(ctx context.Context, tab string) error {
 // The browser's answer is applied either way it says the target is gone:
 // Target.closeTarget succeeded, or it replied that there is no such target.
 // The error is returned unchanged in the second case; any other failure leaves
-// all state alone.
+// all state alone. errTabCloseUnknownID is returned only when the browser was
+// asked and does not have the tab; a failed lookup returns errTabLookup.
 func (s *Server) closeTabLocked(ctx context.Context, conn tabConn, tab string) error {
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		return errTabCloseUnknownID
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		return err
 	}
-	err := closeTarget(ctx, conn, tid)
+	err = closeTarget(ctx, conn, tid)
 	if err == nil || browser.ErrorKindOf(err) == browser.ErrorTargetGone {
 		// Clear every target-scoped resource even if no later lifecycle event
 		// is delivered.

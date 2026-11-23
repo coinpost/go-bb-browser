@@ -41,6 +41,8 @@ type idConn struct {
 	inFlight    map[target.ID]int
 	maxInFlight map[target.ID]int
 
+	listErr error // PageTargets fails with it when set
+
 	evalDelay   time.Duration
 	evalEntered chan struct{} // receives once per Eval when non-nil
 	evalGate    chan struct{} // Eval blocks until closed when non-nil
@@ -126,9 +128,18 @@ func (c *idConn) op(name string, id target.ID) error {
 	return nil
 }
 
+func (c *idConn) setListErr(err error) {
+	c.mu.Lock()
+	c.listErr = err
+	c.mu.Unlock()
+}
+
 func (c *idConn) PageTargets() ([]*target.Info, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
 	out := make([]*target.Info, 0, len(c.pages))
 	for _, id := range c.pages {
 		out = append(out, &target.Info{TargetID: id, Type: "page", Title: "title-" + string(id), URL: "https://example.test/" + string(id)})

@@ -156,9 +156,11 @@ type TargetEvent struct {
 // methods run on the reader and must not block.
 type TargetObserver interface {
 	// NoteEventRead is called for every lifecycle event as it is read, before
-	// it is queued. destroyed is the target of a Target.targetDestroyed
-	// notification, empty for other events. The result becomes the Stamp.
-	NoteEventRead(destroyed target.ID) uint64
+	// it is queued. page is the target a created / info changed event reports
+	// as a page, destroyed the target of a Target.targetDestroyed
+	// notification; each is empty for other events. The result becomes the
+	// Stamp.
+	NoteEventRead(page, destroyed target.ID) uint64
 	// EventDropped is called when the queue was full and the event was not
 	// queued, before the overflow becomes visible through ConsumeTargetDirty.
 	EventDropped()
@@ -424,7 +426,11 @@ func (s *Session) SetTargetObserver(o TargetObserver) {
 func (s *Session) enqueueTargetEvent(event TargetEvent) {
 	obs := s.targetObserver.Load()
 	if obs != nil {
-		event.Stamp = (*obs).NoteEventRead(event.Destroyed)
+		var page target.ID
+		if info := event.Info; info != nil && (info.Type == "page" || info.Type == "tab") {
+			page = info.TargetID
+		}
+		event.Stamp = (*obs).NoteEventRead(page, event.Destroyed)
 	}
 	select {
 	case s.targetEvents <- event:

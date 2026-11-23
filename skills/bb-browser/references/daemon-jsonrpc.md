@@ -35,7 +35,7 @@ CLI `--api-token` / `BB_BROWSER_API_TOKEN` 发送单个 `Authorization: Bearer <
 | `errors` | `tab`, `since?` | 同观测结构 |
 | `errors_clear` | `tab` | `seq` |
 
-**`tab`**（参数与结果，含 `focus`、`tabs[].tab`）是**完整 CDP target id**：原样回传 `tab_new` / `tab_list` 返回的值；daemon 逐字节精确匹配，短 id、截断、大小写或空白变体以及已关闭 tab 的 id 都返回 `unknown tab id`（`-32602`），不会回退到焦点或其他 tab。
+**`tab`**（参数与结果，含 `focus`、`tabs[].tab`）是**完整 CDP target id**：原样回传 `tab_new` / `tab_list` 返回的值；daemon 逐字节精确匹配，短 id、截断、大小写或空白变体以及已关闭 tab 的 id 都返回 `unknown tab id`（`-32602`），不会回退到焦点或其他 tab。解析 id 所需的 target 枚举自身失败/超时时返回的是 `failed to list targets`（`-32000`，`data.hint` 带原因），不代表该 id 无效，可稍后原样重试。
 
 字段名以 **`pkg/protocol`** 为准；扩展新方法时同步更新本文件与 **SKILL.md**。
 

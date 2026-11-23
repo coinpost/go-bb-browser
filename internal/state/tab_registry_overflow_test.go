@@ -118,19 +118,19 @@ func TestDestroyedReadStopsResolvingAndLeavesCleanupToTheConsumer(t *testing.T) 
 // not got to it, or is waiting to apply it).
 func TestDestroyedReadOutdatesQueuedExistenceEvents(t *testing.T) {
 	r := NewTabRegistry()
-	stamp := r.NoteEventRead("") // targetInfoChanged(A) read here
+	stamp := r.NoteEventRead(regIDA, "") // targetInfoChanged(A) read here
 	readDestroyed(r, regIDA, false)
 	if r.RegisterEvent(stamp, regIDA) || r.Has(regIDA) {
 		t.Fatal("an event read before a dropped destroyed notification registered the target")
 	}
 	// An event read afterwards is newer evidence.
-	if !r.RegisterEvent(r.NoteEventRead(""), regIDB) {
+	if !r.RegisterEvent(r.NoteEventRead(regIDB, ""), regIDB) {
 		t.Fatal("an event read after the drop was refused")
 	}
 
 	q := NewTabRegistry()
-	stamp = q.NoteEventRead("")
-	other := q.NoteEventRead("")
+	stamp = q.NoteEventRead(regIDA, "")
+	other := q.NoteEventRead(regIDB, "")
 	destroyed := readDestroyed(q, regIDA, true)
 	// Nothing is registered and nothing is left to ask the browser: the
 	// queued notification settles it.
@@ -250,7 +250,7 @@ func TestContestedDiscoveryIsNotHeldAgainstCreation(t *testing.T) {
 func TestEventRegisteredTargetKeepsProtection(t *testing.T) {
 	r := NewTabRegistry()
 	stale := r.OpenWindow()
-	if !r.RegisterEvent(r.NoteEventRead(""), regIDA) {
+	if !r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA) {
 		t.Fatal("event refused")
 	}
 	r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA)) // listed too: still not a mere discovery
@@ -295,8 +295,8 @@ func TestEventSeenIsItsReadInstantNotItsHandlingInstant(t *testing.T) {
 	t.Run("read before the request", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDB))
-		stamp := r.NoteEventRead("") // targetCreated(A) read, queued
-		absent := r.OpenWindow()     // a list requested afterwards; A is gone by then
+		stamp := r.NoteEventRead(regIDA, "") // targetCreated(A) read, queued
+		absent := r.OpenWindow()             // a list requested afterwards; A is gone by then
 		if !r.RegisterEvent(stamp, regIDA) || !r.Has(regIDA) {
 			t.Fatal("precondition: the event, handled while the list is in flight, registers A")
 		}
@@ -309,7 +309,7 @@ func TestEventSeenIsItsReadInstantNotItsHandlingInstant(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDB))
 		stale := r.OpenWindow()
-		stamp := r.NoteEventRead("")
+		stamp := r.NoteEventRead(regIDA, "")
 		if !r.RegisterEvent(stamp, regIDA) {
 			t.Fatal("event refused")
 		}
@@ -329,9 +329,9 @@ func TestEventSeenIsItsReadInstantNotItsHandlingInstant(t *testing.T) {
 func TestWindowOpeningsAndEventReadsAreDistinctInstants(t *testing.T) {
 	r := NewTabRegistry()
 	w1 := r.OpenWindow()
-	s1 := r.NoteEventRead("")
+	s1 := r.NoteEventRead(regIDA, "")
 	w2 := r.OpenWindow()
-	s2 := r.NoteEventRead(regIDX)
+	s2 := r.NoteEventRead("", regIDX)
 	w3 := r.OpenWindow()
 	if !(w1.opened < s1 && s1 < w2.opened && w2.opened < s2 && s2 < w3.opened) {
 		t.Fatalf("instants not strictly ordered: %d %d %d %d %d", w1.opened, s1, w2.opened, s2, w3.opened)
@@ -345,13 +345,13 @@ func TestWindowOpeningsAndEventReadsAreDistinctInstants(t *testing.T) {
 // events still queued: what was lost is unknown to the queue.
 func TestAnyDroppedEventOutdatesQueuedExistenceEvents(t *testing.T) {
 	r := NewTabRegistry()
-	stamp := r.NoteEventRead("") // targetInfoChanged(A), queued
-	r.NoteEventRead("")          // some other event ...
-	r.EventDropped()             // ... that found the queue full
+	stamp := r.NoteEventRead(regIDA, "") // targetInfoChanged(A), queued
+	r.NoteEventRead("", "")              // some other event ...
+	r.EventDropped()                     // ... that found the queue full
 	if r.RegisterEvent(stamp, regIDA) || r.Known(regIDA) {
 		t.Fatal("an event read before an overflow registered an unknown target")
 	}
-	if !r.RegisterEvent(r.NoteEventRead(""), regIDA) {
+	if !r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA) {
 		t.Fatal("an event read after the overflow was refused")
 	}
 }

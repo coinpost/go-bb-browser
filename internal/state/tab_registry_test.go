@@ -133,7 +133,7 @@ func commitOK(r *TabRegistry, w *Window, id target.ID) bool {
 // queue (EventDropped), in the order Session.enqueueTargetEvent uses.
 // It returns the stamp of the notification.
 func readDestroyed(r *TabRegistry, id target.ID, queued bool) uint64 {
-	stamp := r.NoteEventRead(id)
+	stamp := r.NoteEventRead("", id)
 	if !queued {
 		r.EventDropped()
 	}

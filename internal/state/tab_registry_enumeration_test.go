@@ -66,7 +66,7 @@ func TestExistenceEvidenceDoesNotRenewRegisteredTarget(t *testing.T) {
 
 	w := r.OpenWindow()
 	r.RegisterPageTarget("AAAA0001")
-	if !r.RegisterEvent(r.NoteEventRead(""), "AAAA0001") {
+	if !r.RegisterEvent(r.NoteEventRead("AAAA0001", ""), "AAAA0001") {
 		t.Fatal("event for a known target must report it known")
 	}
 	r.ApplyEnumeration(r.OpenWindow(), pageInfos("AAAA0001")) // listed again meanwhile
@@ -578,18 +578,18 @@ func TestRegisterEventOrdersQueuedEventAgainstNewerEvidence(t *testing.T) {
 	t.Run("fresh event registers", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDB))
-		if !r.RegisterEvent(r.NoteEventRead(""), regIDA) || !r.Has(regIDA) {
+		if !r.RegisterEvent(r.NoteEventRead(regIDA, ""), regIDA) || !r.Has(regIDA) {
 			t.Fatal("current event did not register its target")
 		}
-		if r.RegisterEvent(r.NoteEventRead(""), "") || r.Has("") {
+		if r.RegisterEvent(r.NoteEventRead("", ""), "") || r.Has("") {
 			t.Fatal("empty id registered")
 		}
 	})
 	t.Run("queued across tab_close", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDA, regIDB))
-		stamp := r.NoteEventRead("") // targetInfoChanged(A) read, then queued
-		r.RemoveTarget(regIDA)       // Target.closeTarget(A) confirmed
+		stamp := r.NoteEventRead(regIDA, "") // targetInfoChanged(A) read, then queued
+		r.RemoveTarget(regIDA)               // Target.closeTarget(A) confirmed
 		if r.RegisterEvent(stamp, regIDA) || r.Has(regIDA) {
 			t.Fatal("queued event revived a closed tab")
 		}
@@ -600,7 +600,7 @@ func TestRegisterEventOrdersQueuedEventAgainstNewerEvidence(t *testing.T) {
 	t.Run("queued across a resync", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDA, regIDB))
-		stamp := r.NoteEventRead("")
+		stamp := r.NoteEventRead(regIDA, "")
 		w := r.OpenWindow() // requested after the event was read
 		if _, removed, _ := r.ApplyEnumeration(w, pageInfos(regIDB)); len(removed) != 1 {
 			t.Fatalf("removed = %v", removed)
@@ -609,7 +609,7 @@ func TestRegisterEventOrdersQueuedEventAgainstNewerEvidence(t *testing.T) {
 			t.Fatal("queued event revived a target the resync found gone")
 		}
 		// An event read after the resync is newer than it.
-		if !r.RegisterEvent(r.NoteEventRead(""), regIDX) {
+		if !r.RegisterEvent(r.NoteEventRead(regIDX, ""), regIDX) {
 			t.Fatal("event newer than the resync refused")
 		}
 	})
@@ -626,7 +626,7 @@ func TestRegisterEventOrdersQueuedEventAgainstNewerEvidence(t *testing.T) {
 	t.Run("removals reported by events are ordered by the queue", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDB))
-		stamp := r.NoteEventRead("") // targetCreated(A) queued behind unrelated events
+		stamp := r.NoteEventRead(regIDA, "") // targetCreated(A) queued behind unrelated events
 		r.RemoveEventTarget("WORKER-1")
 		r.RemoveEventTarget(regIDX)
 		if !r.RegisterEvent(stamp, regIDA) {

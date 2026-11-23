@@ -38,9 +38,9 @@ type causalDropWatch struct {
 	resume chan struct{}
 }
 
-func (w *causalDropWatch) NoteEventRead(destroyed target.ID) uint64 {
+func (w *causalDropWatch) NoteEventRead(page, destroyed target.ID) uint64 {
 	w.last = destroyed
-	return w.reg.NoteEventRead(destroyed)
+	return w.reg.NoteEventRead(page, destroyed)
 }
 
 func (w *causalDropWatch) EventDropped() {
