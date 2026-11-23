@@ -232,3 +232,16 @@ Codex 独立只读审查 origin/main@2be49f8...HEAD 全52文件，含 main 合�
 证据保留本机 review/evidence/FT28-f1bd045/：REVIEW.md、reproduce.md、probes/、configured.log、original-head-20.log、round4-count20.log、refresh-head/pre/main.log、linger-head/pre/main.log、r4-head/pre.log、pool-premerge.log、manager-diagnostics.log。临时诊断尚非永久回归；工作树干净，无代码变更、提交或安装，go.mod/go.sum及保护路径未变。HOME/TMPDIR/缓存隔离，复用固定模块，GOPROXY=off/GOSUMDB=off，仅fake CDP/本地回环stub。
 未验真实非headless Chrome、Go1.26、部署或跨浏览器重启；未启动浏览器或操作用户窗口。无链接issue/PR，不发GitHub评论。
 round=4，已超过max_rounds=3；owner只授权该轮build，不自动追加修复。发现P1，留在review/等owner决定；需继续请添加说明并移至new/。本次仅review，未改代码、未合并main、未发布。
+
+
+## factory · 2026-11-23 13:30
+owner 最新明确要求：
+> 把 ft28 rebase 一下 main 然后推倒从头开始，不需要兼容短 id
+
+本次授权：review/ → new/，继续使用 Claude Code，按重做而非第5轮局部补丁执行。保留历史审查与有效回归，不重置 round，不改 max_rounds。按工厂禁止已发布历史重写的约束，以合并最新 origin/main 同步基线，不执行 rebase/force-push；代码设计以当前 main 为起点重新审视，不能沿用叠加补丁作为默认方案。FT7 不动，不合并 main、不发布、不修改定时任务。
+
+## factory · plan · 2026-11-23 13:30
+Behaviour：所有层仅接收/输出完整 CDP target ID，原样精确匹配；旧短 ID、截断、大小写/空白变体无匹配就报错，不 fallback。创建、枚举、生命周期事件、关闭和受管持久化采用清楚一致的先后关系，迟到回复/事件不能复活确认失效身份；并发新建不得被旧枚举误删。创建未能提交时明确错误并尽可能有界回滚，不留无声受管/idle 分裂。
+Scope：从 main 重新审视 registry 与 daemon 身份生命周期实现及 protocol/Client/Pool/CLI/持久化调用链。删除短 ID 兼容路径与无必要的历史补丁结构；保留 main 已合并功能和有效回归，相关生命周期 P2 与文档残留本次纳入整体重做，不再只修最新 P1。不要合并 FT7/FT21 或其他 factory 分支，不开展 writer 退役重设计。
+Decisions：先书面明确系统边界、登记/失效权威、异步结果顺序和有界内存回收规则，再实施简单直接的模型。不要用任意大小历史环与多层 fallback 叠加掩盖时序；若需限制/重试，说明可证明的不变量、失败与回收路径。完整 ID 不承诺跨浏览器会话唯一，不新增所有权/租约协议。保留 tab/--tab 承载完整 ID，避免平行 API。
+Checking：将第4轮审查两种迟到创建调度纳入永久屏障回归，并保留历轮有效语义（测试可随内部模型重写，不得仅删断言）。覆盖乱序枚举、排队旧事件、关闭/销毁、明确 target-gone、同目标 select/idle 互斥、创建失败回滚、持久化/idle 一致、内存有界、多后端错误与原样身份。同步 README/AGENTS/Client/skills 文档清除短 ID 示例。隔离 HOME/TMPDIR/缓存，GOPROXY=off/GOSUMDB=off，不访问真实外网；全量 gofmt/vet/race 及关键调度 race 重复20次，保留红绿证据；未测真实 Chrome 如实记录。
