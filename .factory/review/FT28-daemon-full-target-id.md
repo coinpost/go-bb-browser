@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 6
+round: 7
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -341,3 +341,18 @@ Checking：最新五项原诊断提升永久回归；保留历轮有效测试。
 
 ## factory · 2026-11-23 17:51
 第7轮已启动但因Claude服务端连续529 Overloaded、重试500 Internal server error中断。CC已写设计并修改5个生产文件，尚未提交；未完成永久回归、红绿、全量或真实Chrome验收，不算build完成，不推送代码、不移动review/，round仍为6。未完成改动保留在build专用原分支worktree供后续继续；设计保留build/evidence/FT28-round7/design.md。已停止本轮，不自动增加修复轮或切换coder；无新增安装，没有本轮Chrome残留。真实Chrome核验补充与本轮计划已推送；main、FT7、定时任务均未改变。
+
+
+## factory · 2026-11-23 19:03
+owner 本次要求：
+> 让 cc 再试试
+
+Claude Code 续做完成已授权第7轮，未另起修复轮。本次未再遇到529/500；复用上轮5个未提交生产文件改动，提交81db6f6、ca7191b（head）。main@2be49f8已是祖先，无新合并，不重写历史。
+- 修复最新review四项P1、关联P2与生产事件接线：只读冲突仅暂停解析而不释放会关闭存活页面的附着；保留发现时刻/确认缺席约束迟到创建；destroyed先记账再发布dirty；事件读出与枚举开窗使用可比较顺序；反向冲突也触发自动核验。生产Connect主动发root级setDiscoverTargets；不支持时告警后退化为枚举（仅stub验证此分支）。完整target ID、无短ID兼容保持。
+- 永久回归与红绿：39f1a61加新测试的五项诊断及接线用例各-race-count=3失败，接线测试不注入discovery；需要通知的旧版调度用不入库红测shim启用discovery，不代表旧生产已具备。保护性用例/新API单测没有独立缺陷红证据。state/browser/daemon整包race重复20轮通过；四个旧review探针经API适配20/20通过，第五dirty中间状态已不存在，由永久发布顺序回归替代。
+- 真实Chrome157.0.8103.80、隔离非headless、CDP仅回环、临时profile，进程内完整NewServer+ListenAndServe生产路径，各关键调度5轮通过：无时序手动关闭后无RPC/无额外枚举即清registry/idle/磁盘；只读冲突线上零close且A/B存活；迟到创建（含晚于自动重枚举、扣留通知）拒绝且2.3秒后死A不复活、B存活；dirty/迟到事件/反向冲突均通过。65次成功daemon启动均由daemon发恰一次root discovery，测试代理无注入。正式Chrome树与提交仅README差异。
+- 零页面两场景各5次SKIP，Chrome无窗口createTarget报no browser is open，明确未验证。迟到事件的另一登记分支仅stub；三个停消费者调度调整watchdog为30s/60s，其余默认。未验独立bb-daemon二进制、其他Chrome/CDP宿主、Go1.26、自然概率或跨会话ID唯一性；创建超时无ID无法回滚/回滚失败不重试沿用边界。
+- 全量gofmt/vet/go test -race通过；manager独立隔离HOME/TMPDIR/GOCACHE、GOPROXY=off/GOSUMDB=off执行test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./...通过（Go1.27.4，11测试包、1无测试包）。diff --check通过、never路径未改、工作树干净，无安装或依赖变更。测试Chrome已退出，不碰用户会话。
+- 需独立review核对旧断言改写：“冲突按缺席移除”改为“暂停解析/保留资源并核验”；destroyed读出即不可解析。配置测试通过不等于独立验收。
+证据本机build/evidence/FT28-round7/：README.md、design.md、red.log、race-repeat.log、full.log、manager-full.log、review-probes/与real-chrome/final/runs/*/cdp.jsonl。
+状态：代码已推送，new/ → review/，round=7（owner人工授权，不改max_rounds），等待独立review。未合并main、未发布、不动FT7或定时任务。
