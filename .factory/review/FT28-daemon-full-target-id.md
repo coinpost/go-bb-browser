@@ -438,3 +438,19 @@ Claude Code 已完成owner人工授权第9轮，沿用原分支；提交eb0e062�
 - 旧断言改写：列表应用即删除变为更早失效；查询失败用例先恢复枚举再核对身份拒绝，避免把超时误当unknown。细节供独立review检查。
 证据本机build/evidence/FT28-round9/：SUMMARY.md、red-review-probes-2af47a5.log、red-newtests.log/.patch、fix-key-race20.log、fix-packages-race20.log、fix-full.log、manager-final.log、review-probes-unmodified-head.log、review-probes-adapted-head-race20.log、sources/、real-chrome/final/与inspected-final.log。
 状态：new/ → review/，round=9（owner本次人工授权，不改max_rounds），等待独立review。未合并main、未发布、不自动开下一轮、不启动FT7或修改定时任务。
+
+
+## factory · review · 2026-11-24 00:26
+head: 0be4d9bed3b51eb7d7ee4e9962fe386afe5936ae
+verdict: fix
+fix:
+- [P1] internal/daemon/v1.go:762: CDP Target.attachToTarget(A) 已明确返回 No target with given id found，缺席事实只返回给 eval，未约束在途创建；随后迟到 tab_new 仍成功，三种 clear 全成功，idle/磁盘重放保留死 A。公共附着错误路径应保留目标及错误来源，将明确完整 ID 缺席纳入生命周期裁决并约束创建；仅能证明 session 失效时先核验，不把任意执行错误当销毁。
+notes:
+- [P2] internal/daemon/v1.go:1261: 本次成功枚举列出存活 A，但交叠缺席快照使 A 暂停解析，后台核验未完成便返回 unknown tab id。区分待裁决和确认缺失，预算内新窗口核验，否则返回可重试服务端错误；独立 tab_select 查找同样处理。
+- [P2] internal/daemon/tab_idle.go:235: 成功 tab_list 丢弃待裁决成员 A，即使浏览器回复含 A，也只返回 B，Pool 据此撤销绑定；后台恢复 A 后旧 Pool 引用仍本地 UnknownTabError，Eval 发出0个HTTP请求。待裁决影响成员时先核验或以可重试错误结束列表，不能作为权威缺席成功返回；保留真实缺席回收。
+
+Codex独立只读审查origin/main@2be49f8...HEAD全69文件，重点第9轮23文件；无可用review-code skill。上一轮P1适配探针、两项P2原探针及第7轮探针HEAD各20/20通过，旧head失败；核对适配仅调整已取消的核验等待/回复取用，保留正确性断言，原件HEAD仍超时而非宣称原样通过。新P1在HEAD、第8轮及main各20/20复现，存活控制通过，属既有遗漏不称第9轮新增；两项P2在HEAD/第8轮各20/20，main等价快照控制通过。完整ID未复用、B存活，销毁通知到达后收敛，未声称永久分歧。manager核对源码及配置日志，独立导出副本-race-count=3重跑P1和两项P2全部复现，存活控制通过。
+配置test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...全通过，11测试包、protocol无测试；realchrome标签vet及18方法/完整ID/锁/idle/审计/恢复/CLI/Client/Pool定向通过。manager未另行重复全量；配置通过不覆盖新增诊断失败。证据寿命20轮各2048次放弃枚举，在设定销毁通知条件下最终公告/销毁记录/窗口归零；长期枚举失败且通知缺失的上界未验证。
+审阅构建方100份Chrome轨迹：95次daemon连接各一次root discovery，新关闭调度5/5无中间枚举，P3控制eval前采样且eval不新增枚举。本次未独立启动Chrome，不把轨迹检查写成独立真实浏览器验收。两种零页面各5次SKIP；新发现真实Chrome调度、自然频率、其他宿主、Go1.26、部署、跨会话唯一性未验。
+证据保留本机review/evidence/FT28-0be4d9b/：REVIEW.md、reproduce.md、sources/、configured.log、diagnostic-*.log、counts.txt、head.log、identity.log、chrome-inspection.log、manager-diagnostics.log。诊断尚非永久回归。工作树/索引干净，无代码修改、提交、安装或依赖变更。Go1.27.4，隔离HOME/TMPDIR/缓存、固定模块、GOPROXY=off/GOSUMDB=off，仅回环stub；未操作用户窗口、不扩张FT7。无链接issue/PR，不发GitHub评论。
+round=9，超过max_rounds=3，owner仅授权本轮build；发现P1留在review/等owner决定，不自动追加修复。如需继续请追加说明并移至new/。未合并main、未发布、未改定时任务。
