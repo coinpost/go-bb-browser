@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 4
+round: 5
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -245,3 +245,19 @@ Behaviour：所有层仅接收/输出完整 CDP target ID，原样精确匹配�
 Scope：从 main 重新审视 registry 与 daemon 身份生命周期实现及 protocol/Client/Pool/CLI/持久化调用链。删除短 ID 兼容路径与无必要的历史补丁结构；保留 main 已合并功能和有效回归，相关生命周期 P2 与文档残留本次纳入整体重做，不再只修最新 P1。不要合并 FT7/FT21 或其他 factory 分支，不开展 writer 退役重设计。
 Decisions：先书面明确系统边界、登记/失效权威、异步结果顺序和有界内存回收规则，再实施简单直接的模型。不要用任意大小历史环与多层 fallback 叠加掩盖时序；若需限制/重试，说明可证明的不变量、失败与回收路径。完整 ID 不承诺跨浏览器会话唯一，不新增所有权/租约协议。保留 tab/--tab 承载完整 ID，避免平行 API。
 Checking：将第4轮审查两种迟到创建调度纳入永久屏障回归，并保留历轮有效语义（测试可随内部模型重写，不得仅删断言）。覆盖乱序枚举、排队旧事件、关闭/销毁、明确 target-gone、同目标 select/idle 互斥、创建失败回滚、持久化/idle 一致、内存有界、多后端错误与原样身份。同步 README/AGENTS/Client/skills 文档清除短 ID 示例。隔离 HOME/TMPDIR/缓存，GOPROXY=off/GOSUMDB=off，不访问真实外网；全量 gofmt/vet/race 及关键调度 race 重复20次，保留红绿证据；未测真实 Chrome 如实记录。
+
+
+## factory · 2026-11-23 13:54
+owner 工作期间再次确认：
+> 对，从 main 直接重做，使用完整 target id，不兼容短 id
+
+Claude Code 完成本次整体重做（round 5，人工授权，不修改配置）。代码提交 0655a08、dab7d41（head）；origin/main@2be49f8 已是分支祖先，无须新增合并。保留已发布历史，未 rebase/force-push；不是清空分支历史后从 main 新建提交，而是重新实现核心并复用仍有效的完整 ID 调用链与回归。
+- registry 改为在途请求窗口携带失效/交叠枚举证据，请求结束释放；删除原1024删除历史环、64快照历史环和不可验证裁决路径。已有登记不被迟到创建/事件刷新代数，创建提交先检查窗口内失效，与当前是否登记无关。
+- lifeMu 串行登记/失效及缓冲、idle、同步受管记录的应用，不跨 CDP 往返；事件在连接读回调盖章，旧队列证据不得覆盖较新枚举/关闭，改触发重枚举。恢复采用本进程尚未恢复的持久化差集。
+- 完整 target ID 贯穿 daemon/Client/Pool/CLI，移除短ID兼容；Pool/CLI去掉身份裁剪，未知后端目标提供 UnknownTabError并保留RPCError。明确target-gone清理，select参与同目标锁，创建提交失败有一次5秒有界回滚，错误报告清理结果。README/AGENTS/Client/skills文档清理旧短ID示例。
+- 红绿：新永久屏障/调用链回归放到旧f1bd045导出副本共10项失败，重做后通过，含最新P1两调度、回滚、旧队列事件、select/idle、target-gone、Pool原样ID/错误类型和CLI。新registry/Session/recovery API测试无独立红证据；窗口释放/16目标轮转旧版已通过，不算修复证据。
+- CC关键调度 -race -count=20通过、全量gofmt/vet/race通过。manager 独立隔离HOME/GOCACHE/TMPDIR，GOPROXY=off/GOSUMDB=off，执行 test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./... 全通过（Go1.27.4，11测试包、1无测试包）；diff --check通过、工作树干净、never路径及go.mod/go.sum未变。无安装。证据在build/evidence/FT28-rebuild/（design.md、red/green/race-repeat/full/manager-full.log）。
+- 需独立review重点核查：旧“重复登记刷新代数”断言反转为不刷新；旧token复用改一次性窗口；有界历史测试改窗口生灭，须审查语义而非只看通过。原临时探针verification_filtered依赖已删除裁决流程而超时，concurrent_list_true依赖已删除溢出过滤前提未通过原写法，coder声称由新模型回归覆盖，仍需审查，不视为全部旧诊断原样通过。
+- 设计边界：窗口证据内存随在途请求数及期间失效数增长，靠操作期限释放，非固定容量硬上限；事件顺序依赖chromedp连接监听回调顺序，尚未真实Chrome验证。关闭后才发起的新枚举若浏览器仍列旧target，仍可暂时再登记直至destroyed（保留旧行为，review核对契约）。创建请求失败/超时拿不到ID无法回滚，可能留下未受管tab；回滚失败仅报告不重试。交叠证据保守拒绝时存活外部tab可能晚一次枚举登记。
+- 未验真实Chrome、Go1.26、部署、跨浏览器会话ID唯一性；只有fake CDP/本地回环stub。无UI变更，未启动浏览器或操作用户窗口。
+已推送代码，new/ → review/，等待独立审查，不能据测试通过视为验收完成。未合并main、未发布、不启动FT7、不修改定时任务。
