@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-1 at your gates | 1 with the agent | 19 done | 19 sent back
-Drawn Nov 24, 00:04 | https://github.com/coinpost/go-bb-browser
+2 at your gates | 0 with the agent | 19 done | 19 sent back
+Drawn Nov 24, 00:26 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     2d  生命周期事件溢出重同步与优雅关停次序
@@ -14,10 +14,11 @@ NEW (0)                                     avg stay 4h
     Nothing here
 
 REVIEW (2) [!]                              avg stay 1h
-  * FT7    11h  target释放与观测writer退役同步 (round 6)
+  * FT7    12h  target释放与观测writer退役同步 (round 6)
                 > Decide: fix or take it
-    FT28    1m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+  * FT28    1m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容 (round 9)
+                > Decide: fix or take it
 
 READY (0)                                   avg stay 2h
     Nothing here
