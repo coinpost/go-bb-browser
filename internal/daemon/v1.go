@@ -473,6 +473,9 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	initial := strings.TrimSpace(p.URL)
+	// Token before the request: the new target exists in the browser, and can
+	// be listed, closed and destroyed, before this handler sees the reply.
+	tok := s.beginTargetEnumeration()
 	tid, err := createPageTarget(ctx, conn, initial, p.Silent)
 	if err != nil {
 		s.logger.Error("tab_new create target failed", "err", err)
@@ -482,9 +485,23 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		})
 		return
 	}
-	s.tabs.RegisterPageTarget(tid)
 	pinTarget(ctx, tid)
-	s.markTabManaged(tid)
+	switch s.commitCreatedTab(ctx, conn, tok, tid) {
+	case createdTabClosed:
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "tab closed before tab_new completed", &protocol.ErrData{
+			Error:  "tab closed before tab_new completed",
+			Hint:   "the new tab was closed (tab_close, idle cleanup, or in the browser) while it was being created; call tab_new again",
+			Method: protocol.MethodTabNew,
+		})
+		return
+	case createdTabUnverified:
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
+			Error:  "failed to create tab",
+			Hint:   "the new tab could not be confirmed open; call tab_list, then tab_new again if needed",
+			Method: protocol.MethodTabNew,
+		})
+		return
+	}
 	if !p.Silent {
 		s.tabs.Select(tid)
 	}

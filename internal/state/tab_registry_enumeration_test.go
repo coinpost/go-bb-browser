@@ -417,15 +417,17 @@ func TestRepeatedRemovalStaysBounded(t *testing.T) {
 		t.Fatalf("latest removal = %+v (index %d), want A newer than %d", last, r.removedGen[regIDA], tok.gen)
 	}
 
-	// The enumeration requested before the very last report is still stale for A.
-	if snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA, regIDB)); len(snaps) != 1 || r.Has(regIDA) {
-		t.Fatalf("snapshots = %v, want only B", snapshotIDs(snaps))
-	}
 	// The older removal was not crowded out, and the old token stays exact: it
 	// filters both removed ids and still registers a target never removed.
+	// (Applied before the newer reply below: once an enumeration that does not
+	// list a target has been applied, an older reply no longer registers it.)
 	snaps, _ := r.ApplyEnumeration(old, pageInfos(regIDA, other, never, regIDB))
 	if ids := snapshotIDs(snaps); len(ids) != 2 || r.Has(regIDA) || r.Has(other) || !r.Has(never) {
 		t.Fatalf("old enumeration snapshots = %v, want B and the never-removed target", ids)
+	}
+	// The enumeration requested before the very last report is still stale for A.
+	if snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA, regIDB)); len(snaps) != 1 || r.Has(regIDA) {
+		t.Fatalf("snapshots = %v, want only B", snapshotIDs(snaps))
 	}
 }
 

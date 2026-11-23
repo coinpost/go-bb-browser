@@ -74,8 +74,10 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	// Perform the initial managed-tab recovery. If target enumeration failed,
 	// runTargetSync runs this reconciliation after its successful retry; it must
 	// not run on a failed enumeration, which would retire still-live tabs.
-	if terr == nil {
-		s.reconcileIdleFromLog(candidates, snaps)
+	if terr == nil && !s.reconcileEnumeratedManaged(candidates, targets, snaps) {
+		// Some persisted tab could not be verified from this reply: let
+		// runTargetSync ask again instead of deciding on it.
+		sess.MarkTargetDirty()
 	}
 	go s.runCDPWatchdog(ctx, sess)
 	if s.logger != nil {
@@ -138,7 +140,10 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 				snaps := s.syncTabsFromTargets(tok, infos)
 				// Reconciliation is idempotent for tabs already tracked in memory and
 				// is required when the startup target enumeration failed.
-				s.reconcileIdleFromLog(candidates, snaps)
+				if !s.reconcileEnumeratedManaged(candidates, infos, snaps) {
+					// Unverifiable for some persisted tab: retry on the next tick.
+					sess.MarkTargetDirty()
+				}
 			} else {
 				sess.MarkTargetDirty()
 				s.triggerBrowserProbe()

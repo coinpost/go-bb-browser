@@ -36,6 +36,51 @@ func (s *Server) markTabManaged(tid target.ID) {
 	}
 }
 
+type createdTabOutcome uint8
+
+const (
+	createdTabOpen createdTabOutcome = iota
+	// createdTabClosed: the tab was removed after its creation was requested.
+	createdTabClosed
+	// createdTabUnverified: it could not be established that the tab is open.
+	createdTabUnverified
+)
+
+// commitCreatedTab makes the target named by a Target.createTarget reply a
+// registered, managed tab, ordered against every removal since tok (taken
+// before the creation was requested): a tab that was closed or destroyed in
+// between is neither registered nor given a managed lifecycle (idle tracking,
+// persisted managed_tab_open), so the late reply cannot bring its id back.
+func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, tok state.EnumerationToken, tid target.ID) createdTabOutcome {
+	switch s.tabs.RegisterCreatedTarget(tok, tid) {
+	case state.CreatedRemoved:
+		return createdTabClosed
+	case state.CreatedUnverifiable:
+		// More removals than the registry remembers overtook the creation.
+		// A current enumeration is the authority on whether the tab is open.
+		if _, err := s.enumerateTabs(ctx, conn); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("tab_new could not verify the created tab", "tab", string(tid), "err", err)
+			}
+			return createdTabUnverified
+		}
+		if !s.tabs.Has(tid) {
+			return createdTabClosed
+		}
+	}
+	s.markTabManaged(tid)
+	// A removal unregisters first and retires the managed lifecycle second
+	// (removeTargetState, syncTabsFromTargets). One that unregistered the tab
+	// before this check may have retired before markTabManaged ran, so retire
+	// here, after it; one that unregisters later retires after it by itself.
+	// Either way no managed record outlives the removal.
+	if !s.tabs.Has(tid) {
+		s.forgetTabManaged(tid)
+		return createdTabClosed
+	}
+	return createdTabOpen
+}
+
 func (s *Server) touchTabActivity(tid target.ID) {
 	if s.tabIdle != nil {
 		s.tabIdle.Touch(tid)
@@ -157,7 +202,10 @@ func (s *Server) beginManagedReconcile() managedRetireCandidates {
 // a successful target enumeration (snaps). A persisted tab is recovered only
 // when a live target has exactly the same complete CDP target id. Persisted tabs whose target is absent
 // from the enumeration are confirmed gone and retired, which keeps the
-// persisted set bounded by the live managed tabs.
+// persisted set bounded by the live managed tabs. snaps holds only what the
+// registry accepted from the reply; production paths go through
+// reconcileEnumeratedManaged, which narrows candidates to the targets the reply
+// itself did not list.
 //
 // Only targets in candidates, fixed by beginManagedReconcile before snaps was
 // requested, can be retired here. The managed set is read again now, so it may
@@ -207,6 +255,42 @@ func (s *Server) reconcileIdleFromLog(candidates managedRetireCandidates, snaps 
 		}
 		s.tabIdle.MarkManagedIfAbsentAt(tid, effective)
 	}
+}
+
+// reconcileEnumeratedManaged is reconcileIdleFromLog for the reply (infos) of an
+// enumeration and the snapshots the registry accepted from it. Absence is
+// judged on the reply itself: a candidate the browser did not list is gone and
+// is retired. A candidate the browser did list but the registry did not accept
+// is not confirmed gone: either it was removed after the request (that removal
+// retired it), or the registry could not verify the reply any more (it was
+// overtaken by more removals or enumerations than are remembered). It stays
+// persisted, and the result is false so the caller enumerates again.
+func (s *Server) reconcileEnumeratedManaged(candidates managedRetireCandidates, infos []*target.Info, snaps []state.TabSnapshot) (settled bool) {
+	if s.tabIdle == nil || s.store == nil {
+		return true
+	}
+	listed := make(map[target.ID]struct{}, len(infos))
+	for _, info := range infos {
+		// Page targets only, as in the registry: an id listed as anything else
+		// is not an open tab.
+		if info != nil && info.TargetID != "" && (info.Type == "page" || info.Type == "tab") {
+			listed[info.TargetID] = struct{}{}
+		}
+	}
+	absent := make(managedRetireCandidates, len(candidates))
+	for tid := range candidates {
+		if _, ok := listed[tid]; !ok {
+			absent[tid] = struct{}{}
+		}
+	}
+	s.reconcileIdleFromLog(absent, snaps)
+	for _, mt := range s.store.ManagedTabs() {
+		tid := target.ID(mt.TargetID)
+		if _, ok := listed[tid]; ok && !s.tabs.Has(tid) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) closeTab(ctx context.Context, tab string) error {

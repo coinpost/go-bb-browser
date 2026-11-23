@@ -116,6 +116,7 @@ bb-browser tab list
 - 旧版的 4 位起十六进制**短 id（后缀别名）已移除**，daemon 不再生成也不再解析；短 id、任意前缀/后缀/截断、大小写变体、首尾带空白的写法一律返回 `unknown tab id`（`-32602`）。
 - 显式给出的 id 未知或已过期时**直接报错**，绝不回退到焦点 tab、其他 tab 或“看起来相近”的 tab。目标消失后，持有旧 id 的请求（包括正在等待该 tab 操作锁的请求）只会失败，不会落到之后出现的其他目标上。
 - 一次请求解析出的 target id 贯穿该请求的操作锁、CDP 命令、idle 续期与 `rpc.jsonl` 审计记录，中途不重新解析。
+- 迟到的浏览器回复不会让已失效的 id 重新生效：`tab_new` 的创建回复到达前该 tab 若已被关闭/销毁，`tab_new` 返回错误 `tab closed before tab_new completed`（不登记、不纳入 idle 受管，重新调用即可）；较早发出的 target 枚举回复不会重新登记“其后已有另一次枚举确认不存在”或“其后已被删除”的 tab。
 - 只有 `tab_list` / `tab_focus` 以及 CLI 省略 `--tab` 时才使用 daemon 焦点 tab；CLI 显式传空的 `--tab ""` 会报错而不是改用焦点 tab。
 - **迁移**：旧客户端不要缓存或拼接短 id，改为保存并原样回传 `tab_new` / `tab_list` 返回的 `tab`；脚本里写死的 `--tab ab12` 之类需要换成 `bb-browser tab list` 输出的完整 id。Pool 调用方同理（`<backendKey>:<完整 id>`，见 [`pkg/daemonclient`](pkg/daemonclient/README.md)）。
 - CDP target id 在同一个运行中的浏览器内唯一；本项目**不承诺**它跨浏览器重启/跨浏览器会话永久唯一，也不引入所有权或租约协议。

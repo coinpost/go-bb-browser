@@ -37,6 +37,19 @@ type TabRegistry struct {
 	removedGen   map[target.ID]uint64
 	removedLog   []removedTarget
 	removedFloor uint64
+
+	// Every applied enumeration is a lifecycle point too: it confirms that the
+	// page targets it does not list were absent from the browser. That also
+	// holds for ids that are not registered (closed earlier, or never seen), for
+	// which there is no removal to remember, so the applied snapshots themselves
+	// are kept: appliedLog holds the page ids of the most recent applications
+	// with the generation at which each was applied, oldest first. Consecutive
+	// applications listing the same ids share one entry (the latest generation),
+	// so the log only grows when the set of page targets changes. Only the last
+	// maxAppliedEnumerations entries are kept; appliedFloor is the highest
+	// generation among those already forgotten.
+	appliedLog   []appliedEnumeration
+	appliedFloor uint64
 }
 
 // maxRemovedTargets bounds the removal memory. It only has to cover the
@@ -49,9 +62,25 @@ type removedTarget struct {
 	gen uint64
 }
 
-// EnumerationToken marks the moment a full target enumeration was requested.
+// maxAppliedEnumerations bounds the memory of applied enumerations. Like
+// maxRemovedTargets it only has to cover what overlaps one browser round trip:
+// a reply that more target-set changes than this overtook registers no target
+// it cannot vouch for.
+const maxAppliedEnumerations = 64
+
+type appliedEnumeration struct {
+	gen     uint64
+	present map[target.ID]struct{}
+}
+
+// EnumerationToken marks the moment a browser request was sent whose reply
+// names targets: a full target enumeration (BeginEnumeration, ApplyEnumeration)
+// or the creation of a target (BeginEnumeration, RegisterCreatedTarget). The
+// reply is ordered against every registration, removal and applied enumeration
+// that happened after the token was taken.
 // The zero value is the oldest possible token: applying a snapshot with it
-// never removes a target, and registers only targets that were never removed.
+// never removes a target, and registers only targets that were never removed
+// and that no remembered enumeration found absent.
 type EnumerationToken struct {
 	gen uint64
 }
@@ -71,8 +100,10 @@ func NewTabRegistry() *TabRegistry {
 // list. The returned token makes ApplyEnumeration ignore what the snapshot
 // says about any target whose registration changed after this point: the
 // absence of a target registered since (it may have been created after the
-// browser took the snapshot), and the presence of a target removed since (the
-// snapshot may predate its removal).
+// browser took the snapshot), the presence of a target removed since (the
+// snapshot may predate its removal), and the presence of an unregistered target
+// that another enumeration applied since did not list (the snapshot may predate
+// that one).
 func (r *TabRegistry) BeginEnumeration() EnumerationToken {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -102,8 +133,16 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 // Targets missing from infos are removed (and reported) only if they were last
 // registered at or before tok; targets registered later are kept untouched.
 // A page target in infos that is not registered is registered unless it was
-// removed after tok: such a target is neither registered nor returned, so the
-// id of a closed tab never resolves again because of a late reply (INV-6).
+// removed after tok, or an enumeration applied after tok did not list it: such
+// a target is neither registered nor returned, so the id of a closed tab never
+// resolves again because of a late reply (INV-6).
+//
+// The second rule is about the window between the request and this call, not
+// about which of two requests was sent first: the order in which the browser
+// took two overlapping snapshots is unknown, so a snapshot that lists an
+// unregistered target and one that does not cannot be ordered. Absence wins
+// (the target is not registered); if the target is really there, the next
+// enumeration requested after this point, or its lifecycle event, registers it.
 // The returned snapshots describe the page targets in infos that are
 // registered when the call returns.
 func (r *TabRegistry) ApplyEnumeration(tok EnumerationToken, infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
@@ -160,7 +199,53 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 			URL:      tabURL(infos, id),
 		})
 	}
+	// Recorded last, so this snapshot is not held against itself.
+	r.noteAppliedLocked(present)
 	return out, removed
+}
+
+// noteAppliedLocked records that a snapshot listing exactly present was applied
+// now (caller holds lock; present is owned by the log from here on).
+func (r *TabRegistry) noteAppliedLocked(present map[target.ID]struct{}) {
+	r.gen++
+	if n := len(r.appliedLog); n > 0 && sameTargets(r.appliedLog[n-1].present, present) {
+		// The same absences confirmed again: one entry with the later
+		// generation answers every question the two would.
+		r.appliedLog[n-1].gen = r.gen
+		return
+	}
+	r.appliedLog = append(r.appliedLog, appliedEnumeration{gen: r.gen, present: present})
+	if len(r.appliedLog) > maxAppliedEnumerations {
+		r.appliedFloor = r.appliedLog[0].gen
+		// Shift instead of re-slicing so the backing array stays bounded and
+		// the dropped snapshot is released.
+		n := copy(r.appliedLog, r.appliedLog[1:])
+		r.appliedLog[n] = appliedEnumeration{}
+		r.appliedLog = r.appliedLog[:n]
+	}
+}
+
+func sameTargets(a, b map[target.ID]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if _, ok := b[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// foundAbsentSinceLocked reports whether an enumeration applied after tok did
+// not list id (caller holds lock).
+func (r *TabRegistry) foundAbsentSinceLocked(tok EnumerationToken, id target.ID) bool {
+	for i := len(r.appliedLog) - 1; i >= 0 && r.appliedLog[i].gen > tok.gen; i-- {
+		if _, ok := r.appliedLog[i].present[id]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveTarget removes one target and reports whether it was registered.
@@ -187,8 +272,52 @@ func (r *TabRegistry) RemoveTarget(id target.ID) bool {
 	return true
 }
 
-// RegisterPageTarget registers a CDP target id without syncing from the browser.
-// Use after Target.createTarget when GetTargets may not yet list the new tab.
+// CreatedTarget is the outcome of RegisterCreatedTarget.
+type CreatedTarget uint8
+
+const (
+	// CreatedRegistered: the target is registered.
+	CreatedRegistered CreatedTarget = iota
+	// CreatedRemoved: the target was removed after its creation was requested
+	// (closed, destroyed, or dropped by an enumeration); it is not registered.
+	CreatedRemoved
+	// CreatedUnverifiable: removals newer than the creation request have been
+	// forgotten, so the registry cannot tell whether this target was among
+	// them; it is not registered. A current enumeration settles it.
+	CreatedUnverifiable
+)
+
+// RegisterCreatedTarget registers the target a Target.createTarget reply names.
+// tok must come from BeginEnumeration BEFORE the creation was requested, which
+// orders the reply against removals: the target can already have been listed,
+// used, closed and destroyed by the time its creator sees the reply, and such
+// a reply must not bring the id back (INV-6). A target that is registered
+// (again) when the reply arrives stays registered with a fresh generation.
+//
+// An enumeration applied meanwhile that did not list the target is not held
+// against it: that snapshot may simply predate the creation.
+func (r *TabRegistry) RegisterCreatedTarget(tok EnumerationToken, id target.ID) CreatedTarget {
+	if id == "" {
+		return CreatedRemoved
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.targetGen[id]; !ok {
+		if r.removedGen[id] > tok.gen {
+			return CreatedRemoved
+		}
+		if r.removedFloor > tok.gen {
+			return CreatedUnverifiable
+		}
+	}
+	r.gen++
+	r.targetGen[id] = r.gen
+	return CreatedRegistered
+}
+
+// RegisterPageTarget registers a CDP target id without syncing from the browser,
+// for a lifecycle event that reports the target as existing now. For the reply
+// to a creation request use RegisterCreatedTarget.
 // It always advances the target's generation, also when the target is already
 // registered, so enumerations already in flight cannot remove it.
 func (r *TabRegistry) RegisterPageTarget(id target.ID) {
@@ -278,17 +407,22 @@ func (r *TabRegistry) noteRemovedLocked(id target.ID) {
 
 // ensureLocked makes sure id, listed by an enumeration requested at tok, is
 // registered, and reports whether it is (caller holds lock). An unregistered
-// id is registered with a fresh generation unless it was removed after tok:
-// the snapshot may predate that removal, so it does not prove the target
-// still exists. When removals newer than tok have already been forgotten
-// (tok is older than removedFloor) that cannot be ruled out for any id, so
-// nothing is registered; a current enumeration or the target's lifecycle
-// event registers a target that is really there.
+// id is registered with a fresh generation unless it was removed after tok
+// or an enumeration applied after tok did not list it: the snapshot may
+// predate that removal or that absence, so it does not prove the target
+// still exists. When removals or applied enumerations newer than tok have
+// already been forgotten (tok is older than removedFloor / appliedFloor) that
+// cannot be ruled out for any id, so nothing is registered; a current
+// enumeration or the target's lifecycle event registers a target that is
+// really there.
 func (r *TabRegistry) ensureLocked(tok EnumerationToken, id target.ID) bool {
 	if _, ok := r.targetGen[id]; ok {
 		return true
 	}
 	if r.removedGen[id] > tok.gen || r.removedFloor > tok.gen {
+		return false
+	}
+	if r.appliedFloor > tok.gen || r.foundAbsentSinceLocked(tok, id) {
 		return false
 	}
 	r.gen++
