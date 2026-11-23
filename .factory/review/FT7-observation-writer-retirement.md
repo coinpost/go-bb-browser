@@ -1,6 +1,6 @@
 ---
 branch: factory/FT7-observation-writer-retirement
-round: 5
+round: 6
 ---
 # target释放与观测writer退役同步
 
@@ -298,3 +298,21 @@ owner 明确要求：「把 go-bb-browser FT7 移回 new 并开始用 cc build�
 - Scope：最新 review 两项 P1，相关初始化/枚举/释放永久回归。P2 仅在同一清理所有权路径必须处理时做最小修复并说明，不扩展通用页面操作或全系统代次架构。
 - Decisions：复用原分支，先检查最新 main 是否需 merge；不 rebase；用连接显式传递或缩小锁范围修复启动锁递归；以请求开始后的移除约束/快照有效性阻止陈旧正向登记，具体最小实现由代码核实。
 - Checking：真实 Session+daemon 本地回环 CDP 桩复现启动死锁和 tab_list 旧快照恢复死 target，两项正确断言修复前失败、修复后通过；重复 -race，配置完整 gofmt/vet/race；记录真实 Chrome/CDP、Docker/systemd 未检查部分。
+
+
+## factory · 2026-11-23 11:47
+第 6 轮 Claude Code 构建完成，提交 164fac81719174a343e2929831a2d40340f18f9d；origin/main@2be49f8 已是祖先，无需 merge。沿用 17:58 边界，不处理人为同完整 target ID 复用的跨 RPC 架构。
+
+实现：connectBrowser 只在发布连接时持 tabMu，首次枚举/退役在锁外，保留先停 writer 后清桶；TabRegistry 为在途枚举保存有界移除标记，拒绝请求发出后已释放 target 的陈旧正向登记并过滤返回快照，Apply/Abandon 结束 token，全部枚举结束回收标记；显式 tab_close 收到明确 target-gone 时释放原登记，RPC 错误仍保留，其他关闭错误不退役（同路径 P2）。更新 AGENTS.md 和永久回归。
+
+修复前证据（CC 独立重写，非复跑 review overlay）：启动首次对账释放死锁/取消不能结束、tab_list 旧快照恢复死 target 并在 attach 失败回包前建桶及接受迟到 Record、target-gone 后残留观测，以及 state 枚举回归，正确断言 -race -count=3 均失败。启动用例预登记不同完整 ID 模拟生命周期循环已处理创建，无生产调度钩子，与原 overlay 调度不完全相同，自锁栈一致；state/target-gone 对照使用无逻辑编译 shim 或临时撤修复，已恢复。
+
+测试：CC 配置全量通过，关键 daemon/state -race -count=20，browser/daemon/state 整包 -race -count=5 通过。manager 独立隔离 HOME/GOCACHE/GOTMPDIR，GOPROXY=off/GOSUMDB=off 重新执行 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全量通过，Go 1.27.4，11 个有测试包、1 个无测试包。提交范围、保护路径、diff --check、干净工作树核对通过。go.mod/go.sum 未改，安装：无。看板脚本默认 Python 缺 tomllib，改用已有 Python 3.12 完成，无安装。
+
+证据：本机 build/evidence/FT7-round6/，含 before-*.log、after-key-count20.log、full-final.log、repeat.log、manager-full.log。
+
+未处理/供独立审查：超时 attach 初始化出表后的等待协程增长；Close 跨 attach 回包的远端 session 残留及 Close 后继续 Network.enable。CC 另指出未复现相邻风险：迟到 targetInfoChanged 或 tab_new 回包晚于 targetDestroyed 可能恢复幽灵登记；本轮移除标记仅约束请求早于释放的快照，不约束释放后发出的新枚举。没有据此宣告核心契约全面通过，交 review 检查，不自动扩张范围。
+
+未验证：真实非 headless Chrome/CDP、loadingFailed、Chrome target-gone 实际报文、Docker、运行中 systemd、Go 1.26；未启动 Chrome、未操作用户窗口。
+
+状态：代码已推送，new/ → review/，round=6；owner 明确授权本轮，max_rounds=3 不变，不自动追加修复。本次仅 build，未独立 review、未合并 main、未发布。
