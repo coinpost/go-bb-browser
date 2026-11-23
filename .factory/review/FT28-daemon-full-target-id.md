@@ -397,3 +397,20 @@ Claude Code 已完成 owner 人工授权第8轮，沿用原分支；代码提交
 - 未验：两种零页面场景各5次SKIP，仍未验证；其他Chrome/CDP宿主、Go1.26、部署、自然概率及跨会话ID唯一性未验。不以测试通过代替独立review。无UI变更，未碰用户窗口。
 证据本机build/evidence/FT28-round8/：review-probes-round7/round8.log、red-daemon.log、fix-key-race20.log、fix-full.log、fix-summary.md、manager-final.log、real-chrome/final/go-test.log与轨迹、inspected-final.log。初始超时日志保留供复核。
 状态：new/ → review/，round=8（owner人工授权，不改max_rounds），等待独立审查。未合并main、未发布、不启动下一轮review或FT7、不改定时任务。
+
+
+## factory · review · 2026-11-23 23:15
+head: 2af47a580a3d4cb91a68578ac728db796e554404
+verdict: fix
+fix:
+- [P1] internal/state/tab_registry.go:342: 创建通知已读入队，随后请求的列表确认A缺席但先于创建登记生效；narrow仅留集合交集，丢失缺席查询时刻。迟到回包登记后再处理旧created事件，三种clear仍接受死A；同步核验失败时tab_new也成功，idle及磁盘重放保留A，直到后台回复完成。保留在途存在证据与缺席查询的可比较时刻，即使尚未登记也判定失效并约束迟到创建；保留列表先请求、A后创建的存活控制。
+notes:
+- [P2] internal/daemon/tab_idle.go:100: 创建核验期间成功close(A)，新列表又发现仍在关闭的同一A，随后A物理消失；成功或失败核验均让tab_new返回并选中已退役A，idle/managed为空。创建退役标记需保持到核验结束，不能只查Has(A)。HEAD及前版两分支各20/20。
+- [P2] internal/daemon/v1.go:1286: 首次解析吞掉getTargets超时并报unknown tab id，活目标三种clear被错误判为身份失效，Pool包装为UnknownTabError。返回枚举错误并保留超时原因，仅成功枚举查无目标时报身份错误。main、重做前、前版及HEAD各5/5，既有问题。
+- [P3] internal/daemon/real_chrome_test.go:464: 新增已公告且存活控制组先eval再查Has，eval可自行枚举掩盖缺失自动恢复；应eval前检查registry/idle及枚举计数。独立反向冲突用例已正确修正。
+
+Codex独立只读审查origin/main@2be49f8...HEAD全66文件，重点第8轮11文件；无可用review-code skill。第7轮四项原始生命周期诊断从前版失败各20/20变为HEAD通过各20/20，存活控制通过，本次P1为相邻新调度而非重复已修finding。新P1在HEAD及ca7191b各20/20复现，A仅创建一次、B存活；重做前/main严格订阅桩无root discovery且未进入相同核验前提，不将注入discovery的行为冒称旧生产可达。manager核对源码及配置日志，并独立导出HEAD以-race-count=3复现P1全部失败：三种clear成功、tab_new成功、idle/重放保留死A；后台回复放行后恢复，未声称永久分歧或自然概率。
+配置test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...通过，11测试包、protocol无测试，Go1.27.4；realchrome标签vet及关键因果/18方法/锁/Pool/CLI/恢复定向race20轮通过。manager未另行重复全量；配置通过不覆盖新增诊断失败。最终测试闸门调整保留登记断言，但unknown错误也可能来自枚举超时，见P2。
+独立解析构建方90份Chrome轨迹：85次成功启动daemon各一次root discovery，20次只读冲突零close，反向恢复5/5在eval前额外完成一次getTargets，eval期间未新增枚举。证据来自8cb5f39，最终HEAD仅两个普通测试文件变化。本次未独立启动真实Chrome，不将轨迹检查写成独立浏览器验证。两种零页面各5次SKIP仍未验；新调度真实Chrome可达性、频率、其他宿主、Go1.26、部署、跨会话ID唯一性未验。
+证据保留本机review/evidence/FT28-2af47a5/：REVIEW.md、reproduce.md、sources/、configured.log、counts.txt、adjacent-*.log、round7-*.log、chrome-traces.log、manager-diagnostics.log。临时探针尚非永久回归。工作树与索引干净，无代码修改、提交、安装或依赖变更，保护路径未改。HOME/TMPDIR/缓存隔离在run内，复用固定模块，GOPROXY=off/GOSUMDB=off，仅回环stub，不操作用户窗口、不扩张FT7。无链接issue/PR，不发GitHub评论。
+round=8，超过max_rounds=3；owner只授权本轮build，不自动追加修复。发现P1，留在review/等owner决定；继续须追加说明并移至new/。未合并main、未发布、未修改定时任务。
