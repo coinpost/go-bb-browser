@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-2 at your gates | 0 with the agent | 19 done | 13 sent back
-Drawn Nov 23, 12:14 | https://github.com/coinpost/go-bb-browser
+1 at your gates | 1 with the agent | 19 done | 14 sent back
+Drawn Nov 23, 13:02 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
     FT2     1d  生命周期事件溢出重同步与优雅关停次序
@@ -13,24 +13,23 @@ BACKLOG (5)                                 never built
 NEW (0)                                     avg stay 4h
     Nothing here
 
-REVIEW (2) [!]                              avg stay 52m
-  * FT28   20h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
-                兼容 (round 3)
+REVIEW (2) [!]                              avg stay 2h
+  * FT7    48m  target释放与观测writer退役同步 (round 6)
                 > Decide: fix or take it
-  * FT7     1m  target释放与观测writer退役同步 (round 6)
-                > Decide: fix or take it
+    FT28    1m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+                兼容 (round 4)
 
 READY (0)                                   avg stay 2h
     Nothing here
 
 DONE (19)
-    FT25   19h  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
+    FT25   20h  [P3] Pool.TabList/TabFocus 顺序轮询后端且无单后端超时，一个挂起
                 的 daemon 使整个调用失败 (round 3)
-    FT26   19h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
+    FT26   20h  [P3] Pool 通过 tab_list/tab_focus 观察到的 tab 绑定只增不减，已
                 消失的 tab 永久留在映射中 (round 2)
-    FT10   23h  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
+    FT10    1d  [P2] 空闲回收/浏览器侧关闭的受管 tab 永不从持久化 managed 集合移
                 除，重启后同短 id 的用户 tab 被当成受管 tab 关闭 (round 2)
-    FT13   23h  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
+    FT13    1d  [P2] Pool 的 tab_new 与 Health/Ready/Live 共用同一个轮询计数器，
                 顺序调用方的 tab 会全部落到同一个 daemon (round 2)
     ... 15 more in .factory/done/
 
