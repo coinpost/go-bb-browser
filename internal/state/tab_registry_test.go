@@ -131,9 +131,11 @@ func commitOK(r *TabRegistry, w *Window, id target.ID) bool {
 // readDestroyed plays the connection reader for one Target.targetDestroyed
 // notification: read (NoteEventRead), then either queued or dropped by a full
 // queue (EventDropped), in the order Session.enqueueTargetEvent uses.
-func readDestroyed(r *TabRegistry, id target.ID, queued bool) {
-	r.NoteEventRead(id)
+// It returns the stamp of the notification.
+func readDestroyed(r *TabRegistry, id target.ID, queued bool) uint64 {
+	stamp := r.NoteEventRead(id)
 	if !queued {
 		r.EventDropped()
 	}
+	return stamp
 }

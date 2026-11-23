@@ -112,11 +112,11 @@ func TestDestroyedReadStopsResolvingAndLeavesCleanupToTheConsumer(t *testing.T) 
 	}
 }
 
-// Events still queued when a destroyed notification is dropped were read
-// before it. One of them must not register the destroyed target while the
-// resync is pending; with the notification queued, the queue itself orders
-// them and nothing is refused.
-func TestDroppedDestroyedOutdatesQueuedExistenceEvents(t *testing.T) {
+// Events still queued when a destroyed notification is read were read before
+// it. One of them must not register the destroyed target, whether the
+// notification was dropped (the resync is pending) or queued (the consumer has
+// not got to it, or is waiting to apply it).
+func TestDestroyedReadOutdatesQueuedExistenceEvents(t *testing.T) {
 	r := NewTabRegistry()
 	stamp := r.NoteEventRead("") // targetInfoChanged(A) read here
 	readDestroyed(r, regIDA, false)
@@ -130,13 +130,20 @@ func TestDroppedDestroyedOutdatesQueuedExistenceEvents(t *testing.T) {
 
 	q := NewTabRegistry()
 	stamp = q.NoteEventRead("")
-	readDestroyed(q, regIDA, true)
-	if !q.RegisterEvent(stamp, regIDA) {
-		t.Fatal("a queued notification must leave ordering to the queue")
+	other := q.NoteEventRead("")
+	destroyed := readDestroyed(q, regIDA, true)
+	// Nothing is registered and nothing is left to ask the browser: the
+	// queued notification settles it.
+	if !q.RegisterEvent(stamp, regIDA) || q.Has(regIDA) || q.Known(regIDA) {
+		t.Fatal("an event read before a queued destroyed notification registered the target, or asked for an enumeration")
 	}
-	q.RemoveEventTarget(regIDA) // the destroyed event, next in the queue
-	if q.Has(regIDA) {
-		t.Fatal("destroyed event did not remove the target")
+	// The read of A's destruction says nothing about other targets.
+	if !q.RegisterEvent(other, regIDB) || !q.Has(regIDB) {
+		t.Fatal("an event about another target was refused")
+	}
+	q.RemoveDestroyedTarget(destroyed, regIDA) // the consumer gets to it
+	if q.Has(regIDA) || q.PendingDestroyed() != 0 {
+		t.Fatalf("after the destroyed event was handled: resolves=%v, remembered reads=%d", q.Has(regIDA), q.PendingDestroyed())
 	}
 }
 

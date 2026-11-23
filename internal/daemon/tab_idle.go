@@ -79,7 +79,11 @@ func (s *Server) markTabManagedLocked(tid target.ID) {
 // once more before tab_new answers: that enumeration is requested after the
 // commit, so a tab it does not list is gone, and it removes the tab together
 // with its managed record. If the question cannot be asked, the answer is left
-// to the sync loop of conn and the commit stands.
+// to the sync loop of conn and the commit stands — unless the tab stopped
+// resolving meanwhile for a reason of its own (another caller closed it, its
+// destroyed notification was read): whatever the verification would have
+// said, it is not a created tab any more. The registry is asked after the
+// round trip on both paths; nothing is concluded from the failed enumeration.
 func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Window, tid target.ID) bool {
 	s.lifeMu.Lock()
 	ok, verify := s.tabs.CommitCreated(w, tid)
@@ -92,7 +96,6 @@ func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Wi
 	}
 	if _, err := s.enumerateTabs(ctx, conn); err != nil {
 		requestEnumeration(conn)
-		return true
 	}
 	return s.tabs.Has(tid)
 }
@@ -234,8 +237,9 @@ func (s *Server) removeTargetState(tid target.ID) {
 	s.dropTarget(s.tabConn(), tid, s.tabs.RemoveTarget)
 }
 
-// removeEventTarget applies a lifecycle event reporting that tid is gone
-// (destroyed, or not a page).
+// removeEventTarget applies a queued lifecycle event reporting that tid is not
+// a page (a destroyed notification goes through RemoveDestroyedTarget, see
+// applyTargetEvent).
 func (s *Server) removeEventTarget(conn any, tid target.ID) {
 	s.dropTarget(conn, tid, s.tabs.RemoveEventTarget)
 }

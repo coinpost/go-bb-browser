@@ -155,13 +155,15 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 // stopped resolving the target when the notification was read). "Exists" is
 // evidence about the instant the event was read (TabRegistry.RegisterEvent):
 // it is applied with that instant, and not at all when something newer was
-// applied meanwhile, so an event that waited in the queue across a tab_close
-// or a resync cannot bring a closed tab back. An event refused for that reason
-// asks for a fresh enumeration instead, which registers the target if it is
-// really there.
+// applied meanwhile, so an event that waited in the queue across a tab_close,
+// a resync or the read of the target's own destroyed notification cannot bring
+// a closed tab back, and a target registered meanwhile by something later
+// keeps the earlier instant. An event that did not settle the matter asks for
+// a fresh enumeration instead, which registers the target if it is really
+// there and cleans it up if the event proved it gone.
 func (s *Server) applyTargetEvent(conn any, ev browser.TargetEvent) {
 	if ev.Destroyed != "" {
-		s.removeEventTarget(conn, ev.Destroyed)
+		s.dropTarget(conn, ev.Destroyed, func(id target.ID) bool { return s.tabs.RemoveDestroyedTarget(ev.Stamp, id) })
 	}
 	if info := ev.Info; info != nil && info.TargetID != "" {
 		if info.Type != "page" && info.Type != "tab" {
