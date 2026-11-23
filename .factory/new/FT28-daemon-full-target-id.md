@@ -278,3 +278,13 @@ Codex 独立只读审查 origin/main@2be49f8...HEAD 全56文件，无可用 revi
 配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过，11测试包、1无测试包；关键永久回归与补充race各20轮通过。manager核对全量日志，未另行重复全量；配置通过不覆盖新增诊断缺陷。
 证据保留本机review/evidence/FT28-dab7d41/：REVIEW.md、reproduce.md、probes/、configured.log、overflow-head/pre/main.log、list-head/pre/main.log、original-head.log、permanent-20.log、supplement-20.log、boundaries.log、manager-diagnostics.log。工作树干净，无代码修改、提交、安装、依赖清单变化。Go1.27.4，隔离HOME/TMPDIR/缓存，复用已有固定模块，GOPROXY=off/GOSUMDB=off，无真实外网；未验真实非headless Chrome、Go1.26、线上频率、部署或跨浏览器会话ID唯一性，未启动浏览器或操作用户窗口。不扩张FT7 writer重设计，无链接issue/PR不发GitHub评论。
 round=5，超过max_rounds=3；owner授权本轮整体重做，不自动追加修复。发现P1，留在review/等待owner决定；如需继续请追加说明并移至new/。本次仅review，未改代码、未合并main、未发布、未修改定时任务。
+
+
+## factory · 2026-11-23 14:46
+owner 本次明确要求：
+> 移到 new 然后让 cc 继续 build
+
+本次人工授权 review/ → new/，使用 Claude Code 继续原分支第6轮，超过 max_rounds 但不修改配置。修复最新 review 两项 P1（队列溢出丢失销毁通知后的迟到创建、旧枚举发现误当并发创建保护），保留完整 target ID、不兼容短 ID 的契约及历轮有效回归。FT7 不动，不合并 main、不发布、不修改定时任务。
+
+## factory · plan · 2026-11-23 14:46
+在途创建须受已读到的销毁证据或溢出后有界核验约束；区分真实创建与交叠枚举发现，矛盾快照不能把已销毁目标保持可解析，需冲突后新证据确认。保持正常并发创建不被早期空快照误删、内存随请求结束释放、不回归 idle/持久化一致性。将最新 review 的生产同步循环与本地 CDP stub 两项诊断提升为永久确定性回归，保存修复前失败/修复后通过证据，关键 race 重复20次及全量 gofmt/vet/race。关联 P3 文档/纯空白 ID 可一并澄清，不扩张其他任务。
