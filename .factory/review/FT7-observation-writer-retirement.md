@@ -316,3 +316,22 @@ owner 明确要求：「把 go-bb-browser FT7 移回 new 并开始用 cc build�
 未验证：真实非 headless Chrome/CDP、loadingFailed、Chrome target-gone 实际报文、Docker、运行中 systemd、Go 1.26；未启动 Chrome、未操作用户窗口。
 
 状态：代码已推送，new/ → review/，round=6；owner 明确授权本轮，max_rounds=3 不变，不自动追加修复。本次仅 build，未独立 review、未合并 main、未发布。
+
+
+## factory · review · 2026-11-23 12:14
+head: 164fac81719174a343e2929831a2d40340f18f9d
+verdict: fix
+fix:
+- [P1] internal/daemon/tab_idle.go:311: 两个 tab_close 均在 A 存活时到达，第二个等锁期间用户关闭 A，不同完整 ID 的 B 接过短别名；第二个获锁后才解析，实际关闭 B。等待锁前捕获原登记，获锁后复核失效即报错，不得操作 B。
+- [P1] internal/browser/session.go:465: 已有页面连接时 discovery 仅订阅在页级 session，daemon 却用 ListenBrowser 接收生命周期事件。按实际订阅投递销毁的协议桩中，用户关闭后登记/桶残留，network/console/errors 均成功返回旧事件。安装浏览器监听后在 browser executor 显式启用 discovery 并处理失败；补充按订阅 session 投递的永久回归。
+- [P1] internal/daemon/browser_reconnect.go:129: 生命周期队列溢出后自动枚举已确认 A 消失并清桶，随后旧 targetInfoChanged 又恢复死登记，network 在 attach 拒绝回包前重建桶。退役/对账必须约束先前排队的消息，或重新核实存活再登记；显式 close 后消费旧消息亦复现。
+- [P1] internal/daemon/v1.go:485: tab_new 创建生效但回包未提交，页面已由事件发现、观测、关闭并完成退役，迟到回包仍返回成功、登记死 ID 并标为 managed，后续查询重建桶。创建提交须与请求开始及销毁事件排序，条件提交登记、managed 成员和成功结果。
+notes:
+- [P2] internal/state/tab_registry.go:290: 启动枚举拍照后、首次登记前收到销毁，RemoveTarget 因无登记而不记录移除，旧快照登记死页。应在有旧枚举在途时也记录未知 ID 的销毁；此场景此前无 writer/旧事件，失败 attach 后新桶会回滚。
+- [P2] internal/browser/observer.go:164: 超时初始化出表失去清理入口；8 次重试留下 8 个未决 attach（main 1 个），另 4 个不同 ID 的已知 session 在域初始化挂起后超时/销毁仍留下 4 个等待（main 0）。合并未决重试，并在已知 session 销毁后取消剩余初始化。增长诊断使用 25ms 时限，非生产 60s 实测。
+- [P2] internal/browser/session.go:613、internal/browser/observer.go:124: Close 跨 attach 回包残留远端 session，域初始化仍可在 Close 返回后发 Network.enable；保留回包 detach 所有权并关联退役取消。HEAD/main 均复现，HEAD 已返回 RPC 错误并回滚首次桶，正常 daemon 退出关闭连接限制影响。
+
+Codex 独立只读审查 origin/main@2be49f8...HEAD；无可用 review-code skill。严格沿用 owner 17:58 边界：完整 target ID 不复用，不同完整 ID 的短 alias 冲突仍在范围内。四项 P1 在 HEAD、第5轮209ee62和 main 各3/3复现，均非第6轮新引入；迟到创建/排队更新在 main 也恢复死别名，但 attach 拒绝前重建桶为 FT7 分支增加的影响。该窗口可接受直接送入生产 obsSink 的探针，未观察到旧 writer 自行复活或将探针返回客户端，不夸大为已验证数据泄漏。订阅缺失项则确实经公开 RPC 返回旧事件；浏览器级订阅阳性对照均3/3正确清理。未将人为同完整 ID 复用的历史发现当作阻塞。
+上轮启动死锁、已登记页面的旧枚举回包、显式 target-gone 原始调度 HEAD 各3/3通过；不是复用已修复 finding。HEAD 工作树与干净 main 导出副本均通过配置 gofmt/vet/go test -race ./...（11个测试包、1个无测试包），browser/daemon/state整包 -race -count=5及选定屏障-count=10通过。实际延迟365秒的 attach 回包 HEAD/main 均通过。manager 核对诊断源码与配置日志，并独立复跑保留脚本：四项P1及相关调度在三版本各-race -count=3复现，原修复在HEAD通过；未另行重复全量。配置通过不覆盖新增诊断缺陷。
+证据保留本机 review run evidence/FT7-164fac8/：REVIEW.md、source/、reproduce.zsh、configured.log、configured-main.log、repeat.log、barriers.log、grace-*.log、manager-replay.log与manager-replay/。诊断为导出副本/overlay，非已提交永久回归。工作树干净，无代码变更、提交、安装或依赖清单变化。Go1.27.4，隔离HOME/TMPDIR/缓存，GOPROXY=off/GOSUMDB=off，仅本地回环CDP桩。未验真实非headless Chrome/CDP、loadingFailed、Go1.26、Docker、运行中systemd；未启动Chrome或操作用户窗口。无链接issue/PR，不发GitHub评论。
+round=6，已超过max_rounds=3；owner仅授权本次额外构建，不自动追加。发现P1，留在review/等owner决定；如需继续请追加说明并移至new/。仅review，未改代码、未合并main、未发布。
