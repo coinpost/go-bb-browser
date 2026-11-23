@@ -1,34 +1,32 @@
 package state
 
 import (
-	"fmt"
+	"sync"
 	"testing"
-
-	"github.com/chromedp/cdproto/target"
 )
 
 // Regressions for the ordering of a Target.createTarget reply against removals
-// (RegisterCreatedTarget) and for the bound on the applied-enumeration memory.
+// and enumerations (CommitCreated).
 
-func TestRegisterCreatedTargetOrdersReplyAgainstRemoval(t *testing.T) {
+func TestCommitCreatedOrdersReplyAgainstRemoval(t *testing.T) {
 	t.Run("no removal", func(t *testing.T) {
 		r := NewTabRegistry()
-		tok := r.BeginEnumeration()
-		if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedRegistered || !r.Has(regIDA) {
-			t.Fatalf("outcome = %v, registered = %v", got, r.Has(regIDA))
+		w := r.OpenWindow()
+		if !r.CommitCreated(w, regIDA) || !r.Has(regIDA) {
+			t.Fatalf("registered = %v", r.Has(regIDA))
 		}
 	})
 	t.Run("listed, closed and destroyed before the reply", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.SyncPageTargets(pageInfos(regIDB))
-		tok := r.BeginEnumeration()
-		r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDA, regIDB)) // another caller lists A
-		if !r.RemoveTarget(regIDA) {                                        // tab_close confirmed
+		w := r.OpenWindow()
+		r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)) // another caller lists A
+		if !r.RemoveTarget(regIDA) {                                  // tab_close confirmed
 			t.Fatal("precondition: A was registered by the list")
 		}
-		r.RemoveTarget(regIDA) // targetDestroyed
-		if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedRemoved || r.Has(regIDA) {
-			t.Fatalf("outcome = %v, registered = %v; the late create reply revived A", got, r.Has(regIDA))
+		r.RemoveEventTarget(regIDA) // targetDestroyed
+		if r.CommitCreated(w, regIDA) || r.Has(regIDA) {
+			t.Fatal("the late create reply revived A")
 		}
 		if !r.Has(regIDB) {
 			t.Fatal("B lost")
@@ -36,152 +34,140 @@ func TestRegisterCreatedTargetOrdersReplyAgainstRemoval(t *testing.T) {
 	})
 	t.Run("destroyed before it was ever registered", func(t *testing.T) {
 		r := NewTabRegistry()
-		tok := r.BeginEnumeration()
-		r.RemoveTarget(regIDA)
-		if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedRemoved || r.Has(regIDA) {
-			t.Fatalf("outcome = %v, registered = %v", got, r.Has(regIDA))
+		w := r.OpenWindow()
+		r.RemoveEventTarget(regIDA)
+		if r.CommitCreated(w, regIDA) || r.Has(regIDA) {
+			t.Fatal("destroyed target registered")
 		}
 	})
 	t.Run("removed by an enumeration", func(t *testing.T) {
 		r := NewTabRegistry()
-		tok := r.BeginEnumeration()
+		w := r.OpenWindow()
 		r.RegisterPageTarget(regIDA) // targetCreated event
 		if _, removed := r.SyncPageTargetsDetailed(nil); len(removed) != 1 {
 			t.Fatalf("removed = %v", removed)
 		}
-		if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedRemoved || r.Has(regIDA) {
-			t.Fatalf("outcome = %v, registered = %v", got, r.Has(regIDA))
-		}
-	})
-	t.Run("registered again when the reply arrives", func(t *testing.T) {
-		r := NewTabRegistry()
-		tok := r.BeginEnumeration()
-		r.RegisterPageTarget(regIDA)
-		r.RemoveTarget(regIDA)
-		r.RegisterPageTarget(regIDA) // a current source says it exists
-		stale := r.BeginEnumeration()
-		if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedRegistered {
-			t.Fatalf("outcome = %v", got)
-		}
-		// The registration is refreshed: an enumeration in flight cannot remove it.
-		if _, removed := r.ApplyEnumeration(stale, nil); len(removed) != 0 || !r.Has(regIDA) {
-			t.Fatalf("created tab removed by a reply requested before it was committed: %v", removed)
+		if r.CommitCreated(w, regIDA) || r.Has(regIDA) {
+			t.Fatal("target dropped by an enumeration registered")
 		}
 	})
 	t.Run("enumeration without the new target is not a removal", func(t *testing.T) {
 		r := NewTabRegistry()
-		tok := r.BeginEnumeration()
-		r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDB)) // may predate the creation
-		if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedRegistered || !r.Has(regIDA) {
-			t.Fatalf("outcome = %v", got)
+		w := r.OpenWindow()
+		r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)) // may predate the creation
+		if !r.CommitCreated(w, regIDA) || !r.Has(regIDA) {
+			t.Fatal("creation refused because an overlapping enumeration did not list it")
 		}
 	})
 	t.Run("removal older than the request does not count", func(t *testing.T) {
 		r := NewTabRegistry()
 		r.RemoveTarget(regIDA)
-		tok := r.BeginEnumeration()
-		if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedRegistered {
-			t.Fatalf("outcome = %v", got)
+		w := r.OpenWindow()
+		if !r.CommitCreated(w, regIDA) {
+			t.Fatal("creation refused for a removal that predates its request")
 		}
 	})
 	t.Run("empty id", func(t *testing.T) {
 		r := NewTabRegistry()
-		if got := r.RegisterCreatedTarget(r.BeginEnumeration(), ""); got == CreatedRegistered || r.Has("") {
-			t.Fatalf("outcome = %v", got)
+		if r.CommitCreated(r.OpenWindow(), "") || r.Has("") {
+			t.Fatal("empty id registered")
+		}
+		if r.OpenWindows() != 0 {
+			t.Fatal("window not released")
 		}
 	})
 }
 
-// Once the removal of the created target may have been forgotten, the registry
-// says so instead of registering it.
-func TestRegisterCreatedTargetAfterRemovalOverflowIsUnverifiable(t *testing.T) {
-	r := NewTabRegistry()
-	tok := r.BeginEnumeration()
-	r.RemoveTarget(regIDA)
-	for i := 0; i < maxRemovedTargets; i++ {
-		r.RemoveTarget(target.ID(fmt.Sprintf("gone-%d", i)))
-	}
-	if _, ok := r.removedGen[regIDA]; ok {
-		t.Fatal("precondition: the removal of A must have been forgotten")
-	}
-	if got := r.RegisterCreatedTarget(tok, regIDA); got != CreatedUnverifiable || r.Has(regIDA) {
-		t.Fatalf("outcome = %v, registered = %v", got, r.Has(regIDA))
-	}
-	// A request sent now is newer than everything forgotten.
-	if got := r.RegisterCreatedTarget(r.BeginEnumeration(), regIDB); got != CreatedRegistered {
-		t.Fatalf("fresh creation outcome = %v", got)
-	}
-}
-
-func appliedID(i int) target.ID { return target.ID(fmt.Sprintf("DDDD%024X1234", i)) }
-
-// Polling an unchanged browser costs one remembered snapshot, and any number of
-// changing ones at most maxAppliedEnumerations.
-func TestAppliedEnumerationMemoryIsBounded(t *testing.T) {
-	r := NewTabRegistry()
-	for i := 0; i < 5*maxAppliedEnumerations; i++ {
-		r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDA, regIDB))
-	}
-	if n := len(r.appliedLog); n != 1 {
-		t.Fatalf("identical enumerations hold %d entries, want 1", n)
-	}
-	if r.appliedFloor != 0 {
-		t.Fatalf("appliedFloor = %d without any eviction", r.appliedFloor)
-	}
-	for i := 0; i < 5*maxAppliedEnumerations; i++ {
-		r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDB, appliedID(i)))
-	}
-	if n := len(r.appliedLog); n != maxAppliedEnumerations {
-		t.Fatalf("applied log holds %d entries, want %d", n, maxAppliedEnumerations)
-	}
-	if c := cap(r.appliedLog); c > 4*maxAppliedEnumerations {
-		t.Fatalf("applied log capacity grew to %d", c)
-	}
-	for i := 1; i < len(r.appliedLog); i++ {
-		if r.appliedLog[i-1].gen >= r.appliedLog[i].gen {
-			t.Fatalf("applied log out of generation order at %d", i)
-		}
-	}
-	if r.appliedFloor == 0 || r.appliedFloor >= r.appliedLog[0].gen {
-		t.Fatalf("appliedFloor = %d, oldest kept = %d", r.appliedFloor, r.appliedLog[0].gen)
-	}
-	// Bounded by the listed targets too: nothing but the last snapshot's ids
-	// stays registered.
-	if n := len(r.targetGen); n != 2 {
-		t.Fatalf("%d targets registered, want 2", n)
-	}
-}
-
-// A reply overtaken by more target-set changes than are remembered cannot be
-// checked against the forgotten ones: it registers nothing it cannot vouch
-// for, keeps returning what is registered, and a current enumeration recovers.
-func TestAppliedEnumerationOverflowIsConservative(t *testing.T) {
+// Review round 4, schedule 2: the create reply is pending, tab_close(A)
+// succeeds, and a current enumeration lists the lingering A again before the
+// reply is committed. The removal happened after the creation was requested,
+// so the reply is refused although A is registered at that moment.
+func TestCommitCreatedRefusedAfterRemovalEvenIfRegisteredAgain(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDB))
+	create := r.OpenWindow()
+	r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)) // resolves A for tab_close
+	if !r.RemoveTarget(regIDA) {
+		t.Fatal("precondition: tab_close removed A")
+	}
+	// Requested after the close; the browser still lists the closing target.
+	if snaps, _ := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)); len(snaps) != 2 || !r.Has(regIDA) {
+		t.Fatalf("precondition: lingering A listed by a current enumeration: %v", snapshotIDs(snaps))
+	}
+	if r.CommitCreated(create, regIDA) {
+		t.Fatal("creation committed although the tab was closed after it was requested")
+	}
+	// The refusal does not touch what the current enumeration registered; the
+	// next enumeration without A removes it.
+	if _, removed := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)); len(removed) != 1 || r.Has(regIDA) {
+		t.Fatalf("removed = %v, want A", removed)
+	}
+}
 
-	// All requested before the enumeration that finds X absent.
-	old := r.BeginEnumeration()
-	r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDB)) // X absent
-	// Overtaken replies that all list X (and a different extra id each): each
-	// is refused, and together they push the absence out of the memory.
-	for i := 0; i <= maxAppliedEnumerations; i++ {
-		if snaps, _ := r.ApplyEnumeration(old, pageInfos(regIDX, regIDB, appliedID(i))); len(snaps) != 1 {
-			t.Fatalf("overtaken reply %d registered %v", i, snapshotIDs(snaps))
+// Review round 4, schedule 1: the create reply is pending, a list registers A,
+// the user closes A, a newer list (only B) is requested and held, the create
+// reply is committed, then the list is applied. The commit must not make A's
+// registration newer than that list's request, or its absence would be masked.
+func TestCommitCreatedDoesNotRenewRegistrationAndMaskAbsence(t *testing.T) {
+	r := NewTabRegistry()
+	r.SyncPageTargets(pageInfos(regIDB))
+	create := r.OpenWindow()
+	r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)) // A exists: registered
+	onlyB := r.OpenWindow()                                       // requested after A was closed in the browser
+	if !r.CommitCreated(create, regIDA) || !r.Has(regIDA) {
+		t.Fatal("precondition: nothing reported A gone yet, the creation commits")
+	}
+	snaps, removed := r.ApplyEnumeration(onlyB, pageInfos(regIDB))
+	if len(removed) != 1 || removed[0].TargetID != regIDA || r.Has(regIDA) {
+		t.Fatalf("late create commit masked the absence of A: snaps=%v removed=%v", snapshotIDs(snaps), removed)
+	}
+	if _, ok := r.Lookup(string(regIDA)); ok {
+		t.Fatal("A still resolves")
+	}
+	if !r.Has(regIDB) {
+		t.Fatal("B lost")
+	}
+}
+
+// A creation committed first is still protected from enumerations requested
+// before the commit: they may predate the creation.
+func TestCommitCreatedProtectsNewTargetFromOverlappingEnumeration(t *testing.T) {
+	r := NewTabRegistry()
+	r.SyncPageTargets(pageInfos(regIDB))
+	stale := r.OpenWindow()
+	create := r.OpenWindow()
+	if !r.CommitCreated(create, regIDA) {
+		t.Fatal("creation refused")
+	}
+	if _, removed := r.ApplyEnumeration(stale, pageInfos(regIDB)); len(removed) != 0 || !r.Has(regIDA) {
+		t.Fatalf("new tab removed by an overlapping enumeration: %v", removed)
+	}
+	if _, removed := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)); len(removed) != 1 {
+		t.Fatalf("enumeration requested after the commit removed %v, want A", removed)
+	}
+}
+
+// Whatever the interleaving of the commit with the removal of the same target,
+// a removal reported while the creation was in flight wins.
+func TestConcurrentCommitCreatedAndRemoval(t *testing.T) {
+	r := NewTabRegistry()
+	r.RegisterPageTarget(regIDB)
+	for i := 0; i < 2000; i++ {
+		w := r.OpenWindow()
+		list := r.OpenWindow()
+		var wg sync.WaitGroup
+		wg.Add(3)
+		var committed bool
+		go func() { defer wg.Done(); committed = r.CommitCreated(w, regIDA) }()
+		go func() { defer wg.Done(); r.ApplyEnumeration(list, pageInfos(regIDA, regIDB)) }()
+		go func() { defer wg.Done(); r.RemoveTarget(regIDA) }()
+		wg.Wait()
+		_ = committed // true only when the commit ran before the removal
+		if r.Has(regIDA) {
+			t.Fatalf("iteration %d: removed target is registered", i)
 		}
-	}
-	if r.appliedFloor <= old.gen {
-		t.Fatal("precondition: the enumeration that found X absent must have been forgotten")
-	}
-	for _, e := range r.appliedLog {
-		if _, ok := e.present[regIDX]; !ok {
-			t.Fatal("precondition: every remembered enumeration must list X")
+		if r.OpenWindows() != 0 || !r.Has(regIDB) {
+			t.Fatalf("iteration %d: windows=%d B=%v", i, r.OpenWindows(), r.Has(regIDB))
 		}
-	}
-	snaps, removed := r.ApplyEnumeration(old, pageInfos(regIDX, regIDB))
-	if r.Has(regIDX) || len(snaps) != 1 || !hasSnapshot(snaps, regIDB) || len(removed) != 0 {
-		t.Fatalf("unverifiable reply: snaps=%v removed=%v", snapshotIDs(snaps), removed)
-	}
-	if snaps, _ := r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDX, regIDB)); !r.Has(regIDX) || len(snaps) != 2 {
-		t.Fatalf("current enumeration after overflow = %v, want X and B", snapshotIDs(snaps))
 	}
 }

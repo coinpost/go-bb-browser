@@ -252,8 +252,7 @@ func TestLateTabNewReplyKeepsTabStillOpen(t *testing.T) {
 			// A stale list that predates the creation says nothing about A.
 			name: "enumeration without the new tab applied",
 			meanwhile: func(t *testing.T, srv *Server, conn *enumConn) {
-				tok := srv.beginTargetEnumeration()
-				srv.syncTabsFromTargets(tok, []*target.Info{{TargetID: idB, Type: "page"}})
+				srv.applyEnumeration(nil, srv.tabs.OpenWindow(), []*target.Info{{TargetID: idB, Type: "page"}})
 			},
 		},
 	}

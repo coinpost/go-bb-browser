@@ -54,13 +54,11 @@ func restartIdleServer(t *testing.T, old *Server, fc *fakeConn, stateDir string)
 	return srv
 }
 
-// reconcileFresh runs one successful enumeration + managed reconciliation the
-// way connectBrowserLocked / runTargetSync do, for a target list that nothing
-// overlaps: candidates and token first, then the list is applied.
+// reconcileFresh applies one successful enumeration (with its managed
+// recovery) the way connectBrowserLocked / runTargetSync do, for a target list
+// that nothing overlaps.
 func reconcileFresh(srv *Server, infos []*target.Info) {
-	candidates := srv.beginManagedReconcile()
-	tok := srv.beginTargetEnumeration()
-	srv.reconcileIdleFromLog(candidates, srv.syncTabsFromTargets(tok, infos))
+	srv.applyEnumeration(nil, srv.tabs.OpenWindow(), infos)
 }
 
 func hasTarget(fc *fakeConn, id target.ID) bool {
@@ -279,7 +277,7 @@ func TestTransientCloseFailureKeepsPersistedMembership(t *testing.T) {
 func TestFailedEnumerationKeepsPersistedMembership(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, short := newManagedTabServer(t, dir)
-	srv.syncInitialTargets(noopDirtyMarker{}, srv.beginTargetEnumeration(), nil, errors.New("Target.getTargets: timeout"))
+	srv.syncInitialTargets(noopDirtyMarker{}, srv.tabs.OpenWindow(), nil, errors.New("Target.getTargets: timeout"))
 	if _, ok := srv.store.ReplayManagedTabActivity()[short]; !ok {
 		t.Fatal("failed enumeration retired a managed tab")
 	}

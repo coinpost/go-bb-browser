@@ -124,6 +124,8 @@ type Session struct {
 
 	targetEvents chan TargetEvent
 	targetDirty  atomic.Bool
+	// targetStamp, when set, supplies TargetEvent.Stamp (see SetTargetEventStamp).
+	targetStamp atomic.Pointer[func() uint64]
 }
 
 func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
@@ -139,6 +141,11 @@ func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
 type TargetEvent struct {
 	Info      *target.Info
 	Destroyed target.ID
+	// Stamp is the consumer's clock when the event was read from the browser
+	// connection (zero until SetTargetEventStamp installs a clock). The event
+	// waits in a queue; the stamp lets the consumer tell which of its own state
+	// changes are newer than the event.
+	Stamp uint64
 }
 
 type tabPoolEntry struct {
@@ -326,7 +333,25 @@ func (s *Session) listenTargetEvents() {
 	})
 }
 
+// SetTargetEventStamp installs the clock read for every lifecycle event at the
+// moment chromedp's reader hands it over, which is in connection order: an
+// event the browser sent before a command reply is stamped before the caller
+// of that command sees the reply. clock must not block.
+func (s *Session) SetTargetEventStamp(clock func() uint64) {
+	if s == nil {
+		return
+	}
+	if clock == nil {
+		s.targetStamp.Store(nil)
+		return
+	}
+	s.targetStamp.Store(&clock)
+}
+
 func (s *Session) enqueueTargetEvent(event TargetEvent) {
+	if clock := s.targetStamp.Load(); clock != nil {
+		event.Stamp = (*clock)()
+	}
 	select {
 	case s.targetEvents <- event:
 	default:

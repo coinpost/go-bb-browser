@@ -673,12 +673,9 @@ func TestFullIDIdentityFlowsThroughIdleAuditAndRecovery(t *testing.T) {
 	// Restart: B was closed while the daemon was down, A is still there.
 	conn.drop(fullIDB)
 	restarted := newIDServer(t, conn, dir)
-	candidates := restarted.beginManagedReconcile()
-	snaps, err := restarted.enumerateTabs(t.Context(), conn)
-	if err != nil {
+	if _, err := restarted.enumerateTabs(t.Context(), conn); err != nil {
 		t.Fatal(err)
 	}
-	restarted.reconcileIdleFromLog(candidates, snaps)
 	managed := restarted.tabIdle.Snapshot()
 	if len(managed) != 1 {
 		t.Fatalf("recovered managed tabs = %v, want only %q", managed, fullIDA)
@@ -711,7 +708,6 @@ func TestLegacyShortIDLogIsNotAdoptedOnRecovery(t *testing.T) {
 
 	conn := newIDConn(fullIDA, fullIDB, "1234")
 	srv := newIDServer(t, conn, dir)
-	candidates := srv.beginManagedReconcile()
 	snaps, err := srv.enumerateTabs(t.Context(), conn)
 	if err != nil {
 		t.Fatal(err)
@@ -719,7 +715,6 @@ func TestLegacyShortIDLogIsNotAdoptedOnRecovery(t *testing.T) {
 	if len(snaps) != 3 {
 		t.Fatalf("snapshots = %v", snaps)
 	}
-	srv.reconcileIdleFromLog(candidates, snaps)
 	if managed := srv.tabIdle.Snapshot(); len(managed) != 0 {
 		t.Fatalf("legacy short-id log adopted tabs for idle cleanup: %v", managed)
 	}

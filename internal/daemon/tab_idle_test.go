@@ -543,7 +543,7 @@ func TestEnumerationRemovalKeepsLog(t *testing.T) {
 
 	// A fresh empty enumeration removes the tab from memory (registry + idle
 	// tracking) but must not touch the persisted log.
-	srv.syncTabsFromTargets(srv.beginTargetEnumeration(), nil)
+	srv.applyEnumeration(nil, srv.tabs.OpenWindow(), nil)
 	if left := srv.tabIdle.Snapshot(); len(left) != 0 {
 		t.Fatalf("idle tracking retained removed tab: %v", left)
 	}

@@ -434,6 +434,16 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
+	// Selecting is an operation on the tab like any other: it takes the tab's
+	// operation lock, so it cannot succeed (and renew the idle clock) while an
+	// idle close of the same tab is in progress. The lock is held until the
+	// response, renewal included, is done.
+	unlock, locked := s.lockTab(ctx, tab)
+	if !locked {
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "request timed out", tabLockTimeoutData())
+		return
+	}
+	defer unlock()
 	_, err := s.enumerateTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_select targets failed", "err", err)
@@ -473,11 +483,15 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	initial := strings.TrimSpace(p.URL)
-	// Token before the request: the new target exists in the browser, and can
+	// Window before the request: the new target exists in the browser, and can
 	// be listed, closed and destroyed, before this handler sees the reply.
-	tok := s.beginTargetEnumeration()
+	win := s.tabs.OpenWindow()
 	tid, err := createPageTarget(ctx, conn, initial, p.Silent)
+	if err == nil && tid == "" {
+		err = errors.New("Target.createTarget returned no target id")
+	}
 	if err != nil {
+		s.tabs.Abandon(win)
 		s.logger.Error("tab_new create target failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
 			Error: "failed to create tab",
@@ -486,18 +500,14 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	pinTarget(ctx, tid)
-	switch s.commitCreatedTab(ctx, conn, tok, tid) {
-	case createdTabClosed:
+	if !s.commitCreatedTab(win, tid) {
+		// The tab was reported gone while it was being created. Make sure of
+		// it: one bounded close of exactly this id, so no unmanaged tab is
+		// left behind silently.
+		cleanup := s.rollbackCreatedTab(ctx, conn, tid)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "tab closed before tab_new completed", &protocol.ErrData{
 			Error:  "tab closed before tab_new completed",
-			Hint:   "the new tab was closed (tab_close, idle cleanup, or in the browser) while it was being created; call tab_new again",
-			Method: protocol.MethodTabNew,
-		})
-		return
-	case createdTabUnverified:
-		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
-			Error:  "failed to create tab",
-			Hint:   "the new tab could not be confirmed open; call tab_list, then tab_new again if needed",
+			Hint:   fmt.Sprintf("the new tab %s was closed (tab_close, idle cleanup, or in the browser) while it was being created; cleanup: %s; call tab_new again", tid, cleanup),
 			Method: protocol.MethodTabNew,
 		})
 		return

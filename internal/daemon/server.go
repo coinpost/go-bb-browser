@@ -47,6 +47,14 @@ type Server struct {
 	obsSink  *obsSink
 	tabIdle  *state.TabIdleTracker
 
+	// lifeMu serializes the application of lifecycle evidence to the registry
+	// and everything keyed by a registered target (see tab_idle.go). Lock
+	// order: lifeMu before the registry / idle tracker / store locks.
+	lifeMu sync.Mutex
+	// managedRecovered is set once the managed tabs persisted by a previous
+	// daemon process have been settled. Guarded by lifeMu.
+	managedRecovered bool
+
 	tabMuOps    sync.Mutex
 	tabCDPLocks map[string]*tabLockEntry
 

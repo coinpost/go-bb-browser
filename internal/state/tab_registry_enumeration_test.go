@@ -16,11 +16,11 @@ func pageInfos(ids ...target.ID) []*target.Info {
 	return out
 }
 
-func TestApplyEnumerationKeepsTargetsRegisteredAfterToken(t *testing.T) {
+func TestApplyEnumerationKeepsTargetsRegisteredAfterWindowOpened(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos("AAAA0001", "AAAA0002"))
 
-	tok := r.BeginEnumeration()
+	tok := r.OpenWindow()
 	// Browser snapshot taken here: AAAA0002 is already gone, BBBB0003 not yet created.
 	stale := pageInfos("AAAA0001")
 	const newID = target.ID("BBBB0003")
@@ -44,7 +44,7 @@ func TestApplyEnumerationKeepsTargetsRegisteredAfterToken(t *testing.T) {
 	}
 
 	// An enumeration requested after the registration is authoritative for it.
-	_, removed = r.ApplyEnumeration(r.BeginEnumeration(), stale)
+	_, removed = r.ApplyEnumeration(r.OpenWindow(), stale)
 	if len(removed) != 1 || removed[0].TargetID != "BBBB0003" {
 		t.Fatalf("removed = %#v, want BBBB0003", removed)
 	}
@@ -56,24 +56,31 @@ func TestApplyEnumerationKeepsTargetsRegisteredAfterToken(t *testing.T) {
 	}
 }
 
-func TestApplyEnumerationRespectsExplicitReRegistration(t *testing.T) {
+// A target that is already registered is not made "newer" by later evidence
+// that it exists (an event, another listing): it was registered before the
+// enumeration was requested, so a reply that does not list it proves it gone.
+// Renewing it would let late evidence hide a real absence.
+func TestExistenceEvidenceDoesNotRenewRegisteredTarget(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos("AAAA0001"))
 
-	tok := r.BeginEnumeration()
+	w := r.OpenWindow()
 	r.RegisterPageTarget("AAAA0001")
-	if _, removed := r.ApplyEnumeration(tok, nil); len(removed) != 0 {
-		t.Fatalf("removed = %#v, want none: target was re-registered after the token", removed)
+	if !r.RegisterEvent(r.EventStamp(), "AAAA0001") {
+		t.Fatal("event for a registered target must report it registered")
 	}
-	if _, ok := r.Lookup("AAAA0001"); !ok {
-		t.Fatal("explicitly re-registered target was removed by an older enumeration")
+	r.ApplyEnumeration(r.OpenWindow(), pageInfos("AAAA0001")) // listed again meanwhile
+	later := r.OpenWindow()
+	if _, removed := r.ApplyEnumeration(later, nil); len(removed) != 1 || r.Has("AAAA0001") {
+		t.Fatalf("removed = %#v, want AAAA0001: it was registered before the request", removed)
 	}
+	r.Abandon(w)
 }
 
 func TestApplyEnumerationProtectsTargetsAddedByNewerEnumeration(t *testing.T) {
 	r := NewTabRegistry()
-	older := r.BeginEnumeration()
-	newer := r.BeginEnumeration()
+	older := r.OpenWindow()
+	newer := r.OpenWindow()
 
 	r.ApplyEnumeration(newer, pageInfos("AAAA0001"))
 	if _, removed := r.ApplyEnumeration(older, nil); len(removed) != 0 {
@@ -84,27 +91,40 @@ func TestApplyEnumerationProtectsTargetsAddedByNewerEnumeration(t *testing.T) {
 	}
 	// Merely being listed again does not renew protection: the next
 	// enumeration requested afterwards still removes it.
-	tok := r.BeginEnumeration()
-	r.ApplyEnumeration(r.BeginEnumeration(), pageInfos("AAAA0001"))
+	tok := r.OpenWindow()
+	r.ApplyEnumeration(r.OpenWindow(), pageInfos("AAAA0001"))
 	if _, removed := r.ApplyEnumeration(tok, nil); len(removed) != 1 {
 		t.Fatalf("removed = %#v, want AAAA0001", removed)
 	}
 }
 
-func TestApplyEnumerationZeroTokenNeverRemoves(t *testing.T) {
+// A window is one request: once it ended (applied, committed or abandoned) a
+// second reply for it has nothing to stand on and changes nothing.
+func TestEndedWindowAppliesNothing(t *testing.T) {
 	r := NewTabRegistry()
 	r.RegisterPageTarget("AAAA0001")
-	snaps, removed := r.ApplyEnumeration(EnumerationToken{}, pageInfos("AAAA0002"))
-	if len(removed) != 0 {
-		t.Fatalf("removed = %#v, want none", removed)
-	}
-	if len(snaps) != 1 || snaps[0].TargetID != "AAAA0002" {
-		t.Fatalf("snapshots = %#v", snaps)
-	}
-	for _, id := range []target.ID{"AAAA0001", "AAAA0002"} {
-		if !r.Has(id) {
-			t.Fatalf("%s not registered", id)
+	for name, end := range map[string]func(*Window){
+		"abandoned": func(w *Window) { r.Abandon(w) },
+		"applied":   func(w *Window) { r.ApplyEnumeration(w, pageInfos("AAAA0001")) },
+		"committed": func(w *Window) { r.CommitCreated(w, "AAAA0001") },
+	} {
+		w := r.OpenWindow()
+		end(w)
+		snaps, removed := r.ApplyEnumeration(w, pageInfos("AAAA0002"))
+		if len(removed) != 0 || len(snaps) != 0 || r.Has("AAAA0002") || !r.Has("AAAA0001") {
+			t.Fatalf("%s window: snaps=%v removed=%#v", name, snapshotIDs(snaps), removed)
 		}
+		if r.CommitCreated(w, "AAAA0003") || r.Has("AAAA0003") {
+			t.Fatalf("%s window committed a creation", name)
+		}
+		r.Abandon(w) // idempotent
+	}
+	if n := r.OpenWindows(); n != 0 {
+		t.Fatalf("%d windows left open", n)
+	}
+	// A nil window stands for a request made right now.
+	if _, removed := r.ApplyEnumeration(nil, pageInfos("AAAA0002")); len(removed) != 1 || !r.Has("AAAA0002") {
+		t.Fatalf("nil window: removed=%#v", removed)
 	}
 }
 
@@ -131,7 +151,7 @@ func TestApplyEnumerationDoesNotReviveTargetRemovedAfterToken(t *testing.T) {
 		t.Fatal("select failed")
 	}
 
-	tok := r.BeginEnumeration()
+	tok, tok2 := r.OpenWindow(), r.OpenWindow()
 	stale := pageInfos(regIDA, regIDB) // browser snapshot taken while A still existed
 	if !r.RemoveTarget(regIDA) {
 		t.Fatal("precondition: A not removed")
@@ -153,14 +173,14 @@ func TestApplyEnumerationDoesNotReviveTargetRemovedAfterToken(t *testing.T) {
 	if r.Select(regIDA) || r.Selected() != "" {
 		t.Fatalf("selection = %q, want none", r.Selected())
 	}
-	// Applying the same stale reply again changes nothing either.
-	if snaps, _ := r.ApplyEnumeration(tok, stale); len(snaps) != 1 || r.Has(regIDA) {
+	// Another reply requested before the removal changes nothing either.
+	if snaps, _ := r.ApplyEnumeration(tok2, stale); len(snaps) != 1 || r.Has(regIDA) {
 		t.Fatalf("second stale apply revived A: %v", snapshotIDs(snaps))
 	}
 
 	// An enumeration requested after the removal is current for A: if the
 	// browser lists that id then, it is a live target.
-	snaps, _ = r.ApplyEnumeration(r.BeginEnumeration(), stale)
+	snaps, _ = r.ApplyEnumeration(r.OpenWindow(), stale)
 	if len(snaps) != 2 || !r.Has(regIDA) {
 		t.Fatalf("current enumeration did not register A: %v", snapshotIDs(snaps))
 	}
@@ -170,8 +190,8 @@ func TestApplyEnumerationRemovalByNewerEnumerationWins(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDA, regIDB))
 
-	older := r.BeginEnumeration() // snapshot: A and B
-	newer := r.BeginEnumeration() // snapshot: only B
+	older := r.OpenWindow() // snapshot: A and B
+	newer := r.OpenWindow() // snapshot: only B
 	if _, removed := r.ApplyEnumeration(newer, pageInfos(regIDB)); len(removed) != 1 || removed[0].TargetID != regIDA {
 		t.Fatalf("removed = %#v, want A", removed)
 	}
@@ -185,12 +205,12 @@ func TestApplyEnumerationKeepsTargetReRegisteredAfterRemoval(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDA))
 
-	tok := r.BeginEnumeration()
+	toks := []*Window{r.OpenWindow(), r.OpenWindow()}
 	r.RemoveTarget(regIDA)
-	r.RegisterPageTarget(regIDA) // announced again: live, newer than the token
+	r.RegisterPageTarget(regIDA) // announced again: live, newer than the requests
 
-	for _, infos := range [][]*target.Info{pageInfos(regIDA), nil} {
-		snaps, removed := r.ApplyEnumeration(tok, infos)
+	for i, infos := range [][]*target.Info{pageInfos(regIDA), nil} {
+		snaps, removed := r.ApplyEnumeration(toks[i], infos)
 		if len(removed) != 0 || !r.Has(regIDA) {
 			t.Fatalf("re-registered target removed by an older enumeration (infos=%d): %#v", len(infos), removed)
 		}
@@ -199,7 +219,7 @@ func TestApplyEnumerationKeepsTargetReRegisteredAfterRemoval(t *testing.T) {
 		}
 	}
 	// And a removal after that re-registration is honoured again.
-	tok = r.BeginEnumeration()
+	tok := r.OpenWindow()
 	r.RemoveTarget(regIDA)
 	if snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA)); len(snaps) != 0 || r.Has(regIDA) {
 		t.Fatal("second removal not honoured")
@@ -210,7 +230,7 @@ func TestApplyEnumerationKeepsTargetReRegisteredAfterRemoval(t *testing.T) {
 // event overtakes the first enumeration that lists it).
 func TestApplyEnumerationSkipsTargetReportedGoneBeforeRegistration(t *testing.T) {
 	r := NewTabRegistry()
-	tok := r.BeginEnumeration()
+	tok := r.OpenWindow()
 	if r.RemoveTarget(regIDA) {
 		t.Fatal("unregistered target reported as removed")
 	}
@@ -218,78 +238,108 @@ func TestApplyEnumerationSkipsTargetReportedGoneBeforeRegistration(t *testing.T)
 	if len(snaps) != 1 || snaps[0].TargetID != regIDB || r.Has(regIDA) {
 		t.Fatalf("snapshots = %v, want only B", snapshotIDs(snaps))
 	}
-	// Repeated reports for an id that stays unregistered take one slot.
-	before := len(r.removedLog)
+	// Repeated reports for an id that stays unregistered take one slot in a
+	// window, and none at all once no request is in flight.
+	w := r.OpenWindow()
 	for i := 0; i < 10; i++ {
 		r.RemoveTarget(regIDA)
+		r.RemoveEventTarget(regIDA)
 		r.RemoveTarget("")
 	}
-	if len(r.removedLog) != before {
-		t.Fatalf("removal memory grew from %d to %d", before, len(r.removedLog))
+	if len(w.removed) != 1 {
+		t.Fatalf("window holds %d removals for one id", len(w.removed))
+	}
+	r.Abandon(w)
+	if r.OpenWindows() != 0 {
+		t.Fatal("window not released")
 	}
 }
 
-func TestRemovalMemoryIsBounded(t *testing.T) {
+// The registry keeps no history. What it knows about removals lives in the
+// windows of the requests in flight: any amount of churn with no request in
+// flight leaves nothing behind, and a request in flight sees exactly the
+// removals of its own window, however many there were.
+func TestRemovalEvidenceLivesAndDiesWithWindows(t *testing.T) {
 	r := NewTabRegistry()
 	r.RegisterPageTarget(regIDB)
-	ancient := r.BeginEnumeration()
 
 	id := func(i int) target.ID { return target.ID(fmt.Sprintf("CCCC%024X1234", i)) }
-	const churn = 3*maxRemovedTargets + 7
+	const churn = 5000
 	for i := 0; i < churn; i++ {
 		r.RegisterPageTarget(id(i))
 		if !r.RemoveTarget(id(i)) {
 			t.Fatalf("remove %d failed", i)
 		}
-		// Removing, re-registering and removing the same id again must not
-		// leave a stale entry behind when the older one is forgotten.
-		if i%5 == 0 {
-			r.RegisterPageTarget(id(i))
-			r.RemoveTarget(id(i))
-		}
 	}
-	if n := len(r.removedLog); n != maxRemovedTargets {
-		t.Fatalf("removal log holds %d entries, want %d", n, maxRemovedTargets)
-	}
-	if n := len(r.removedGen); n > maxRemovedTargets {
-		t.Fatalf("removal index holds %d entries, want at most %d", n, maxRemovedTargets)
-	}
-	if c := cap(r.removedLog); c > 4*maxRemovedTargets {
-		t.Fatalf("removal log capacity grew to %d", c)
-	}
-	for _, e := range r.removedLog {
-		if g := r.removedGen[e.id]; g < e.gen {
-			t.Fatalf("index lost %s: has %d, log has %d", e.id, g, e.gen)
-		}
-	}
-	if len(r.targetGen) != 1 {
-		t.Fatalf("registered = %d, want only B", len(r.targetGen))
+	if len(r.targetGen) != 1 || r.OpenWindows() != 0 {
+		t.Fatalf("registered = %d, windows = %d; want only B and no window", len(r.targetGen), r.OpenWindows())
 	}
 
-	// An enumeration older than the forgotten removals cannot tell which ids
-	// were removed since, so it registers none: neither a forgotten removed id
-	// nor one it has never seen. Registered targets are still reported.
+	// A request overtaken by any number of removals is still exact: it
+	// registers none of the ids removed since it was sent, and does register a
+	// target that was never removed. There is no "too old to verify".
+	ancient := r.OpenWindow()
+	for i := churn; i < 2*churn; i++ {
+		r.RegisterPageTarget(id(i))
+		r.RemoveTarget(id(i))
+		if i%5 == 0 { // again, after a re-registration
+			r.RegisterPageTarget(id(i))
+			r.RemoveEventTarget(id(i))
+		}
+	}
+	if len(ancient.removed) != churn {
+		t.Fatalf("window recorded %d removals, want %d (one per id)", len(ancient.removed), churn)
+	}
 	never := target.ID("DDDD0000000000000000000000AB1234")
-	snaps, removed := r.ApplyEnumeration(ancient, pageInfos(id(0), id(churn-1), never, regIDB))
-	if ids := snapshotIDs(snaps); len(ids) != 1 || ids[0] != regIDB {
-		t.Fatalf("ancient enumeration snapshots = %v, want only B", ids)
+	snaps, removed := r.ApplyEnumeration(ancient, pageInfos(id(churn), id(2*churn-1), never, regIDB))
+	if ids := snapshotIDs(snaps); len(ids) != 2 || !r.Has(never) || !r.Has(regIDB) {
+		t.Fatalf("overtaken enumeration snapshots = %v, want B and the never-removed target", ids)
 	}
-	if len(removed) != 0 || r.Has(id(0)) || r.Has(id(churn-1)) || r.Has(never) {
-		t.Fatal("ancient enumeration registered a target it cannot vouch for")
+	if len(removed) != 0 || r.Has(id(churn)) || r.Has(id(2*churn-1)) {
+		t.Fatal("overtaken enumeration registered a removed target")
 	}
-	// A token inside the remembered window is still exact: only the id removed
-	// after it is filtered.
-	recent := r.BeginEnumeration()
-	r.RegisterPageTarget(id(churn))
-	r.RemoveTarget(id(churn))
-	snaps, _ = r.ApplyEnumeration(recent, pageInfos(id(churn), never, regIDB))
-	if ids := snapshotIDs(snaps); len(ids) != 2 || r.Has(id(churn)) || !r.Has(never) {
-		t.Fatalf("recent enumeration snapshots = %v, want B and the never-removed target", ids)
+	if r.OpenWindows() != 0 {
+		t.Fatal("applied window still held")
 	}
-	// A current enumeration is authoritative for everything it lists.
-	snaps, _ = r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(id(0), id(churn), never, regIDB))
+	// Removals from before a request do not concern it: a current enumeration
+	// is authoritative for everything it lists.
+	snaps, _ = r.ApplyEnumeration(r.OpenWindow(), pageInfos(id(0), id(churn), never, regIDB))
 	if len(snaps) != 4 {
 		t.Fatalf("current enumeration snapshots = %v", snapshotIDs(snaps))
+	}
+}
+
+// Every way a request can end releases its window, so the evidence kept is
+// bounded by the requests actually in flight.
+func TestEveryRequestOutcomeReleasesItsWindow(t *testing.T) {
+	r := NewTabRegistry()
+	var ws []*Window
+	for i := 0; i < 6; i++ {
+		ws = append(ws, r.OpenWindow())
+	}
+	if r.OpenWindows() != 6 {
+		t.Fatalf("open = %d", r.OpenWindows())
+	}
+	r.RemoveTarget(regIDA)
+	r.ApplyEnumeration(ws[0], pageInfos(regIDB))
+	for _, w := range ws[1:] {
+		if _, ok := w.removed[regIDA]; !ok || !w.narrowed || len(w.listed) != 1 {
+			t.Fatalf("window in flight missed evidence: removed=%v narrowed=%v listed=%v", w.removed, w.narrowed, w.listed)
+		}
+	}
+	r.ApplyEnumeration(ws[1], nil)
+	r.CommitCreated(ws[2], regIDA) // refused: removed in its window
+	r.CommitCreated(ws[3], "CCCC")
+	r.Abandon(ws[4])
+	r.Abandon(ws[5])
+	r.Abandon(ws[5])
+	if r.OpenWindows() != 0 {
+		t.Fatalf("open = %d, want 0", r.OpenWindows())
+	}
+	// Ended windows are no longer fed.
+	r.RemoveTarget("CCCC")
+	if _, ok := ws[4].removed["CCCC"]; ok {
+		t.Fatal("ended window still collects evidence")
 	}
 }
 
@@ -303,14 +353,14 @@ func TestConcurrentRemovalAndStaleApply(t *testing.T) {
 		gone := target.ID(fmt.Sprintf("AAAA%024X1234", i))
 		fresh := target.ID(fmt.Sprintf("EEEE%024X1234", i))
 		r.RegisterPageTarget(gone)
-		tok := r.BeginEnumeration()
+		tok, tok2 := r.OpenWindow(), r.OpenWindow()
 		stale := pageInfos(gone, regIDB)
 
 		var wg sync.WaitGroup
 		wg.Add(4)
 		go func() { defer wg.Done(); r.RemoveTarget(gone) }()
 		go func() { defer wg.Done(); r.ApplyEnumeration(tok, stale) }()
-		go func() { defer wg.Done(); r.ApplyEnumeration(tok, stale) }()
+		go func() { defer wg.Done(); r.ApplyEnumeration(tok2, stale) }()
 		go func() { defer wg.Done(); r.RegisterPageTarget(fresh) }()
 		wg.Wait()
 
@@ -334,17 +384,19 @@ func TestRepeatedRemovalRefreshesRemovalGeneration(t *testing.T) {
 		t.Fatal("first removal of a registered target must report true")
 	}
 
-	tok := r.BeginEnumeration()
+	toks := []*Window{r.OpenWindow(), r.OpenWindow()}
 	stale := pageInfos(regIDA, regIDB) // the browser had not destroyed A yet
-	if r.RemoveTarget(regIDA) {
+	if r.RemoveEventTarget(regIDA) {
 		t.Fatal("repeated removal of an unregistered target must report false")
 	}
-	if tok2 := r.BeginEnumeration(); tok2.gen <= tok.gen {
-		t.Fatalf("repeated removal did not advance the generation (%d -> %d)", tok.gen, tok2.gen)
+	if tok2 := r.OpenWindow(); tok2.gen <= toks[0].gen {
+		t.Fatalf("repeated removal did not advance the clock (%d -> %d)", toks[0].gen, tok2.gen)
+	} else {
+		r.Abandon(tok2)
 	}
 
 	for i := 0; i < 2; i++ {
-		snaps, removed := r.ApplyEnumeration(tok, stale)
+		snaps, removed := r.ApplyEnumeration(toks[i], stale)
 		if ids := snapshotIDs(snaps); len(ids) != 1 || ids[0] != regIDB {
 			t.Fatalf("apply %d: snapshots = %v, want only %s", i, ids, regIDB)
 		}
@@ -357,7 +409,7 @@ func TestRepeatedRemovalRefreshesRemovalGeneration(t *testing.T) {
 	}
 
 	// An enumeration requested after the last removal is current for A.
-	if snaps, _ := r.ApplyEnumeration(r.BeginEnumeration(), stale); len(snaps) != 2 || !r.Has(regIDA) {
+	if snaps, _ := r.ApplyEnumeration(r.OpenWindow(), stale); len(snaps) != 2 || !r.Has(regIDA) {
 		t.Fatalf("current enumeration did not register A: %v", snapshotIDs(snaps))
 	}
 }
@@ -370,7 +422,7 @@ func TestRepeatedRemovalOfNeverRegisteredTargetRefreshes(t *testing.T) {
 	if r.RemoveTarget(regIDA) {
 		t.Fatal("unregistered target reported as removed")
 	}
-	tok := r.BeginEnumeration()
+	tok := r.OpenWindow()
 	if r.RemoveTarget(regIDA) {
 		t.Fatal("unregistered target reported as removed")
 	}
@@ -380,9 +432,8 @@ func TestRepeatedRemovalOfNeverRegisteredTargetRefreshes(t *testing.T) {
 	}
 }
 
-// Refreshing must not cost memory: however often one id is reported, it holds
-// one slot, and it neither evicts other removals nor makes older enumerations
-// unverifiable.
+// Repeated reports cost no memory: however often one id is reported, it holds
+// one slot per window in flight, and other removals stay recorded.
 func TestRepeatedRemovalStaysBounded(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDA, regIDB))
@@ -390,37 +441,26 @@ func TestRepeatedRemovalStaysBounded(t *testing.T) {
 	never := target.ID("DDDD0000000000000000000000AB1234")
 	r.RegisterPageTarget(other)
 
-	old := r.BeginEnumeration()
+	old := r.OpenWindow()
 	if !r.RemoveTarget(other) || !r.RemoveTarget(regIDA) {
 		t.Fatal("precondition: removals failed")
 	}
-	var tok EnumerationToken
-	const repeats = 3*maxRemovedTargets + 7
+	var tok *Window
+	const repeats = 3079
 	for i := 0; i < repeats; i++ {
 		if i == repeats-1 {
-			tok = r.BeginEnumeration()
+			tok = r.OpenWindow()
 		}
-		if r.RemoveTarget(regIDA) {
+		if r.RemoveEventTarget(regIDA) {
 			t.Fatalf("repeat %d reported a registered target", i)
 		}
 	}
-	if len(r.removedLog) != 2 || len(r.removedGen) != 2 {
-		t.Fatalf("removal memory: log=%d index=%d, want 2 and 2", len(r.removedLog), len(r.removedGen))
-	}
-	if c := cap(r.removedLog); c > 4*maxRemovedTargets {
-		t.Fatalf("removal log capacity grew to %d", c)
-	}
-	if r.removedFloor != 0 {
-		t.Fatalf("removedFloor = %d: repeated reports evicted real removals", r.removedFloor)
-	}
-	if last := r.removedLog[len(r.removedLog)-1]; last.id != regIDA || last.gen != r.removedGen[regIDA] || last.gen <= tok.gen {
-		t.Fatalf("latest removal = %+v (index %d), want A newer than %d", last, r.removedGen[regIDA], tok.gen)
+	if len(old.removed) != 2 || len(tok.removed) != 1 {
+		t.Fatalf("window evidence: old=%d tok=%d, want 2 and 1", len(old.removed), len(tok.removed))
 	}
 
-	// The older removal was not crowded out, and the old token stays exact: it
-	// filters both removed ids and still registers a target never removed.
-	// (Applied before the newer reply below: once an enumeration that does not
-	// list a target has been applied, an older reply no longer registers it.)
+	// The older removal was not crowded out, and the old request stays exact:
+	// it filters both removed ids and still registers a target never removed.
 	snaps, _ := r.ApplyEnumeration(old, pageInfos(regIDA, other, never, regIDB))
 	if ids := snapshotIDs(snaps); len(ids) != 2 || r.Has(regIDA) || r.Has(other) || !r.Has(never) {
 		t.Fatalf("old enumeration snapshots = %v, want B and the never-removed target", ids)
@@ -429,36 +469,99 @@ func TestRepeatedRemovalStaysBounded(t *testing.T) {
 	if snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA, regIDB)); len(snaps) != 1 || r.Has(regIDA) {
 		t.Fatalf("snapshots = %v, want only B", snapshotIDs(snaps))
 	}
+	if r.OpenWindows() != 0 {
+		t.Fatal("windows left open")
+	}
 }
 
-// Past the bound, a refreshed id keeps its place among the newest removals
-// while the oldest ones are forgotten.
-func TestRepeatedRemovalSurvivesOverflow(t *testing.T) {
+// A removal reported again and again stays in force for a request in flight
+// whatever else is removed meanwhile.
+func TestRepeatedRemovalSurvivesChurn(t *testing.T) {
 	r := NewTabRegistry()
 	r.RegisterPageTarget(regIDA)
 	r.RemoveTarget(regIDA)
 	id := func(i int) target.ID { return target.ID(fmt.Sprintf("CCCC%024X1234", i)) }
-	var tok EnumerationToken
-	for i := 0; i < 2*maxRemovedTargets; i++ {
+	var tok *Window
+	const n = 2048
+	for i := 0; i < n; i++ {
 		r.RegisterPageTarget(id(i))
 		r.RemoveTarget(id(i))
-		if i == 2*maxRemovedTargets-3 {
-			tok = r.BeginEnumeration()
+		if i == n-3 {
+			tok = r.OpenWindow()
 		}
-		r.RemoveTarget(regIDA) // reported again and again
-	}
-	if n := len(r.removedLog); n != maxRemovedTargets {
-		t.Fatalf("removal log holds %d entries, want %d", n, maxRemovedTargets)
-	}
-	if n := len(r.removedGen); n != maxRemovedTargets {
-		t.Fatalf("removal index holds %d entries, want %d", n, maxRemovedTargets)
-	}
-	for i := 1; i < len(r.removedLog); i++ {
-		if r.removedLog[i-1].gen >= r.removedLog[i].gen {
-			t.Fatalf("removal log out of generation order at %d", i)
-		}
+		r.RemoveEventTarget(regIDA) // reported again and again
 	}
 	if snaps, _ := r.ApplyEnumeration(tok, pageInfos(regIDA)); len(snaps) != 0 || r.Has(regIDA) {
 		t.Fatal("refreshed removal forgotten")
 	}
+}
+
+// Lifecycle events wait in a queue. One that says a target exists is applied
+// only if no enumeration, and no removal learned from a command reply, was
+// applied after the event was read from the connection.
+func TestRegisterEventOrdersQueuedEventAgainstNewerEvidence(t *testing.T) {
+	t.Run("fresh event registers", func(t *testing.T) {
+		r := NewTabRegistry()
+		r.SyncPageTargets(pageInfos(regIDB))
+		if !r.RegisterEvent(r.EventStamp(), regIDA) || !r.Has(regIDA) {
+			t.Fatal("current event did not register its target")
+		}
+		if r.RegisterEvent(r.EventStamp(), "") || r.Has("") {
+			t.Fatal("empty id registered")
+		}
+	})
+	t.Run("queued across tab_close", func(t *testing.T) {
+		r := NewTabRegistry()
+		r.SyncPageTargets(pageInfos(regIDA, regIDB))
+		stamp := r.EventStamp() // targetInfoChanged(A) read, then queued
+		r.RemoveTarget(regIDA)  // Target.closeTarget(A) confirmed
+		if r.RegisterEvent(stamp, regIDA) || r.Has(regIDA) {
+			t.Fatal("queued event revived a closed tab")
+		}
+		if !r.RegisterEvent(stamp, regIDB) {
+			t.Fatal("registered target not reported")
+		}
+	})
+	t.Run("queued across a resync", func(t *testing.T) {
+		r := NewTabRegistry()
+		r.SyncPageTargets(pageInfos(regIDA, regIDB))
+		stamp := r.EventStamp()
+		w := r.OpenWindow() // requested after the event was read
+		if _, removed := r.ApplyEnumeration(w, pageInfos(regIDB)); len(removed) != 1 {
+			t.Fatalf("removed = %v", removed)
+		}
+		if r.RegisterEvent(stamp, regIDA) || r.Has(regIDA) {
+			t.Fatal("queued event revived a target the resync found gone")
+		}
+		// An event read after the resync is newer than it.
+		if !r.RegisterEvent(r.EventStamp(), regIDX) {
+			t.Fatal("event newer than the resync refused")
+		}
+	})
+	t.Run("zero stamp is older than any evidence", func(t *testing.T) {
+		r := NewTabRegistry()
+		if !r.RegisterEvent(0, regIDA) {
+			t.Fatal("zero stamp refused although nothing was ever applied")
+		}
+		r.SyncPageTargets(pageInfos(regIDA))
+		if r.RegisterEvent(0, regIDX) {
+			t.Fatal("unstamped event registered after an enumeration")
+		}
+	})
+	t.Run("removals reported by events are ordered by the queue", func(t *testing.T) {
+		r := NewTabRegistry()
+		r.SyncPageTargets(pageInfos(regIDB))
+		stamp := r.EventStamp() // targetCreated(A) queued behind unrelated events
+		r.RemoveEventTarget("WORKER-1")
+		r.RemoveEventTarget(regIDX)
+		if !r.RegisterEvent(stamp, regIDA) {
+			t.Fatal("unrelated queued removals invalidated a page event")
+		}
+		// ...and still shield requests in flight.
+		w := r.OpenWindow()
+		r.RemoveEventTarget(regIDA) // targetDestroyed(A)
+		if snaps, _ := r.ApplyEnumeration(w, pageInfos(regIDA, regIDB)); len(snaps) != 1 || r.Has(regIDA) {
+			t.Fatalf("destroyed target revived by a reply in flight: %v", snapshotIDs(snaps))
+		}
+	})
 }

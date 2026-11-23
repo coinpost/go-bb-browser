@@ -116,14 +116,19 @@ bb-browser tab list
 - 旧版的 4 位起十六进制**短 id（后缀别名）已移除**，daemon 不再生成也不再解析；短 id、任意前缀/后缀/截断、大小写变体、首尾带空白的写法一律返回 `unknown tab id`（`-32602`）。
 - 显式给出的 id 未知或已过期时**直接报错**，绝不回退到焦点 tab、其他 tab 或“看起来相近”的 tab。目标消失后，持有旧 id 的请求（包括正在等待该 tab 操作锁的请求）只会失败，不会落到之后出现的其他目标上。
 - 一次请求解析出的 target id 贯穿该请求的操作锁、CDP 命令、idle 续期与 `rpc.jsonl` 审计记录，中途不重新解析。
-- 迟到的浏览器回复不会让已失效的 id 重新生效：`tab_new` 的创建回复到达前该 tab 若已被关闭/销毁，`tab_new` 返回错误 `tab closed before tab_new completed`（不登记、不纳入 idle 受管，重新调用即可）；较早发出的 target 枚举回复不会重新登记“其后已有另一次枚举确认不存在”或“其后已被删除”的 tab。
+- 迟到的浏览器回复/事件不会让已失效的 id 重新生效。daemon 为每个在途的浏览器请求（`Target.createTarget`、`Target.getTargets`）记录“请求发出之后”观察到的失效与缺席，回复应用时据此裁决，请求结束即丢弃，不保留任何删除历史：
+  - `tab_new` 的创建回复到达前该 tab 若已被关闭/销毁/被某次枚举确认消失，`tab_new` 返回错误 `tab closed before tab_new completed`：不登记、不纳入 idle 受管、不选中，并对这个刚创建的 id 做一次有界（5s）关闭回滚，错误 `data.hint` 带该 id 与清理结果（`closed` / `already gone` / `not closed (...)`），重新调用即可。创建请求本身失败或超时时 daemon 拿不到 id，无法回滚；浏览器若仍建出了 tab，它只是一个未受管的普通 tab，会出现在 `tab_list`。
+  - 较早发出的 target 枚举回复不会重新登记“请求期间已被删除”或“请求期间另一次已应用的枚举未列出”的 tab，也不会删除请求发出之后才登记的 tab；已登记的 tab 不会因为迟到的创建回复/事件被“续新”，之后发出的枚举若不再列出它，照常删除。
+  - 生命周期事件在读出连接时盖章；排队期间若已应用过 `tab_close` 回复或一次枚举，该事件不再登记未登记的 tab，而是触发一次重新枚举。
+  - `Target.closeTarget` 成功后浏览器若仍短暂列出该 target，**之后才发出**的枚举会再次登记它，直到销毁事件到达。
+- `tab_close` 收到浏览器明确的“目标不存在”时仍返回关闭失败，但同时清除该 id 的登记、观测缓冲、idle 与受管记录；其它关闭失败不改动任何状态。`tab_select` 与其它定向方法一样持有该 tab 的操作锁：idle 清理正在关闭同一 tab 时，选择会等待并得到 `unknown tab id`，不会成功或续期。
 - 只有 `tab_list` / `tab_focus` 以及 CLI 省略 `--tab` 时才使用 daemon 焦点 tab；CLI 显式传空的 `--tab ""` 会报错而不是改用焦点 tab。
 - **迁移**：旧客户端不要缓存或拼接短 id，改为保存并原样回传 `tab_new` / `tab_list` 返回的 `tab`；脚本里写死的 `--tab ab12` 之类需要换成 `bb-browser tab list` 输出的完整 id。Pool 调用方同理（`<backendKey>:<完整 id>`，见 [`pkg/daemonclient`](pkg/daemonclient/README.md)）。
 - CDP target id 在同一个运行中的浏览器内唯一；本项目**不承诺**它跨浏览器重启/跨浏览器会话永久唯一，也不引入所有权或租约协议。
 
 **Idle tab 自动清理**：`tab_new` 创建的 tab 会被 daemon 跟踪；在 `BB_BROWSER_TAB_IDLE_TIMEOUT` 内无操作则自动 `tab_close`。清理时若 Chrome 中的目标已不存在，直接清除该 tab 的本地状态，不告警或重复重试；其他关闭失败仍告警并保留重试。tab 相关 JSON-RPC 的 **`method` + 原始 request body** 写入 `rpc.jsonl`（audit 行，异步写入；请求实际解析到的完整 CDP target id 记在 `target` 字段，未解析成功的请求没有该字段）；idle 状态维护在内存。
 
-**受管 tab 的持久化生命周期**：哪些 tab 属于 daemon（managed 集合）只由两种同步写入的生命周期记录决定，二者都携带**完整 CDP target id**：`tab_new` 成功时写 `managed_tab_open`；tab 被 `tab_close` 成功关闭、被 idle 清理关闭、收到 target 销毁事件，或在一次成功的 target 枚举中确认已消失时写 `managed_tab_retire`。audit 行（包括 `tab_new` / `tab_close`）不会增删 managed 集合，只会按 `target` 精确匹配刷新仍受管 tab 的最后活跃时间，因此延迟到达的 audit 行不会让已退役的 tab 复活，也不会影响其他 tab。关闭失败（非“目标已不存在”）或枚举失败不会退役仍存活的 tab。一次枚举只能退役**在发出该枚举请求之前**就已持久化的受管 target：枚举进行期间或其结果处理完成之前由 `tab_new` 新建的 tab 不在这份候选集合内，不会因为没出现在这次（更早的）枚举结果里而被退役，启动恢复与运行期重新同步都遵守这一约束。
+**受管 tab 的持久化生命周期**：哪些 tab 属于 daemon（managed 集合）只由两种同步写入的生命周期记录决定，二者都携带**完整 CDP target id**：`tab_new` 成功时写 `managed_tab_open`；tab 被 `tab_close` 成功关闭、被 idle 清理关闭、收到 target 销毁事件，或在一次成功的 target 枚举中确认已消失时写 `managed_tab_retire`。audit 行（包括 `tab_new` / `tab_close`）不会增删 managed 集合，只会按 `target` 精确匹配刷新仍受管 tab 的最后活跃时间，因此延迟到达的 audit 行不会让已退役的 tab 复活，也不会影响其他 tab。关闭失败（非“目标已不存在”）或枚举失败不会退役仍存活的 tab。登记变更与受管记录在同一个临界区内完成（先登记表、后 idle/`rpc.jsonl`），所以不会出现“tab 已删除但其后又写入 `managed_tab_open`”的交错。枚举只会删除（并退役）**在发出该枚举请求之前**就已登记的 tab：请求在途期间由 `tab_new` 新建的 tab 不会因为没出现在这次（更早的）枚举结果里而被退役。上一个 daemon 进程留下、尚未恢复的受管成员由本进程第一次成功的枚举裁决（无论它来自启动、重新同步还是某个 RPC）：id 完全一致且存活的恢复 idle 跟踪，回复未列出的退役。
 
 **daemon 重启**时先通过 CDP 获取当前存在的 tab，再回放 `rpc.jsonl`：只有**完整 target id 完全一致**且仍存活的 tab 才恢复 idle 跟踪并沿用其最后活跃时间；其他 tab（例如用户自己打开的 tab，即使 id 后缀相同）绝不会被当成受管 tab，也不会被 idle 清理关闭；记录中已不存在的 target 会被退役。重启后有约 30s grace。**旧版本兼容**：只写短 id（`tab` 字段，现已不再写入也不再读取）而没有 `target` 的旧版本记录无法证明身份，回放时保守跳过（启动时告警一次并给出此类 `tab_new` 记录数）；这些由旧版本创建且仍打开的 tab 将不再被自动 idle 关闭，需要时请手动 `tab_close`。生命周期记录写盘失败时内存状态仍会更新并打印 warn，不视为已持久化：未写入的 `managed_tab_open` 表示该 tab 重启后不再受管；未写入的 `managed_tab_retire` 表示陈旧条目会留在 `rpc.jsonl` 直到下次轮转或重启对账（恢复要求 target 精确一致，陈旧条目不会导致误关其他 tab）。
 

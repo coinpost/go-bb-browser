@@ -31,8 +31,8 @@ func TestOlderEnumerationDoesNotReviveTargetNewerEnumerationFoundAbsent(t *testi
 		t.Fatal("precondition: A was registered")
 	}
 
-	older := r.BeginEnumeration() // snapshot still lists A (close confirmed, target lingering)
-	newer := r.BeginEnumeration() // snapshot taken after A is gone
+	older := r.OpenWindow() // snapshot still lists A (close confirmed, target lingering)
+	newer := r.OpenWindow() // snapshot taken after A is gone
 	if snaps, _ := r.ApplyEnumeration(newer, pageInfos(regIDB)); len(snaps) != 1 || r.Has(regIDA) {
 		t.Fatalf("newer enumeration = %v, want only B", snapshotIDs(snaps))
 	}
@@ -58,8 +58,8 @@ func TestOlderEnumerationDoesNotRegisterNeverSeenTargetFoundAbsent(t *testing.T)
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDB))
 
-	older := r.BeginEnumeration()
-	r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDB))
+	older := r.OpenWindow()
+	r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB))
 	snaps, _ := r.ApplyEnumeration(older, pageInfos(regIDX, regIDB))
 	if r.Has(regIDX) || hasSnapshot(snaps, regIDX) {
 		t.Fatalf("older reply registered a target a newer enumeration found absent: %v", snapshotIDs(snaps))
@@ -77,8 +77,8 @@ func TestOverlappingEnumerationsAbsenceWinsInEitherOrder(t *testing.T) {
 	r.SyncPageTargets(pageInfos(regIDA, regIDB))
 	r.RemoveTarget(regIDA)
 
-	first := r.BeginEnumeration()
-	second := r.BeginEnumeration()
+	first := r.OpenWindow()
+	second := r.OpenWindow()
 	// The earlier request carries the snapshot without A and is applied first.
 	r.ApplyEnumeration(first, pageInfos(regIDB))
 	snaps, _ := r.ApplyEnumeration(second, pageInfos(regIDA, regIDB))
@@ -93,13 +93,13 @@ func TestEnumerationRequestedAfterConfirmedAbsenceRegistersTarget(t *testing.T) 
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDB))
 
-	older := r.BeginEnumeration()
-	r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDB))
+	older := r.OpenWindow()
+	r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB))
 	if snaps, _ := r.ApplyEnumeration(older, pageInfos(regIDX, regIDB)); hasSnapshot(snaps, regIDX) {
 		t.Fatal("precondition: the overtaken reply must not register X")
 	}
 
-	snaps, _ := r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDX, regIDB))
+	snaps, _ := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDX, regIDB))
 	if !r.Has(regIDX) || !hasSnapshot(snaps, regIDX) {
 		t.Fatalf("current enumeration did not register X: %v", snapshotIDs(snaps))
 	}
@@ -118,9 +118,9 @@ func TestEnumerationThatListedTargetIsNotHeldAgainstIt(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDB))
 
-	overtaken := r.BeginEnumeration()
-	r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDB)) // X absent
-	next := r.BeginEnumeration()                                // requested after that absence
+	overtaken := r.OpenWindow()
+	r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)) // X absent
+	next := r.OpenWindow()                                // requested after that absence
 	if snaps, _ := r.ApplyEnumeration(overtaken, pageInfos(regIDX, regIDB)); hasSnapshot(snaps, regIDX) {
 		t.Fatal("precondition: the overtaken reply must not register X")
 	}
@@ -138,8 +138,8 @@ func TestConfirmedAbsenceKeepsConcurrentRegistrationProtection(t *testing.T) {
 	r := NewTabRegistry()
 	r.SyncPageTargets(pageInfos(regIDB))
 
-	older := r.BeginEnumeration()
-	newer := r.BeginEnumeration()
+	older := r.OpenWindow()
+	newer := r.OpenWindow()
 	r.RegisterPageTarget(regIDA) // created while both are in flight
 	if _, removed := r.ApplyEnumeration(newer, pageInfos(regIDB)); len(removed) != 0 || !r.Has(regIDA) {
 		t.Fatalf("newer stale reply removed the new tab: %v", removed)
@@ -151,8 +151,8 @@ func TestConfirmedAbsenceKeepsConcurrentRegistrationProtection(t *testing.T) {
 	}
 	// And a target removed for real by the newer enumeration stays removed.
 	r.RegisterPageTarget(regIDX)
-	stale := r.BeginEnumeration()
-	if _, removed := r.ApplyEnumeration(r.BeginEnumeration(), pageInfos(regIDA, regIDB)); len(removed) != 1 {
+	stale := r.OpenWindow()
+	if _, removed := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)); len(removed) != 1 {
 		t.Fatalf("current enumeration removed %v, want X", removed)
 	}
 	if snaps, _ := r.ApplyEnumeration(stale, pageInfos(regIDA, regIDB, regIDX)); r.Has(regIDX) || len(snaps) != 2 {

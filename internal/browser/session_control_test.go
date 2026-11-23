@@ -86,3 +86,27 @@ func TestTargetEventQueueOverflowMarksDirty(t *testing.T) {
 		t.Fatal("dirty flag was not consumed")
 	}
 }
+
+// Lifecycle events are stamped with the consumer's clock at the moment they are
+// handed over (connection order), not when they are consumed.
+func TestTargetEventsCarryStampFromEnqueueTime(t *testing.T) {
+	s := newSession(context.Background(), func() {})
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "before-clock"})
+	var clock atomic.Uint64
+	clock.Store(7)
+	s.SetTargetEventStamp(clock.Load)
+	s.enqueueTargetEvent(TargetEvent{Info: &target.Info{TargetID: "A", Type: "page"}})
+	clock.Store(9)
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "B"})
+	clock.Store(100) // the consumer falls behind; stamps must not move
+	for i, want := range []uint64{0, 7, 9} {
+		if ev := <-s.TargetEvents(); ev.Stamp != want {
+			t.Fatalf("event %d stamp = %d, want %d", i, ev.Stamp, want)
+		}
+	}
+	s.SetTargetEventStamp(nil)
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "C"})
+	if ev := <-s.TargetEvents(); ev.Stamp != 0 {
+		t.Fatalf("stamp without a clock = %d", ev.Stamp)
+	}
+}
