@@ -185,7 +185,8 @@ func newOpenCmd() *cobra.Command {
 			if !jsonOut && waitSec > 0 {
 				time.Sleep(time.Duration(waitSec) * time.Second)
 			}
-			if out := strings.TrimSpace(env.Result.Tab); out != "" {
+			// The id is opaque: printed exactly as the daemon returned it.
+			if out := env.Result.Tab; out != "" {
 				fmt.Println(out)
 			}
 			return nil
@@ -1144,7 +1145,7 @@ func pickTabForSite(ctx context.Context, domain string) (string, error) {
 	if err := json.Unmarshal(bNew, &newEnv); err != nil {
 		return "", err
 	}
-	out := strings.TrimSpace(newEnv.Result.Tab)
+	out := newEnv.Result.Tab // opaque id, used verbatim
 	if out == "" {
 		return "", errors.New("could not resolve tab after opening domain tab")
 	}
@@ -1247,9 +1248,10 @@ func daemonFocusedTab(ctx context.Context, base string) (string, error) {
 	if err := json.Unmarshal(b, &env); err != nil {
 		return "", fmt.Errorf("decode tab_list result: %w", err)
 	}
-	tab := strings.TrimSpace(env.Result.Focus)
+	// Opaque ids, passed back verbatim: trimming one could name another tab.
+	tab := env.Result.Focus
 	if tab == "" {
-		tab = strings.TrimSpace(env.Result.Tab)
+		tab = env.Result.Tab
 	}
 	if tab == "" {
 		return "", errors.New("no focused tab: pass --tab or open a tab in Chrome")

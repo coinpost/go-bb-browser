@@ -224,3 +224,49 @@ func TestPoolRoutesFullTargetIDsAcrossBackends(t *testing.T) {
 		t.Errorf("eval on a closed pool tab: err = %v, want UnknownTabError", err)
 	}
 }
+
+// A tab closed directly on its daemon, behind the pool's back: the pool still
+// routes the stale id to the daemon that owns it, and that daemon's explicit
+// "unknown tab id" reaches the caller as UnknownTabError (with the RPC error
+// kept). No other backend and no other tab is tried.
+func TestPoolReportsTabClosedBehindItsBackAsUnknownTab(t *testing.T) {
+	west, east := newIDBackend(t), newIDBackend(t)
+	west.conn.queueCreate(fullIDA)
+	east.conn.queueCreate(fullIDB)
+	pool, err := daemonclient.NewPool(daemonclient.NewClient(west.url), daemonclient.NewClient(east.url))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var onWest, onEast string
+	for range 2 {
+		created, err := pool.TabNew(ctx, protocol.TabNewParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(created.Tab, "0:") {
+			onWest = created.Tab
+		} else {
+			onEast = created.Tab
+		}
+	}
+	if onWest != "0:"+string(fullIDA) || onEast != "1:"+string(fullIDB) {
+		t.Fatalf("pool tabs = %q, %q", onWest, onEast)
+	}
+	enumMustRPC(t, west.srv, protocol.MethodTabClose, map[string]any{"tab": string(fullIDA)})
+
+	_, err = pool.Eval(ctx, protocol.EvalParams{Tab: onWest, Script: "1"})
+	var unknown *daemonclient.UnknownTabError
+	if !errors.As(err, &unknown) || unknown.Tab != onWest {
+		t.Fatalf("Eval on a tab closed behind the pool: err = %T %v, want errors.As(*UnknownTabError) for %q", err, err, onWest)
+	}
+	if !isUnknownTabRPCError(err) {
+		t.Errorf("the daemon's RPC error is not in the chain: %v", err)
+	}
+	if !east.conn.has(fullIDB) || !east.srv.tabs.Has(fullIDB) {
+		t.Error("the same-suffix tab on the other backend was touched")
+	}
+	if _, err := pool.Eval(ctx, protocol.EvalParams{Tab: onEast, Script: "1"}); err != nil {
+		t.Errorf("live tab on the other backend: %v", err)
+	}
+}

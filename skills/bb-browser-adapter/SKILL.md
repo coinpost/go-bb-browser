@@ -124,7 +124,7 @@ CLI 将命令行合成一个对象传给 adapter 最外层函数（见 `internal
 3. **不支持** 纯 `--flag`（无值）布尔开关；缺值（或下一个 token 以 `--` 开头）会报 `flag --foo needs a value`。想做布尔，请写 `--foo true` 并在脚本里 `args.foo === 'true'`。
    值原样传入：`--foo=` 为空字符串，`--foo=a=b` 的值是 `a=b`，同名多次取最后一次，`-5` 这类单横线 token 是普通值；值以 `--` 开头时写 `--foo=--x`。
 4. `--tab <id>` 显式指定时，**忽略** `@meta.domain` 的自动选 tab / 新开 tab 逻辑。
-5. `--url` / `--api-token` / `--json` / `--tab` / `--help` 是 CLI 全局选项（保留名），写在 `run` 前后或穿插都不会进 `args`。adapter 需要同名参数时放到 `--` 之后：`bb-browser run ./x.js --tab ab12 -- hello --tab x` → `args.tab === "x"`。
+5. `--url` / `--api-token` / `--json` / `--tab` / `--help` 是 CLI 全局选项（保留名），写在 `run` 前后或穿插都不会进 `args`。adapter 需要同名参数时放到 `--` 之后：`bb-browser run ./x.js --tab "$TAB" -- hello --tab x` → `args.tab === "x"`（`$TAB` 为 `open` / `tab list` 输出的完整 tab id）。
 
 示例（对应上面的 `example/search`）：
 

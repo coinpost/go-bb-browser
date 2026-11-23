@@ -22,14 +22,30 @@ var ErrUnusableTabNewResult = errors.New("daemonclient: tab_new result must be n
 
 // UnknownTabError is returned when a well-formed Pool tab id is not pinned in
 // this [Pool] (never created via TabNew, never observed via TabList/TabFocus,
-// already closed, or [Pool.ForgetTab]).
+// already closed, or [Pool.ForgetTab]), or when the daemon the id is pinned to
+// answers that it has no such tab (closed behind the pool's back). In the
+// second case Err is the daemon's reply, so errors.As also finds its
+// [*RPCError].
 type UnknownTabError struct {
 	Tab string
+	// Err is the backend error that reported the tab unknown; nil when the
+	// pool itself did not know the id.
+	Err error
+}
+
+func (e *UnknownTabError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 func (e *UnknownTabError) Error() string {
 	if e == nil {
 		return "daemonclient pool: unknown tab <nil>"
+	}
+	if e.Err != nil {
+		return fmt.Sprintf("daemonclient pool: unknown tab %q (its daemon no longer has it): %v", e.Tab, e.Err)
 	}
 	return fmt.Sprintf("daemonclient pool: unknown tab %q (not created via this pool, or already closed)", e.Tab)
 }

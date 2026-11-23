@@ -206,3 +206,49 @@ func TestCLIExplicitTabNeverFallsBack(t *testing.T) {
 		t.Fatalf("eval without --tab sent %+v, want tab_list then eval on the focused %q", reqs, cliTabB)
 	}
 }
+
+// Tab ids are opaque strings. With X and " X " both open and " X " focused, the
+// CLI must print and send back exactly what the daemon returned: trimming the
+// id would act on the other tab.
+func TestCLIPassesOpaqueTabIDVerbatim(t *testing.T) {
+	const bare = "AAAA0000000000000000000000121234"
+	const padded = " " + bare + " "
+	d := &cliDaemon{tabs: []string{bare}, focus: bare, next: padded}
+	url := d.serve(t)
+
+	out, err := runCLI(t, "--url", url, "open", "https://example.test/")
+	if err != nil || out != padded+"\n" {
+		t.Fatalf("open printed %q (err %v), want %q exactly", out, err, padded+"\n")
+	}
+	d.mu.Lock()
+	d.focus = padded
+	d.mu.Unlock()
+
+	for _, tc := range []struct {
+		method string
+		args   []string
+	}{
+		{protocol.MethodEval, []string{"eval", "1"}},
+		{protocol.MethodGoto, []string{"open", "--current", "https://example.test/"}},
+		{protocol.MethodTabClose, []string{"close"}},
+	} {
+		before := len(d.requests())
+		if _, err := runCLI(t, append([]string{"--url", url}, tc.args...)...); err != nil {
+			t.Errorf("%v: %v", tc.args, err)
+			continue
+		}
+		reqs := d.requests()[before:]
+		last := reqs[len(reqs)-1]
+		if last.Method != tc.method || last.Params["tab"] != padded {
+			t.Errorf("%v sent %s for tab %q, want the focused tab %q verbatim", tc.args, last.Method, last.Params["tab"], padded)
+		}
+	}
+	// An explicit id is forwarded untouched too.
+	before := len(d.requests())
+	if _, err := runCLI(t, "--url", url, "--tab", padded, "eval", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if reqs := d.requests()[before:]; len(reqs) != 1 || reqs[0].Params["tab"] != padded {
+		t.Errorf("--tab sent %+v, want %q verbatim", reqs, padded)
+	}
+}

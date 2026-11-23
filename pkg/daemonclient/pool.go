@@ -438,17 +438,37 @@ func (p *Pool) callBound(ctx context.Context, tab, method string, params any, re
 	hold := p.track(idx)
 	defer hold()
 	if result == nil {
-		return p.clients[idx].Call(ctx, method, stripped, nil)
+		return unknownTabFromBackend(tab, p.clients[idx].Call(ctx, method, stripped, nil))
 	}
 	var raw json.RawMessage
 	if err := p.clients[idx].Call(ctx, method, stripped, &raw); err != nil {
-		return err
+		return unknownTabFromBackend(tab, err)
 	}
 	if err := json.Unmarshal(setJSONTab(raw, tab), result); err != nil {
 		return fmt.Errorf("daemonclient: decode %s result: %w", method, err)
 	}
 	return nil
 }
+
+// unknownTabFromBackend gives the daemon's explicit "unknown tab id" answer for
+// a bound tab the Pool-level meaning it has: err is wrapped in an
+// [*UnknownTabError] for the Pool id, with the daemon's [*RPCError] still in
+// the chain. Every other error (and nil) is returned unchanged. The binding is
+// left to the pool's reconciliation rules.
+func unknownTabFromBackend(tab string, err error) error {
+	var rpcErr *RPCError
+	if err == nil || !errors.As(err, &rpcErr) {
+		return err
+	}
+	if rpcErr.Code != protocol.CodeInvalidParams || rpcErr.Message != unknownTabMessage {
+		return err
+	}
+	return &UnknownTabError{Tab: tab, Err: err}
+}
+
+// unknownTabMessage is the JSON-RPC error message of the daemon for a tab id
+// that names no open tab.
+const unknownTabMessage = "unknown tab id"
 
 func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
 	observations := make([]backendObservation, len(p.clients))
@@ -888,7 +908,7 @@ func (p *Pool) applyObservationLocked(idx int, started uint64, authoritative boo
 		return
 	}
 	for _, tab := range tabs {
-		tab = strings.TrimSpace(tab)
+		// Ids are opaque: bound exactly as reported, never trimmed.
 		if tab == "" {
 			continue
 		}
