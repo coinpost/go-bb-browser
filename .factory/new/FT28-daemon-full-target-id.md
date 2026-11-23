@@ -337,3 +337,7 @@ Behaviour：只读冲突仅暂停解析并触发新核验，不得关闭存活�
 Scope：registry、Session的CDP连接/事件路由与非关页资源清理、daemon同步与相应测试/文档；修复新发现事件接线后，原来需额外discovery的时序也必须按真实生产路径重新验收。保持清楚的控制流、资源所有权及失败语义，不叠加任意历史缓存或猜测fallback。
 Decisions：以生产实际发送/接收的CDP消息证明接线，不以stub成功替代；必要的discovery由生产连接明确启用，测试代理不得偷偷注入。沿用原分支，不重写已发布历史；若main前移仅合并origin/main。
 Checking：最新五项原诊断提升永久回归；保留历轮有效测试。前两项与无时序干预关闭清理需完整生产daemon + 非headless真实Chrome，5轮，记录线上closeTarget零断言/死A拒绝/B存活/idle及磁盘；接线改变后复验dirty/迟到事件/反向冲突，无额外discovery注入。关键确定性race重复20次，全量gofmt/vet/race；保留红绿与原始CDP证据，未覆盖或自然概率如实记录。测试HOME/TMPDIR/缓存隔离在run目录，不依赖真实外网。
+
+
+## factory · 2026-11-23 17:51
+第7轮已启动但因Claude服务端连续529 Overloaded、重试500 Internal server error中断。CC已写设计并修改5个生产文件，尚未提交；未完成永久回归、红绿、全量或真实Chrome验收，不算build完成，不推送代码、不移动review/，round仍为6。未完成改动保留在build专用原分支worktree供后续继续；设计保留build/evidence/FT28-round7/design.md。已停止本轮，不自动增加修复轮或切换coder；无新增安装，没有本轮Chrome残留。真实Chrome核验补充与本轮计划已推送；main、FT7、定时任务均未改变。
