@@ -2,7 +2,7 @@
 
 package daemon
 
-// Real-Chrome acceptance of the tab lifecycle (FT28 round 7). See
+// Real-Chrome acceptance of the tab lifecycle (FT28 rounds 7 and 8). See
 // real_chrome_harness_test.go for what runs and how it is isolated. Every
 // schedule is "real Chrome + controlled reply/notification timing": it shows
 // what the daemon does in that order of events, not how often the order occurs.
@@ -366,15 +366,193 @@ func TestRealChromeReverseConflictRecoversWithoutRPC(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	took := time.Since(start)
+	// Everything the recovery is judged by is read BEFORE the first RPC about
+	// A: an RPC on a tab that does not resolve enumerates on its own and would
+	// repair the registry whether or not the daemon had recovered by itself.
+	recovered := e.srv.tabs.Has(a)
 	w := e.proxy.wire()
 	pages := e.chrome.pages()
-	again := e.rpc("eval", map[string]any{"tab": string(a), "script": "1"})
-	t.Logf("A=%s resolves=%v after %v without RPC; Target.getTargets sent by the daemon since the conflict=%d; Chrome A=%v B=%v; wire closeTarget=%v; eval error=%v",
-		a, e.srv.tabs.Has(a), took.Round(time.Millisecond), w.getTargets-sent, pages[a], pages[e.b], w.closes, again.Error)
-	if !e.srv.tabs.Has(a) || again.Error != nil {
-		t.Error("the live tab did not come back after the conflict without an RPC")
+	t.Logf("A=%s resolves=%v after %v without RPC; Target.getTargets sent by the daemon since the conflict=%d; Chrome A=%v B=%v; wire closeTarget=%v",
+		a, recovered, took.Round(time.Millisecond), w.getTargets-sent, pages[a], pages[e.b], w.closes)
+	if !recovered {
+		t.Fatal("the live tab did not come back after the conflict without an RPC")
 	}
-	if !pages[a] || !pages[e.b] || len(w.closes) != 0 {
-		t.Error("something was closed")
+	if w.getTargets-sent < 1 {
+		t.Fatal("the daemon recovered without sending an enumeration of its own after the conflict: the schedule did not produce the conflict")
+	}
+	again := e.rpc("eval", map[string]any{"tab": string(a), "script": "1"})
+	after := e.proxy.wire()
+	t.Logf("eval on the recovered tab: error=%v; Target.getTargets sent during eval=%d", again.Error, after.getTargets-w.getTargets)
+	if again.Error != nil {
+		t.Errorf("eval on the recovered tab: %v", again.Error)
+	}
+	if after.getTargets != w.getTargets {
+		t.Error("eval had to enumerate: the tab did not resolve from the registry")
+	}
+	pages = e.chrome.pages()
+	if !pages[a] || !pages[e.b] || len(after.closes) != 0 {
+		t.Errorf("something was closed: Chrome A=%v B=%v, wire closeTarget=%v", pages[a], pages[e.b], after.closes)
+	}
+}
+
+// Round 8, P1 (creation reply for a target its creation notification
+// registered first). An older B-only list is delayed; tab_new creates A and
+// its reply is delayed; the notification registers A; the older list is
+// applied (it cannot be ordered against A, so the daemon asks again — that
+// reply is delayed too). The creation reply must not be answered before the
+// conflict is settled: the daemon asks the browser once more first. With A
+// closed by the user (destroyed notification delayed) tab_new is refused; with
+// A alive it succeeds.
+func TestRealChromeLateCreateOfAnnouncedTabIsVerified(t *testing.T) {
+	for _, closed := range []bool{true, false} {
+		name := "closed by the user"
+		if !closed {
+			name = "live control"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := rcStartPatient(t)
+			e.proxy.withholdNotifications(func(method string, _ target.ID) bool { return method == "Target.targetDestroyed" })
+			old := e.proxy.holdNext("Target.getTargets")
+			list := e.rpcAsync("tab_list", nil)
+			e.proxy.awaitHeld(old, "older list")
+			create := e.proxy.holdNext("Target.createTarget")
+			newTab := e.rpcAsync("tab_new", nil)
+			e.proxy.awaitHeld(create, "creation")
+			a := rcCreatedID(t, create)
+			rcAwait(t, "A registered by its creation notification", func() bool {
+				return e.proxy.wasDelivered("Target.targetCreated", a) && e.srv.tabs.Has(a)
+			})
+			if closed {
+				e.chrome.userClose(a) // its destroyed notification is delayed
+			}
+			auto := e.proxy.holdNext("Target.getTargets")
+			old.Release()
+			if r := <-list; r.Error != nil {
+				t.Fatal(r.Error)
+			}
+			e.proxy.awaitHeld(auto, "the daemon's automatic recheck")
+			atCommit := e.proxy.wire().getTargets
+			create.Release()
+			r := <-newTab
+			// The automatic recheck is still delayed: what follows is what the
+			// daemon concluded before answering tab_new.
+			synchronous := e.proxy.wire().getTargets - atCommit
+			resolves, idle := e.srv.tabs.Has(a), e.idleTracked(a)
+			pages := e.chrome.pages()
+			t.Logf("closed=%v A=%s: tab_new result=%v error=%v; Target.getTargets sent before the answer=%d (automatic recheck still delayed); A resolves=%v idle=%v; Chrome A=%v B=%v",
+				closed, a, r.Result, r.Error, synchronous, resolves, idle, pages[a], pages[e.b])
+			if synchronous < 1 {
+				t.Error("tab_new answered without asking the browser again")
+			}
+			if closed {
+				rcRefused(t, r)
+				if resolves || idle {
+					t.Errorf("dead A kept while the automatic recheck is pending: resolves=%v idle=%v", resolves, idle)
+				}
+				auto.Release()
+				time.Sleep(rcQuiet) // no RPC
+				rcAssertDead(t, e, a)
+				return
+			}
+			if r.Error != nil || r.Result["tab"] != string(a) {
+				t.Fatalf("live control: tab_new = %v / %v", r.Result, r.Error)
+			}
+			auto.Release()
+			time.Sleep(rcQuiet) // no RPC
+			w := e.proxy.wire()
+			pages = e.chrome.pages()
+			again := e.rpc("eval", map[string]any{"tab": string(a), "script": "1"})
+			t.Logf("live control after %v without RPC: A resolves=%v idle=%v; Chrome A=%v B=%v; wire closeTarget=%v; eval error=%v",
+				rcQuiet, e.srv.tabs.Has(a), e.idleTracked(a), pages[a], pages[e.b], w.closes, again.Error)
+			if !e.srv.tabs.Has(a) || !e.idleTracked(a) || again.Error != nil {
+				t.Error("the live new tab was lost")
+			}
+			if !pages[a] || !pages[e.b] || len(w.closes) != 0 {
+				t.Error("something was closed")
+			}
+		})
+	}
+}
+
+// Round 8, P1 (queued event of a target the creation reply registered first).
+// targetCreated(A) is read while the consumer is parked; the user closes A
+// (destroyed notification delayed); a list is requested after that and its
+// reply, without A, is delayed; the creation reply commits A; then the
+// consumer handles the old event and the list is applied, in either order.
+// The event proves A existed before the list was requested, so A must not
+// outlive that list — checked while the daemon's next enumeration of its own
+// is still delayed, so nothing else can have removed A.
+func TestRealChromeQueuedCreatedEventOfCommittedTabDoesNotOutliveAbsentList(t *testing.T) {
+	for _, eventFirst := range []bool{true, false} {
+		name := "event handled before the list is applied"
+		if !eventFirst {
+			name = "event handled after the list is applied"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := rcStartPatient(t)
+			parked := e.park()
+			sess := e.session()
+			e.proxy.withholdNotifications(func(method string, _ target.ID) bool { return method == "Target.targetDestroyed" })
+			queued := len(sess.TargetEvents())
+			create := e.proxy.holdNext("Target.createTarget")
+			newTab := e.rpcAsync("tab_new", nil)
+			e.proxy.awaitHeld(create, "creation")
+			a := rcCreatedID(t, create)
+			rcAwait(t, "created notification read and queued", func() bool {
+				return e.proxy.wasDelivered("Target.targetCreated", a) && len(sess.TargetEvents()) > queued
+			})
+			e.chrome.userClose(a) // its destroyed notification is delayed
+			absent := e.proxy.holdNext("Target.getTargets")
+			list := e.rpcAsync("tab_list", nil)
+			e.proxy.awaitHeld(absent, "absent list")
+			create.Release()
+			r := <-newTab
+			if r.Error != nil || r.Result["tab"] != string(a) || !e.srv.tabs.Has(a) {
+				t.Fatalf("precondition: the creation reply commits A (nothing contradicts it yet): %v / %v", r.Result, r.Error)
+			}
+			auto := e.proxy.holdNext("Target.getTargets")
+			absentList := func() {
+				t.Helper()
+				absent.Release()
+				lr := <-list
+				if lr.Error != nil {
+					t.Fatal(lr.Error)
+				}
+				rows, _ := lr.Result["tabs"].([]any)
+				for _, row := range rows {
+					if row.(map[string]any)["tab"] == string(a) {
+						t.Fatal("bad schedule: the list contains A")
+					}
+				}
+			}
+			if eventFirst {
+				parked.Release() // the consumer gets to the old event now
+				rcAwait(t, "queue handled", func() bool { return len(sess.TargetEvents()) == 0 })
+				absentList()
+			} else {
+				absentList()
+				mid := e.srv.tabs.Has(a)
+				parked.Release()
+				// The consumer handles its queue before it sends the next
+				// enumeration of its own (delayed): once that is on the wire the
+				// old event has been handled.
+				e.proxy.awaitHeld(auto, "the daemon's next enumeration")
+				t.Logf("list applied while created(A) was still queued: A resolved then=%v (nothing ordered them yet)", mid)
+			}
+			resolves := e.srv.tabs.Has(a)
+			accepted := 0
+			if resolves {
+				accepted = e.clearsAccept(a) // resolves from the registry: no enumeration
+			}
+			t.Logf("A=%s after the event and the absent list, the daemon's next enumeration still delayed: resolves=%v clears accepted=%d/3", a, resolves, accepted)
+			if resolves {
+				t.Error("A outlived a list requested after the proof of its existence was read")
+			}
+			auto.Release()
+			rcAwait(t, "A forgotten", func() bool { return !e.srv.tabs.Known(a) })
+			e.proxy.deliverWithheld()
+			time.Sleep(rcQuiet)
+			rcAssertDead(t, e, a)
+		})
 	}
 }
