@@ -63,7 +63,10 @@ func ovfRowsContain(r enumRPCReply, id target.ID) bool {
 }
 
 // ovfClearsRefuse asserts that the three observation clears, the cheapest
-// methods that resolve a tab id without touching the browser, reject tab.
+// methods that resolve a tab id, reject tab as unknown. Resolving an
+// unregistered id asks the browser once (Target.getTargets), so the caller
+// must not leave a held gate for that request: a clear that fails for any
+// other reason (such as the operation deadline) is not a refusal.
 func ovfClearsRefuse(t *testing.T, s *Server, tab string) {
 	t.Helper()
 	for _, method := range []string{"network_clear", "console_clear", "errors_clear"} {
@@ -73,6 +76,8 @@ func ovfClearsRefuse(t *testing.T, s *Server, tab string) {
 		}
 		if r.Error == nil {
 			t.Errorf("%s accepted the id of a destroyed tab %q", method, tab)
+		} else if r.Error["message"] != "unknown tab id" {
+			t.Errorf("%s on destroyed tab %q failed with %v, want unknown tab id", method, tab, r.Error)
 		}
 	}
 }

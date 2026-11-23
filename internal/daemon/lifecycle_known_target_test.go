@@ -203,7 +203,6 @@ func TestQueuedEventOfCommittedTargetKeepsItsReadInstant(t *testing.T) {
 		if s.tabs.Has(ovfA) || s.tabs.Selected() == ovfA {
 			t.Errorf("%s: A still resolves although a list requested after created(A) was read does not contain it", when)
 		}
-		ovfClearsRefuse(t, s, string(ovfA))
 	}
 
 	t.Run("event handled before the list is applied", func(t *testing.T) {
@@ -215,7 +214,12 @@ func TestQueuedEventOfCommittedTargetKeepsItsReadInstant(t *testing.T) {
 		closeOnce(gate)
 		absentList(t, list)
 		gone(t, s, st, "list applied after the event was handled, next automatic reply held")
+		// The list alone removed A, so nothing asked for an automatic recheck
+		// and the gate is still pending. Resolving an unknown id enumerates
+		// once: left in place, the gate would hold that request until the
+		// operation deadline and the timeout would pass for a refusal.
 		closeOnce(auto)
+		ovfClearsRefuse(t, s, string(ovfA))
 		ovfAwait(t, ctx, "A forgotten", func() bool { return !s.tabs.Known(ovfA) })
 		_, idle := s.tabIdle.Snapshot()[ovfA]
 		if idle {
@@ -238,6 +242,9 @@ func TestQueuedEventOfCommittedTargetKeepsItsReadInstant(t *testing.T) {
 		knownTargetLoop(t, ctx, s, sess)
 		awaitGetTargets(t, st, n+1)
 		gone(t, s, st, "event handled after the list was applied, automatic reply held")
+		// The automatic recheck took the gate: the clears' own enumeration is
+		// answered at once while that reply stays held.
+		ovfClearsRefuse(t, s, string(ovfA))
 		closeOnce(auto)
 		ovfAwait(t, ctx, "A forgotten", func() bool { return !s.tabs.Known(ovfA) })
 		_, idle := s.tabIdle.Snapshot()[ovfA]
