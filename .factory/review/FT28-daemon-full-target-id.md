@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 8
+round: 9
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -426,3 +426,15 @@ owner 本次明确要求：
 Behaviour：保留在途存在证据与缺席查询的可比较时刻；列表先应用也不得使迟到创建或旧created复活死A；真正查询后创建的存活目标保持可用。创建期间的退役事实保持到核验结束，即使枚举再次发现关闭中的A也不得返回成功。解析枚举失败透传真实错误，不伪装成unknown tab id。
 Scope：registry因果证据与回收、创建核验/退役生命周期、解析错误传播、永久回归与真实Chrome验收断言。沿用清晰所有权，不引入无界历史缓存。
 Checking：最新P1及关联P2诊断提升永久回归，保存红绿证据；修正存活控制为eval前断言registry/idle及枚举计数。关键race重复20轮、全量gofmt/vet/race；相关真实Chrome场景使用隔离非headless生产路径各5轮，代理不注入discovery，未覆盖如实记录。所有临时HOME/缓存/TMPDIR均在本run内。
+
+
+## factory · 2026-11-24 00:03
+Claude Code 已完成owner人工授权第9轮，沿用原分支；提交eb0e062、0be4d9bed3b51eb7d7ee4e9962fe386afe5936ae（head），已推送。origin/main仍为祖先，无新合并、不重写历史。
+- 修复最新P1、两项关联P2和P3验收缺口：未登记目标的公告读出时刻参与后续缺席列表裁决，迟到创建直接拒绝；核验窗口保留退役事实至结束，重新发现不能抹除close；枚举错误透传为-32000 failed to list targets，只有成功枚举查无ID才报unknown tab id，Pool不再误包UnknownTabError；存活Chrome控制在eval前检查registry/idle/枚举计数。完整target ID、不兼容短ID保持。
+- 红绿：旧head原review三项诊断各3次失败；禁用三处修复的副本新增回归失败、控制通过，真实Chrome新调度红1轮。原P1探针在新head仍3次等待同步枚举超时，未进入缺陷断言，原因是现在更早在提交处拒绝，不再发核验；适配版仅将此等待改为兼容先应答，其后clear/磁盘/恢复断言不变，20轮通过。其余原样诊断通过；需review对照sources/adjacent_unknown_adapted.diff，不能将原样探针声称通过。
+- CC关键33项race各20轮、state/browser/daemon整包race20轮、全量gofmt/vet/race通过；manager最终head独立隔离HOME/TMPDIR，GOPROXY=off/GOSUMDB=off重跑全量gofmt/vet/go test -race -count=1 -timeout 900s ./...通过，Go1.27.4，11测试包、protocol无测试。diff --check通过，工作树干净、never路径及go.mod/go.sum未变，无安装。
+- CC隔离非headless Chrome157、仅回环CDP、生产discovery无额外注入，最终head九组各5轮通过，100条轨迹中95次daemon启动各一次root discovery；新关闭调度在迟到回复到回滚之间无额外枚举，存活/P3控制eval期间无枚举。构建方报告与轨迹分析保留，manager未独立启动Chrome，不将其写成独立验收。
+- 未验：两种零页面各5次SKIP；两项P2仅回环stub未做真实Chrome调度；新调度代理延迟destroyed通知，不代表自然频率；长期枚举失败时announced上界只作推理、未测；其他Chrome/CDP宿主、Go1.26、部署及跨会话ID唯一性未验。无UI变更，不碰用户窗口。
+- 旧断言改写：列表应用即删除变为更早失效；查询失败用例先恢复枚举再核对身份拒绝，避免把超时误当unknown。细节供独立review检查。
+证据本机build/evidence/FT28-round9/：SUMMARY.md、red-review-probes-2af47a5.log、red-newtests.log/.patch、fix-key-race20.log、fix-packages-race20.log、fix-full.log、manager-final.log、review-probes-unmodified-head.log、review-probes-adapted-head-race20.log、sources/、real-chrome/final/与inspected-final.log。
+状态：new/ → review/，round=9（owner本次人工授权，不改max_rounds），等待独立review。未合并main、未发布、不自动开下一轮、不启动FT7或修改定时任务。
