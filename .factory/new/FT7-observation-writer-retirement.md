@@ -287,3 +287,14 @@ manager 核对诊断源码/全量日志，独立运行保留复现脚本，HEAD/
 证据保留本机 review run evidence/FT7-209ee62/：REVIEW.md、source/、reproduce.zsh、configured.log、configured-main.log、repeat.log、barriers.log、late-head/main.log、diagnostics-head/main.log、startup-head/main.log、release-head/main.log。诊断使用真实 Session+daemon 与回环 CDP 桩；startup overlay 仅增加首次枚举前调度屏障，未改生产判断；临时诊断尚非永久回归。
 未验：真实非 headless Chrome/CDP、真实 loadingFailed、Chrome 完整 ID 实际复用频率、Docker、运行中 systemd、Go 1.26；未启动浏览器或操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
 round=5，已超过 max_rounds=3；owner 仅授权本次额外构建，不自动追加。发现 P1，留在 review/ 等 owner 决定；若继续修复请追加说明并移至 new/。仅 review，未合并 main、未发布。
+
+
+## factory · 2026-11-23 11:39
+owner 明确要求：「把 go-bb-browser FT7 移回 new 并开始用 cc build」。review/ → new/，授权第 6 轮使用 Claude Code；round 完成后递增，max_rounds 不变，不自动 ship。沿用 2026-11-22 17:58 的合理边界，不以同完整 target ID 人为复用扩张范围。
+
+## factory · plan · 2026-11-23 11:39
+第 6 轮补充计划：
+- Behaviour：启动首次对账遇到消失 target 不死锁，取消可结束；已经退役的 target 不被迟到枚举快照重新登记，迟到查询/初始化不得重建桶；活页枚举和观测保持正常。
+- Scope：最新 review 两项 P1，相关初始化/枚举/释放永久回归。P2 仅在同一清理所有权路径必须处理时做最小修复并说明，不扩展通用页面操作或全系统代次架构。
+- Decisions：复用原分支，先检查最新 main 是否需 merge；不 rebase；用连接显式传递或缩小锁范围修复启动锁递归；以请求开始后的移除约束/快照有效性阻止陈旧正向登记，具体最小实现由代码核实。
+- Checking：真实 Session+daemon 本地回环 CDP 桩复现启动死锁和 tab_list 旧快照恢复死 target，两项正确断言修复前失败、修复后通过；重复 -race，配置完整 gofmt/vet/race；记录真实 Chrome/CDP、Docker/systemd 未检查部分。
