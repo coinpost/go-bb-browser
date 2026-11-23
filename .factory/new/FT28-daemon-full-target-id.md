@@ -374,3 +374,15 @@ Codex 独立只读审查 origin/main@2be49f8...HEAD 全64文件，重点第7轮�
 只审阅构建方70条Chrome轨迹，65次成功daemon启动均一次root discovery、20次只读冲突零close；本次未独立启动Chrome，不将轨迹审阅写作独立真实浏览器验证。两种零页面场景各5次SKIP，仍未验证；Go1.26、其他Chrome/宿主、部署、自然概率及跨会话ID唯一性未验。未操作用户窗口、不扩张FT7。
 证据保留本机 review/evidence/FT28-ca7191b/：REVIEW.md、reproduce.md、sources/、configured.log、diagnostics-ca7191b/39f1a61/2be49f8.log、previous-schedules.log、acceptance-control.log、inspected-chrome.log、manager-diagnostics.log。诊断为工作树外导出副本，尚非永久回归。工作树干净，无代码修改、提交、安装或清单变更；HOME/TMPDIR/缓存隔离，固定模块缓存、GOPROXY=off/GOSUMDB=off，仅回环stub。无链接issue/PR，不发GitHub评论。
 round=7，超过max_rounds=3；owner仅授权续做本轮build，发现P1后留在review/等待owner决定，不自动追加修复。如需继续请追加说明并移至new/。本次仅review，未合并main、未发布、未改定时任务。
+
+
+## factory · 2026-11-23 21:32
+owner 本次明确要求：
+> 让 CC 开启下一轮
+
+本次人工授权 review/ → new/，Claude Code 在原分支继续第8轮；超过max_rounds为本次授权，不改配置。修复最新review两项P1，关联P2及真实Chrome自动恢复验收缺口一并处理。保留完整target ID、无短ID兼容及历轮有效回归；不合并main、不发布、不启动FT7、不改定时任务。
+
+## factory · plan · 2026-11-23 21:32
+Behaviour：所有创建提交入口（包括已登记目标）执行一致的窗口缺席冲突判定，冲突须同步核验后才能成功；已知目标保留较早有效事件读取证据，因果更晚的确认缺席不得被较晚提交覆盖。未知目标的销毁读取约束旧排队存在事件，证据仅随在途工作保留；核验错误后已被并发关闭的目标不得成功返回。存活控制组及真正晚于请求的新建仍获保护。
+Scope：registry因果约束、daemon创建核验错误分支、永久确定性回归和真实Chrome验收；不加无界历史或旁路缓存，不重写其他任务。
+Checking：最新四项生命周期诊断原样重现并提升永久回归，保存修复前失败/修复后通过；重点已知目标两个入口、未知destroyed/旧created、核验失败与并发close以及存活控制组。修正真实Chrome反向冲突测试，在eval之前断言自动恢复且额外getTargets已发生；隔离非headless Chrome、生产discovery无额外注入。关键race重复20轮及全量gofmt/vet/race，保留CDP证据，零页面未覆盖如实记录。测试HOME/TMPDIR/缓存均隔离run内，不依赖真实外网。
