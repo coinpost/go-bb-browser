@@ -58,9 +58,7 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	s.browserFailures = 0
 	s.browserLastProbe = time.Now()
 	s.watchCDPSession(sess)
-	// Lifecycle events are stamped with the registry clock from here on, so the
-	// consumer can order them against replies applied while they were queued.
-	sess.SetTargetEventStamp(s.tabs.EventStamp)
+	s.observeTargetEvents(sess)
 	go s.runTargetSync(ctx, sess)
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
@@ -98,6 +96,19 @@ func (s *Server) syncInitialTargets(conn targetDirtyMarker, w *state.Window, tar
 	return nil
 }
 
+// observeTargetEvents connects the session's connection reader to the registry,
+// before any request whose reply names targets is sent on it:
+//   - lifecycle events are stamped with the registry clock as they are read, so
+//     the consumer can order them against replies applied while they were
+//     queued;
+//   - destroyed notifications are recorded in the request windows in flight as
+//     they are read, so a reply requested earlier cannot register the target
+//     even when the notification itself is dropped by a full queue.
+func (s *Server) observeTargetEvents(sess *browser.Session) {
+	sess.SetTargetEventStamp(s.tabs.EventStamp)
+	sess.SetTargetDestroyedHook(s.tabs.NoteDestroyedRead)
+}
+
 // runTargetSync is the only consumer of the session's lifecycle event queue.
 func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 	if sess == nil {
@@ -105,7 +116,7 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 	}
 	// Idempotent; events read before a clock was installed carry the zero
 	// stamp, which is older than any evidence applied so far.
-	sess.SetTargetEventStamp(s.tabs.EventStamp)
+	s.observeTargetEvents(sess)
 	retry := time.NewTicker(time.Second)
 	defer retry.Stop()
 	for {

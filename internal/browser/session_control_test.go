@@ -110,3 +110,38 @@ func TestTargetEventsCarryStampFromEnqueueTime(t *testing.T) {
 		t.Fatalf("stamp without a clock = %d", ev.Stamp)
 	}
 }
+
+// A destroyed notification is reported to the hook when it is read, whether it
+// was queued or dropped by a full queue; other lifecycle events are not.
+func TestDestroyedHookSeesQueuedAndDroppedNotifications(t *testing.T) {
+	type seen struct {
+		id     target.ID
+		queued bool
+	}
+	var got []seen
+	s := &Session{targetEvents: make(chan TargetEvent, 2)}
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "before-hook"})
+	s.SetTargetDestroyedHook(func(id target.ID, queued bool) { got = append(got, seen{id, queued}) })
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "A"})                                  // fills the queue
+	s.enqueueTargetEvent(TargetEvent{Info: &target.Info{TargetID: "B", Type: "page"}}) // dropped, not a destruction
+	if !s.ConsumeTargetDirty() {
+		t.Fatal("precondition: the queue must be full")
+	}
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "C"}) // dropped
+	if !s.ConsumeTargetDirty() {
+		t.Fatal("dropped notification did not mark target state dirty")
+	}
+	want := []seen{{"A", true}, {"C", false}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("hook saw %+v, want %+v", got, want)
+	}
+	if len(s.TargetEvents()) != 2 {
+		t.Fatalf("queue holds %d events, want the 2 that fit", len(s.TargetEvents()))
+	}
+	s.SetTargetDestroyedHook(nil)
+	<-s.TargetEvents()
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "D"})
+	if len(got) != len(want) {
+		t.Fatalf("hook called after it was removed: %+v", got)
+	}
+}

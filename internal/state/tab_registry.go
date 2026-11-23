@@ -35,6 +35,12 @@ type TabRegistry struct {
 	gen       uint64
 	targetGen map[target.ID]uint64
 
+	// discovered marks the registered targets whose only evidence of existence
+	// is an enumeration reply (ApplyEnumeration registered them). A target the
+	// daemon created itself (CommitCreated), or one a lifecycle event reported,
+	// is not in it. See ApplyEnumeration for what the difference decides.
+	discovered map[target.ID]struct{}
+
 	// lastAbsence is the clock value of the latest evidence that targets are
 	// not there which did not arrive through the lifecycle event queue: an
 	// applied enumeration or a removal learned from a command reply
@@ -53,6 +59,9 @@ type TabRegistry struct {
 // While a window is open the registry records in it what happened meanwhile,
 // because the reply may describe the browser as it was before that:
 //   - removed: every target reported gone since the window opened;
+//   - removed: also every target whose destroyed notification was read from
+//     the connection since the window opened, even if the event queue dropped
+//     it (NoteDestroyedRead);
 //   - listed: the page targets that every enumeration applied since the window
 //     opened did list (meaningful once narrowed is set).
 //
@@ -68,12 +77,18 @@ type Window struct {
 
 type RemovedTab struct {
 	TargetID target.ID
+	// Contested is set when the target was unregistered because two overlapping
+	// enumerations disagree about it (see ApplyEnumeration), not because it is
+	// known to be gone. The caller should request a fresh enumeration, which
+	// registers the target again if it is really there.
+	Contested bool
 }
 
 func NewTabRegistry() *TabRegistry {
 	return &TabRegistry{
-		targetGen: make(map[target.ID]uint64),
-		windows:   make(map[*Window]struct{}),
+		targetGen:  make(map[target.ID]uint64),
+		discovered: make(map[target.ID]struct{}),
+		windows:    make(map[*Window]struct{}),
 	}
 }
 
@@ -145,9 +160,23 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 // ApplyEnumeration aligns the registry with the reply to the enumeration w was
 // opened for, and ends w.
 //
-//   - A registered target the reply does not list is removed (and reported)
-//     only if it was registered before w opened; one registered later is kept,
-//     the snapshot may simply predate it.
+//   - A registered target the reply does not list is removed (and reported) if
+//     it was registered before w opened: the snapshot is newer than a moment at
+//     which the target existed, so it is gone.
+//   - One registered after w opened is kept when the daemon knows first-hand
+//     that it came into being meanwhile: it was created by tab_new
+//     (CommitCreated) or reported by a lifecycle event. The snapshot may simply
+//     predate it; this is what protects a concurrent tab_new from an earlier
+//     snapshot.
+//   - One registered after w opened only because another, overlapping
+//     enumeration listed it (a discovery) is not protected. The two snapshots
+//     contradict each other and cannot be ordered — the target may have been
+//     opened after this snapshot or destroyed before it — so, as for an
+//     unregistered target below, absence wins: the id stops resolving and the
+//     removal is reported as Contested. It is not recorded as a removal in the
+//     windows in flight (nothing says the target is gone), so a creation still
+//     in flight commits normally, and the enumeration the caller requests
+//     after the conflict registers the target again if it is alive.
 //   - A listed target that is registered stays as it is.
 //   - A listed target that is not registered is registered unless it was
 //     reported gone while w was open, or an enumeration applied while w was
@@ -186,11 +215,23 @@ func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapsho
 	var removed []RemovedTab
 	if live {
 		for id, gen := range r.targetGen {
-			if _, ok := present[id]; ok || gen > w.gen {
+			if _, ok := present[id]; ok {
 				continue
 			}
-			removed = append(removed, RemovedTab{TargetID: id})
-			r.removeLocked(id)
+			if gen <= w.gen {
+				removed = append(removed, RemovedTab{TargetID: id})
+				r.removeLocked(id)
+				continue
+			}
+			if _, ok := r.discovered[id]; !ok {
+				continue
+			}
+			// Contradicting snapshots: unregister without declaring the target
+			// gone. The narrowing below keeps every enumeration still in flight
+			// from registering it.
+			removed = append(removed, RemovedTab{TargetID: id, Contested: true})
+			r.unregisterLocked(id)
+			r.gen++
 		}
 		slices.SortFunc(removed, func(a, b RemovedTab) int { return cmp.Compare(a.TargetID, b.TargetID) })
 	}
@@ -208,6 +249,7 @@ func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapsho
 			}
 			r.gen++
 			r.targetGen[id] = r.gen
+			r.discovered[id] = struct{}{}
 		}
 		out = append(out, TabSnapshot{TargetID: id, Title: present[id].Title, URL: present[id].URL})
 	}
@@ -303,9 +345,11 @@ func (r *TabRegistry) remove(id target.ID, outOfQueue bool) bool {
 //   - A target reported gone while w was open is not registered, whether or not
 //     it is registered again right now: the reply predates that removal (INV-6).
 //   - A target that is already registered (an enumeration or event got there
-//     first) stays registered as it is. Its registration is not renewed, so an
+//     first) stays registered. Its registration is not renewed, so an
 //     enumeration requested after it was first registered still removes it when
-//     it no longer lists it.
+//     it no longer lists it. It is no longer a mere discovery, though: the
+//     daemon now knows the target was created while w was open, so an
+//     enumeration requested before it was first registered does not remove it.
 //   - Otherwise it is registered. An enumeration applied meanwhile that did not
 //     list it is not held against it: that snapshot may predate the creation.
 func (r *TabRegistry) CommitCreated(w *Window, id target.ID) bool {
@@ -321,6 +365,7 @@ func (r *TabRegistry) CommitCreated(w *Window, id target.ID) bool {
 		}
 	}
 	if _, ok := r.targetGen[id]; ok {
+		delete(r.discovered, id)
 		return true
 	}
 	if w != nil && !live {
@@ -330,6 +375,39 @@ func (r *TabRegistry) CommitCreated(w *Window, id target.ID) bool {
 	r.gen++
 	r.targetGen[id] = r.gen
 	return true
+}
+
+// NoteDestroyedRead records that the browser reported id destroyed, at the
+// moment the notification is read from the connection and whether or not it
+// then found room in the lifecycle event queue (queued).
+//
+// The report is recorded in every window in flight, exactly as a removal is: a
+// reply requested before this moment may describe the browser as it was before
+// the target went away, so it cannot register the target — neither an
+// enumeration that still lists it nor the Target.createTarget reply that names
+// it. This does not wait for the queue, and it is the only trace a notification
+// leaves when the queue is full and drops it: without it a tab created and
+// destroyed during an overflow would be committed by its late creation reply
+// although the resync that follows the overflow never listed it.
+//
+// The registration itself is not touched here, because unregistering also
+// clears daemon state under the lifecycle mutex and this runs on the
+// connection reader: a queued notification is applied by the consumer
+// (RemoveEventTarget), a dropped one by the resync the overflow requests, which
+// is requested after this moment and therefore removes the target. A dropped
+// notification is also evidence from outside the queue that events still
+// queued predate, so those cannot register an unregistered target any more
+// (see RegisterEvent).
+func (r *TabRegistry) NoteDestroyedRead(id target.ID, queued bool) {
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.noteRemovedLocked(id)
+	if !queued {
+		r.lastAbsence = r.gen
+	}
 }
 
 // EventStamp is the lifecycle clock value to attach to a lifecycle event at the
@@ -346,8 +424,9 @@ func (r *TabRegistry) EventStamp() uint64 {
 //
 // Events wait in a queue, so by the time one is handled newer evidence may
 // have been applied. An event for a target that is not registered is dropped
-// when an enumeration, or a removal learned from a command reply, was applied
-// after its stamp: it is older than that evidence and cannot bring an id back
+// when an enumeration, a removal learned from a command reply, or a destroyed
+// notification the queue had to drop (NoteDestroyedRead) was applied after its
+// stamp: it is older than that evidence and cannot bring an id back
 // (INV-6). The connection delivers in order, so everything the browser sent
 // before a reply carries a stamp from before that reply was applied; removals
 // reported by events are ordered by the queue itself. A false result for a
@@ -409,11 +488,18 @@ type TabSnapshot struct {
 // removeLocked unregisters id and records the removal (caller holds lock; id
 // must be registered).
 func (r *TabRegistry) removeLocked(id target.ID) {
+	r.unregisterLocked(id)
+	r.noteRemovedLocked(id)
+}
+
+// unregisterLocked makes id stop resolving without recording that it is gone
+// (caller holds lock).
+func (r *TabRegistry) unregisterLocked(id target.ID) {
 	delete(r.targetGen, id)
+	delete(r.discovered, id)
 	if r.selected == id {
 		r.selected = ""
 	}
-	r.noteRemovedLocked(id)
 }
 
 // noteRemovedLocked records that id was reported gone now, in every window in

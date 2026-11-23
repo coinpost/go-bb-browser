@@ -126,6 +126,9 @@ type Session struct {
 	targetDirty  atomic.Bool
 	// targetStamp, when set, supplies TargetEvent.Stamp (see SetTargetEventStamp).
 	targetStamp atomic.Pointer[func() uint64]
+	// targetGone, when set, is told about destroyed notifications as they are
+	// read (see SetTargetDestroyedHook).
+	targetGone atomic.Pointer[func(target.ID, bool)]
 }
 
 func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
@@ -348,14 +351,40 @@ func (s *Session) SetTargetEventStamp(clock func() uint64) {
 	s.targetStamp.Store(&clock)
 }
 
+// SetTargetDestroyedHook installs a callback that is told about every
+// Target.targetDestroyed notification at the moment chromedp's reader hands it
+// over, in connection order, and whether the notification found room in the
+// lifecycle queue (queued) or was dropped because the queue was full. A dropped
+// notification is otherwise only visible as the dirty flag, which says that
+// something was lost but not what; the hook keeps the one fact that never stops
+// being true — this target is gone. hook runs on the connection reader and must
+// not block.
+func (s *Session) SetTargetDestroyedHook(hook func(id target.ID, queued bool)) {
+	if s == nil {
+		return
+	}
+	if hook == nil {
+		s.targetGone.Store(nil)
+		return
+	}
+	s.targetGone.Store(&hook)
+}
+
 func (s *Session) enqueueTargetEvent(event TargetEvent) {
 	if clock := s.targetStamp.Load(); clock != nil {
 		event.Stamp = (*clock)()
 	}
+	queued := true
 	select {
 	case s.targetEvents <- event:
 	default:
+		queued = false
 		s.targetDirty.Store(true)
+	}
+	if event.Destroyed != "" {
+		if hook := s.targetGone.Load(); hook != nil {
+			(*hook)(event.Destroyed, queued)
+		}
 	}
 }
 

@@ -248,7 +248,7 @@ func newTabCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), commandTimeout)
 			defer cancel()
 			if cmd.Flags().Changed("id") {
-				if strings.TrimSpace(selID) == "" {
+				if selID == "" {
 					return errors.New("empty --id")
 				}
 				return cmdRPC(ctx, baseURL, jsonOut, protocol.MethodTabSelect, map[string]any{"tab": selID})
@@ -279,7 +279,7 @@ func newTabCmd() *cobra.Command {
 			switch {
 			case cmd.Flags().Changed("id"):
 				tab = closeID
-				if strings.TrimSpace(tab) == "" {
+				if tab == "" {
 					return errors.New("empty --id")
 				}
 			case cmd.Flags().Changed("index"):
@@ -1270,14 +1270,14 @@ func effectiveTab(ctx context.Context, base, flag string) (string, error) {
 }
 
 // tabIDValue is the --tab flag. The id is kept verbatim (the daemon matches the
-// complete CDP target id exactly), and an explicitly blank value is an error
+// complete CDP target id exactly, whitespace included), and an explicitly empty value is an error
 // rather than a silent switch to the focused tab — e.g. --tab "$TAB" with TAB unset.
 type tabIDValue string
 
 func (v *tabIDValue) String() string { return string(*v) }
 func (v *tabIDValue) Type() string   { return "string" }
 func (v *tabIDValue) Set(s string) error {
-	if strings.TrimSpace(s) == "" {
+	if s == "" {
 		return errors.New("empty tab id; omit --tab to use the focused tab")
 	}
 	*v = tabIDValue(s)

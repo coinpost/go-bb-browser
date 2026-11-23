@@ -77,29 +77,47 @@ func TestExistenceEvidenceDoesNotRenewRegisteredTarget(t *testing.T) {
 	r.Abandon(w)
 }
 
-func TestApplyEnumerationProtectsTargetsAddedByNewerEnumeration(t *testing.T) {
+// Two overlapping enumerations that disagree about a target cannot be ordered:
+// the one that lists it may be the older snapshot (the target was destroyed in
+// between) just as well as the newer one (it was opened in between). A target
+// known only from such a listing is therefore not protected from the other
+// reply: absence wins, exactly as when the replies are applied in the opposite
+// order (TestOverlappingEnumerationsAbsenceWinsInEitherOrder), and the removal
+// is flagged so the caller asks again.
+//
+// This test used to assert the opposite ("an older empty snapshot does not
+// remove a target registered by a newer enumeration"). That protection is what
+// kept a destroyed tab resolvable when its notification was lost; it now
+// belongs to targets the daemon knows were created meanwhile (CommitCreated,
+// lifecycle events), see TestApplyEnumerationKeepsTargetsRegisteredAfterWindowOpened
+// and TestCommitCreatedProtectsNewTargetFromOverlappingEnumeration.
+func TestOverlappingEnumerationDoesNotProtectDiscoveredTarget(t *testing.T) {
 	r := NewTabRegistry()
 	older := r.OpenWindow()
 	newer := r.OpenWindow()
 
 	r.ApplyEnumeration(newer, pageInfos("AAAA0001"))
-	if _, removed := r.ApplyEnumeration(older, nil); len(removed) != 0 {
-		t.Fatalf("removed = %#v, want none", removed)
+	_, removed := r.ApplyEnumeration(older, nil)
+	if len(removed) != 1 || removed[0].TargetID != "AAAA0001" || !removed[0].Contested {
+		t.Fatalf("removed = %#v, want AAAA0001 as contested", removed)
 	}
-	if !r.Has("AAAA0001") {
-		t.Fatal("older empty snapshot removed a target registered by a newer one")
+	if r.Has("AAAA0001") {
+		t.Fatal("a target two overlapping snapshots disagree about still resolves")
+	}
+	// The enumeration requested after the conflict decides: a live target is
+	// registered again.
+	if tabs, _ := r.ApplyEnumeration(r.OpenWindow(), pageInfos("AAAA0001")); len(tabs) != 1 || !r.Has("AAAA0001") {
+		t.Fatalf("tabs = %#v, want AAAA0001 registered by the enumeration after the conflict", tabs)
 	}
 	// Merely being listed again does not renew protection: the next
-	// enumeration requested afterwards still removes it.
+	// enumeration requested afterwards still removes it, as plainly gone.
 	tok := r.OpenWindow()
 	r.ApplyEnumeration(r.OpenWindow(), pageInfos("AAAA0001"))
-	if _, removed := r.ApplyEnumeration(tok, nil); len(removed) != 1 {
-		t.Fatalf("removed = %#v, want AAAA0001", removed)
+	if _, removed := r.ApplyEnumeration(tok, nil); len(removed) != 1 || removed[0].Contested {
+		t.Fatalf("removed = %#v, want AAAA0001, not contested", removed)
 	}
 }
 
-// A window is one request: once it ended (applied, committed or abandoned) a
-// second reply for it has nothing to stand on and changes nothing.
 func TestEndedWindowAppliesNothing(t *testing.T) {
 	r := NewTabRegistry()
 	r.RegisterPageTarget("AAAA0001")

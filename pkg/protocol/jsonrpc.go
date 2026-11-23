@@ -134,7 +134,9 @@ type TabFocusParams struct{}
 // byte for byte (no trimming, case folding, prefix or suffix match) and answers
 // "unknown tab id" (CodeInvalidParams) for anything else, including ids of tabs
 // that are gone. It never substitutes the focused tab or another tab for an id
-// that was supplied. The short suffix ids of earlier versions no longer exist.
+// that was supplied. Only the empty string means "no tab given" ("missing
+// tab"); any other value, whitespace included, is looked up as it is. The short
+// suffix ids of earlier versions no longer exist.
 // A target id is unique among the targets of one running browser; it is not
 // promised to stay unique across browser restarts.
 

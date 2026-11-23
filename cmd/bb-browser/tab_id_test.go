@@ -158,6 +158,9 @@ func TestCLIExplicitTabNeverFallsBack(t *testing.T) {
 	for _, tab := range []string{
 		"1234", "ab1234", cliTabA[1:], cliTabA[:len(cliTabA)-1],
 		strings.ToLower(cliTabA), " " + cliTabA, cliTabA + " ", "0:" + cliTabA,
+		// An id is opaque: one made of whitespace only is not "empty". It is
+		// sent as it is and the daemon decides.
+		" ", "  ", "\t",
 	} {
 		for _, args := range [][]string{
 			{"--tab", tab, "eval", "1"},
@@ -178,14 +181,13 @@ func TestCLIExplicitTabNeverFallsBack(t *testing.T) {
 		}
 	}
 
-	// An explicitly empty id is rejected locally instead of meaning "focused tab".
+	// An explicitly empty id is rejected locally instead of meaning "focused
+	// tab". Only the empty string is empty.
 	for _, args := range [][]string{
 		{"--tab", "", "eval", "1"},
-		{"--tab", "  ", "close"},
 		{"eval", "1", "--tab="},
 		{"run", "missing.js", "--tab", ""},
 		{"tab", "close", "--id", ""},
-		{"tab", "select", "--id", " "},
 	} {
 		before := len(d.requests())
 		if _, err := runCLI(t, append([]string{"--url", url}, args...)...); err == nil || !strings.Contains(err.Error(), "empty") {

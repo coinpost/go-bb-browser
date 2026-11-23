@@ -249,12 +249,12 @@ func pinTarget(ctx context.Context, tid target.ID) {
 
 const unknownTabHint = "tab must be the complete CDP target id of an open tab, exactly as returned by tab_new / tab_list"
 
-// requestTab returns the tab id of a request exactly as sent, or "" when it is
-// missing or blank. The id is never trimmed or otherwise normalized.
+// requestTab returns the tab id of a request exactly as sent; "" means the
+// request named no tab. The id is an opaque string: it is never trimmed or
+// otherwise normalized and only the empty string is "missing" — any other
+// value, whitespace included, is looked up byte for byte like the id tab_new
+// returned.
 func requestTab(raw string) string {
-	if strings.TrimSpace(raw) == "" {
-		return ""
-	}
 	return raw
 }
 

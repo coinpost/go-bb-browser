@@ -173,6 +173,13 @@ func (s *Server) applyEnumeration(conn any, w *state.Window, infos []*target.Inf
 	}
 	retry := s.recoverManagedLocked(infos)
 	s.lifeMu.Unlock()
+	for _, tab := range removed {
+		// Two overlapping enumerations disagreed about this tab and the registry
+		// stopped resolving it without knowing it gone. Only an enumeration
+		// requested after the conflict can tell: it registers the tab again if
+		// it is alive.
+		retry = retry || tab.Contested
+	}
 
 	if sess, ok := conn.(*browser.Session); ok {
 		for _, tab := range removed {
