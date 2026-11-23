@@ -317,3 +317,23 @@ Codex独立只读审查origin/main@2be49f8...HEAD全59文件，重点核查第6�
 配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过，11测试包、1无测试包；关键身份/锁/18方法/Pool/CLI/恢复/16目标idle轮转及窗口释放等永久回归各20轮通过。配置通过不覆盖诊断失败，manager未另行重复全量。工作树干净，无代码修改、提交、安装或依赖清单变化，保护路径及go.mod/go.sum相对base未变。
 证据保留本机review/evidence/FT28-39f1a61/：REVIEW.md、reproduce.md、sources/、counts.txt、configured.log、diagnostics-head/pre/base-20.log、original-pre-20.log、key-head-20.log、manager-diagnostics.log。诊断在工作树外导出副本执行，尚非永久回归。Go1.27.4，隔离HOME/TMPDIR/缓存，复用固定模块，GOPROXY=off/GOSUMDB=off，仅fake CDP/本地回环stub；未验真实Chrome、Go1.26、部署、线上频率或跨浏览器ID唯一性，未操作用户窗口，不扩张FT7。无链接issue/PR，不发GitHub评论。
 round=6，超过max_rounds=3，owner仅授权本次build；发现P1，留在review/等待owner决定，不自动追加修复。若继续请添加说明并移至new/。未改代码、未合并main、未发布、未改定时任务。
+
+
+## factory · 2026-11-23 17:32
+owner 本次明确要求：
+> 补充到 ft28 然后再让 cc build 一轮
+
+追加真实 Chrome 核验结论（39f1a61；完整核验报告见 .factory/reports/FT28-real-chrome-20261123-cc.md）：
+- P1-1：完整生产 ListenAndServe + browser.Connect + runTargetSync + watchdog + HTTP /v1，真实 Chrome 各5/5。只延迟一条旧 getTargets 回复，并对新 A 做 eval 附着，即会在争议清理时发出 Target.closeTarget(A)，A 消失、B 存活；无需第二次 tab_list。未附着对照不关页。
+- P1-2：完整生产路径5/5。立即的死 A 登记/idle/磁盘复活约一个同步tick可自愈；若迟到创建回复晚于冲突触发的自动重枚举，则2.2秒无RPC后仍保留死 A，三种clear成功。生产连接不收destroyed，不扣事件亦复现。须覆盖持久时序，不把短暂自愈视为修复。
+- 原review P1-3/P1-4/P2 的代码问题在额外开启browser级discovery后各5/5，但原样生产连接未送root级setDiscoverTargets，35次无root生命周期通知。不能把测试额外注入的discovery说成既有生产可达。其他Chrome版本/CDP宿主未验证，结论不泛化。
+- 新发现生产事件接线缺口：无任何时序注入时，手动关闭daemon创建的标签2.3秒后registry/idle仍有A、clear成功，直到显式tab_list才清理。页面session的生命周期事件未进入ListenBrowser；先前依赖读线程destroyed的修复在真实Chrome生产连接上不生效。本轮纳入修复与永久验收。
+- 上述竞争是“真实Chrome + 受控时序”，不是自然概率。历史CC报告使用headless，未满足factory非headless规则；本轮真实验收必须隔离非headless Chrome、CDP仅127.0.0.1、临时profile，不碰用户会话。零页面启动先前SKIP，不能宣称已覆盖。
+
+按owner授权review/ → new/，继续原分支第7轮；超过max_rounds为本次人工授权，不改配置。修复最新review四项P1及关联P2，并补齐生产事件接线。保持完整target ID、不兼容短ID及有效回归。不得合并其他factory分支、不得合并main/发布、不得启动FT7或改定时任务。
+
+## factory · plan · 2026-11-23 17:32
+Behaviour：只读冲突仅暂停解析并触发新核验，不得关闭存活页面；缺席证据约束迟到创建，registry/idle/磁盘一致；生产browser级生命周期事件确实进入消费者，用户关闭后无需额外RPC即失效。事件读取与枚举开始使用可比较的因果顺序，先登记销毁约束再发布dirty；矛盾快照两种应用方向均请求自动恢复。
+Scope：registry、Session的CDP连接/事件路由与非关页资源清理、daemon同步与相应测试/文档；修复新发现事件接线后，原来需额外discovery的时序也必须按真实生产路径重新验收。保持清楚的控制流、资源所有权及失败语义，不叠加任意历史缓存或猜测fallback。
+Decisions：以生产实际发送/接收的CDP消息证明接线，不以stub成功替代；必要的discovery由生产连接明确启用，测试代理不得偷偷注入。沿用原分支，不重写已发布历史；若main前移仅合并origin/main。
+Checking：最新五项原诊断提升永久回归；保留历轮有效测试。前两项与无时序干预关闭清理需完整生产daemon + 非headless真实Chrome，5轮，记录线上closeTarget零断言/死A拒绝/B存活/idle及磁盘；接线改变后复验dirty/迟到事件/反向冲突，无额外discovery注入。关键确定性race重复20次，全量gofmt/vet/race；保留红绿与原始CDP证据，未覆盖或自然概率如实记录。测试HOME/TMPDIR/缓存隔离在run目录，不依赖真实外网。
