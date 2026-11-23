@@ -1,24 +1,23 @@
 go-bb-browser - factory board
 =============================
-2 at your gates | 0 with the agent | 19 done | 18 sent back
-Drawn Nov 23, 23:16 | https://github.com/coinpost/go-bb-browser
+1 at your gates | 1 with the agent | 19 done | 19 sent back
+Drawn Nov 24, 00:04 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (5)                                 never built
-    FT2     1d  生命周期事件溢出重同步与优雅关停次序
-    FT3     1d  创建在途关停收尾与唯一释放记账
-    FT4     1d  日志尾行、轮转恢复与安全可写探测
-    FT5     1d  快照ref作用域与脱离节点清理
-    FT6     1d  run帮助布尔参数与选项终止符兼容
+    FT2     2d  生命周期事件溢出重同步与优雅关停次序
+    FT3     2d  创建在途关停收尾与唯一释放记账
+    FT4     2d  日志尾行、轮转恢复与安全可写探测
+    FT5     2d  快照ref作用域与脱离节点清理
+    FT6     2d  run帮助布尔参数与选项终止符兼容
 
 NEW (0)                                     avg stay 4h
     Nothing here
 
-REVIEW (2) [!]                              avg stay 2h
+REVIEW (2) [!]                              avg stay 1h
   * FT7    11h  target释放与观测writer退役同步 (round 6)
                 > Decide: fix or take it
-  * FT28    1m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
-                兼容 (round 8)
-                > Decide: fix or take it
+    FT28    1m  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
+                兼容 (round 9)
 
 READY (0)                                   avg stay 2h
     Nothing here
