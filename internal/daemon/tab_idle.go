@@ -26,7 +26,8 @@ var (
 // commit exclude each other, no managed record can outlive the removal of its
 // target and nothing has to be re-checked afterwards.
 //
-// Managed invariant: the idle tracker only holds registered targets, and the
+// Managed invariant: the idle tracker only holds targets the registry knows
+// (resolving or, for the moment, not), and the
 // persisted managed set holds at least those. The two differ only by members a
 // previous daemon process persisted that this one has not recovered yet
 // (recoverManagedLocked).
@@ -37,6 +38,15 @@ const createRollbackTimeout = 5 * time.Second
 
 type targetDirtyMarker interface {
 	MarkTargetDirty()
+}
+
+// requestEnumeration asks the target sync loop of conn for a fresh
+// Target.getTargets. It is how every piece of lifecycle evidence that could
+// not be ordered gets settled: the new enumeration is requested after it.
+func requestEnumeration(conn any) {
+	if m, ok := conn.(targetDirtyMarker); ok {
+		m.MarkTargetDirty()
+	}
 }
 
 // markTabManagedLocked starts a daemon-created tab's managed lifecycle: in the
@@ -58,18 +68,33 @@ func (s *Server) markTabManagedLocked(tid target.ID) {
 }
 
 // commitCreatedTab makes the target named by a Target.createTarget reply a
-// registered, managed tab and reports whether it did. w was opened before the
-// creation was requested: a tab reported gone since then (closed, destroyed,
-// dropped by an enumeration) is neither registered nor given a managed
-// lifecycle, so the late reply cannot bring its id back.
-func (s *Server) commitCreatedTab(w *state.Window, tid target.ID) bool {
+// registered, managed tab and reports whether it is one when the call returns.
+// w was opened before the creation was requested: a tab reported gone since
+// then (closed, destroyed, dropped by an enumeration) is neither registered nor
+// given a managed lifecycle, so the late reply cannot bring its id back.
+//
+// When absence evidence exists that could not be ordered against the creation
+// (an enumeration applied meanwhile did not list the tab), the tab is committed
+// all the same — the snapshot may simply predate it — and the browser is asked
+// once more before tab_new answers: that enumeration is requested after the
+// commit, so a tab it does not list is gone, and it removes the tab together
+// with its managed record. If the question cannot be asked, the answer is left
+// to the sync loop of conn and the commit stands.
+func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Window, tid target.ID) bool {
 	s.lifeMu.Lock()
-	defer s.lifeMu.Unlock()
-	if !s.tabs.CommitCreated(w, tid) {
-		return false
+	ok, verify := s.tabs.CommitCreated(w, tid)
+	if ok {
+		s.markTabManagedLocked(tid)
 	}
-	s.markTabManagedLocked(tid)
-	return true
+	s.lifeMu.Unlock()
+	if !ok || !verify {
+		return ok
+	}
+	if _, err := s.enumerateTabs(ctx, conn); err != nil {
+		requestEnumeration(conn)
+		return true
+	}
+	return s.tabs.Has(tid)
 }
 
 // rollbackCreatedTab closes a tab this daemon just created but could not
@@ -125,12 +150,13 @@ func (s *Server) forgetTabManagedLocked(tid target.ID) {
 	}
 }
 
-// forgetUnregisteredManaged drops the managed lifecycle of a target that is not
-// registered (any more).
+// forgetUnregisteredManaged drops the managed lifecycle of a target the
+// registry does not know (any more). A target that is known but does not
+// resolve at the moment keeps it.
 func (s *Server) forgetUnregisteredManaged(tid target.ID) {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	if !s.tabs.Has(tid) {
+	if !s.tabs.Known(tid) {
 		s.forgetTabManagedLocked(tid)
 	}
 }
@@ -163,33 +189,28 @@ func (s *Server) enumerateTabs(ctx context.Context, conn tabConn) ([]state.TabSn
 // applyEnumeration applies the reply (infos) to the enumeration w was opened
 // for. All target-scoped cleanup (idle tracking, observation buffers, Session
 // resources; keyed locks reclaim themselves) is driven only by the removals the
-// registry reports, so a tab protected from a stale snapshot keeps every one of
-// them. conn is the connection the reply came from.
+// registry reports, and it reports only targets the browser is known to have
+// dropped. A tab the reply merely does not list while its existence cannot be
+// ordered against the snapshot keeps every one of them — in particular its
+// browser attachment, whose release would close a page that is still open —
+// and a fresh enumeration is requested instead. conn is the connection the
+// reply came from.
 func (s *Server) applyEnumeration(conn any, w *state.Window, infos []*target.Info) []state.TabSnapshot {
 	s.lifeMu.Lock()
-	snaps, removed := s.tabs.ApplyEnumeration(w, infos)
+	snaps, removed, verify := s.tabs.ApplyEnumeration(w, infos)
 	for _, tab := range removed {
 		s.clearTargetStateLocked(tab.TargetID)
 	}
 	retry := s.recoverManagedLocked(infos)
 	s.lifeMu.Unlock()
-	for _, tab := range removed {
-		// Two overlapping enumerations disagreed about this tab and the registry
-		// stopped resolving it without knowing it gone. Only an enumeration
-		// requested after the conflict can tell: it registers the tab again if
-		// it is alive.
-		retry = retry || tab.Contested
-	}
 
 	if sess, ok := conn.(*browser.Session); ok {
 		for _, tab := range removed {
 			sess.ForgetTarget(tab.TargetID)
 		}
 	}
-	if retry {
-		if m, ok := conn.(targetDirtyMarker); ok {
-			m.MarkTargetDirty()
-		}
+	if verify || retry {
+		requestEnumeration(conn)
 	}
 	return snaps
 }
@@ -224,16 +245,16 @@ func (s *Server) dropTarget(conn any, tid target.ID, remove func(target.ID) bool
 		return
 	}
 	s.lifeMu.Lock()
-	registered := remove(tid)
-	if registered {
+	known := remove(tid)
+	if known {
 		s.clearTargetStateLocked(tid)
 	} else {
-		// Nothing hangs off an unregistered target, except that a previous
-		// daemon may have persisted it as managed: gone is gone for it too.
+		// Nothing hangs off an unknown target, except that a previous daemon
+		// may have persisted it as managed: gone is gone for it too.
 		s.forgetTabManagedLocked(tid)
 	}
 	s.lifeMu.Unlock()
-	if !registered {
+	if !known {
 		return
 	}
 	if sess, ok := conn.(*browser.Session); ok {
@@ -247,11 +268,14 @@ func (s *Server) dropTarget(conn any, tid target.ID, remove func(target.ID) bool
 // process creates enters both sets in one step (commitCreatedTab). Each was
 // persisted before this process sent any request, so the reply is newer than
 // it:
-//   - registered now: a live target has exactly the persisted complete target
-//     id, and idle tracking resumes from the persisted last activity;
+//   - known to the registry now: a live target has exactly the persisted
+//     complete target id, and idle tracking resumes from the persisted last
+//     activity (also when the target is suspended for the moment: it is
+//     settled, together with its managed lifecycle, by the enumeration the
+//     suspension requested);
 //   - not listed by the reply: gone, retired. This keeps the persisted set
 //     bounded by the live managed tabs;
-//   - listed but not registered: the registry would not take the reply's word
+//   - listed but not known: the registry would not take the reply's word
 //     (the target was reported gone, or missing from another enumeration, while
 //     the request was in flight). Whatever reported that retired the tab in the
 //     same critical section, so this is not expected; the tab stays persisted
@@ -285,7 +309,7 @@ func (s *Server) recoverManagedLocked(infos []*target.Info) (retry bool) {
 		if _, ok := tracked[tid]; ok {
 			continue
 		}
-		if s.tabs.Has(tid) {
+		if s.tabs.Known(tid) {
 			effective := mt.LastActivity
 			if effective.Before(minLast) {
 				effective = minLast
@@ -373,7 +397,7 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 			}
 			return
 		}
-		if !s.tabs.Has(tid) {
+		if !s.tabs.Known(tid) {
 			s.forgetUnregisteredManaged(tid)
 			continue
 		}

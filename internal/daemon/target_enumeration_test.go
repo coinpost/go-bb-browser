@@ -669,7 +669,7 @@ func TestDirtyResyncWithStaleSnapshotKeepsNewTab(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sess, err := browser.Connect(ctx, st.url())
+	sess, err := browser.Connect(ctx, st.url(), browser.WithTargetObserver(srv.tabs))
 	if err != nil {
 		t.Fatal(err)
 	}

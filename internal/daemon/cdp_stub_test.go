@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -20,6 +21,13 @@ import (
 //
 // Target.getTargets takes its snapshot when the request arrives and can then be
 // held back by the test, which is exactly the "stale enumeration" window.
+//
+// Like Chrome, the stub sends target lifecycle notifications on the browser
+// session only after the client asked for them there with a root-level
+// Target.setDiscoverTargets{discover:true} (a page-session one, which chromedp
+// sends when it attaches, does not count), and answers that command by
+// announcing every existing target first. A test therefore cannot hand the
+// daemon lifecycle events its production connection would not receive.
 type cdpStub struct {
 	t   *testing.T
 	srv *httptest.Server
@@ -27,14 +35,19 @@ type cdpStub struct {
 	writeMu sync.Mutex
 	conn    net.Conn
 
-	mu          sync.Mutex
-	pages       []target.ID
-	nextCreate  []target.ID
-	sessionSeq  int
-	closed      []target.ID
-	getTargets  int
-	holdTargets []chan struct{} // one entry per upcoming Target.getTargets call
-	arrived     chan int        // call number of every Target.getTargets request
+	mu       sync.Mutex
+	discover bool // root-level discovery enabled by the client
+	// failDiscover makes the stub a DevTools host without target discovery:
+	// the root-level command is answered with an error.
+	failDiscover bool
+	discoverReq  int // root-level Target.setDiscoverTargets requests seen
+	pages        []target.ID
+	nextCreate   []target.ID
+	sessionSeq   int
+	closed       []target.ID
+	getTargets   int
+	holdTargets  []chan struct{} // one entry per upcoming Target.getTargets call
+	arrived      chan int        // call number of every Target.getTargets request
 }
 
 type cdpStubMessage struct {
@@ -133,6 +146,39 @@ func (st *cdpStub) addPage(id target.ID, announce bool) {
 	}
 }
 
+// removePage makes a page disappear as if the user closed it in the browser:
+// no command of the daemon is involved. announce sends the destroyed
+// notification (when the client enabled discovery); without it the
+// notification is lost.
+func (st *cdpStub) removePage(id target.ID, announce bool) {
+	st.mu.Lock()
+	kept := st.pages[:0]
+	for _, p := range st.pages {
+		if p != id {
+			kept = append(kept, p)
+		}
+	}
+	st.pages = kept
+	st.mu.Unlock()
+	if announce {
+		st.emit("Target.targetDestroyed", map[string]any{"targetId": id})
+	}
+}
+
+// rootDiscoverRequests is how many root-level Target.setDiscoverTargets
+// commands the client sent.
+func (st *cdpStub) rootDiscoverRequests() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.discoverReq
+}
+
+func (st *cdpStub) getTargetsCalls() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.getTargets
+}
+
 func (st *cdpStub) emitInfoChanged(id target.ID) {
 	st.emit("Target.targetInfoChanged", map[string]any{"targetInfo": stubTargetInfo(id)})
 }
@@ -144,7 +190,17 @@ func stubTargetInfo(id target.ID) map[string]any {
 	}
 }
 
+// emit sends a browser-session notification. Target lifecycle notifications
+// are only sent once the client enabled root-level discovery.
 func (st *cdpStub) emit(method string, params any) {
+	if strings.HasPrefix(method, "Target.target") {
+		st.mu.Lock()
+		on := st.discover
+		st.mu.Unlock()
+		if !on {
+			return
+		}
+	}
 	st.write(map[string]any{"method": method, "params": params})
 }
 
@@ -220,6 +276,31 @@ func (st *cdpStub) handle(msg cdpStubMessage) {
 			<-gate
 			send()
 		}()
+	case "Target.setDiscoverTargets":
+		if msg.SessionID != "" {
+			st.reply(msg, map[string]any{})
+			return
+		}
+		var p struct {
+			Discover bool `json:"discover"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
+		st.mu.Lock()
+		st.discoverReq++
+		if st.failDiscover {
+			st.mu.Unlock()
+			st.write(map[string]any{"id": msg.ID, "error": map[string]any{"code": -32601, "message": "'Target.setDiscoverTargets' wasn't found"}})
+			return
+		}
+		st.discover = p.Discover
+		pages := append([]target.ID(nil), st.pages...)
+		st.mu.Unlock()
+		if p.Discover {
+			for _, id := range pages {
+				st.emit("Target.targetCreated", map[string]any{"targetInfo": stubTargetInfo(id)})
+			}
+		}
+		st.reply(msg, map[string]any{})
 	case "Target.createTarget":
 		st.mu.Lock()
 		var id target.ID

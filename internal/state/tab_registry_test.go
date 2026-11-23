@@ -121,3 +121,19 @@ func TestRemoveTargetReportsRegistration(t *testing.T) {
 		t.Fatal("target still registered after removal")
 	}
 }
+
+// commitOK is CommitCreated for tests that only care whether it registered.
+func commitOK(r *TabRegistry, w *Window, id target.ID) bool {
+	ok, _ := r.CommitCreated(w, id)
+	return ok
+}
+
+// readDestroyed plays the connection reader for one Target.targetDestroyed
+// notification: read (NoteEventRead), then either queued or dropped by a full
+// queue (EventDropped), in the order Session.enqueueTargetEvent uses.
+func readDestroyed(r *TabRegistry, id target.ID, queued bool) {
+	r.NoteEventRead(id)
+	if !queued {
+		r.EventDropped()
+	}
+}

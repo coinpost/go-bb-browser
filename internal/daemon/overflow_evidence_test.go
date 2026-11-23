@@ -151,11 +151,8 @@ func TestDroppedDestroyDuringCreate(t *testing.T) {
 	s := newReconcileRaceServer(t, newEnumConn(), dir, 0)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	sess, err := browser.Connect(ctx, st.url())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
+	sess := ovfConnect(t, ctx, s, st, true)
+	ovfDrainConnectEvents(t, ctx, s, sess)
 	c := &ovfHeldCreate{Session: sess, made: make(chan target.ID, 1), release: make(chan struct{})}
 	defer closeOnce(c.release)
 	s.tabHook = c
@@ -202,7 +199,9 @@ func TestDroppedDestroyDuringCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.emit("Target.targetDestroyed", map[string]any{"targetId": ovfMarker})
-	ovfAwait(t, ctx, "marker removed", func() bool { _, ok := s.tabs.Lookup(marker); return !ok })
+	// Known, not Lookup: the marker stops resolving the moment its notification
+	// is read; it is forgotten when the consumer gets to it.
+	ovfAwait(t, ctx, "marker removed", func() bool { return !s.tabs.Known(target.ID(marker)) })
 
 	closeOnce(c.release)
 	r := <-created
@@ -252,15 +251,9 @@ func ovfDiscoveryRace(t *testing.T, readerEvidence bool) {
 	defer s.closeAudit()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	sess, err := browser.Connect(ctx, st.url())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
+	sess := ovfConnect(t, ctx, s, st, readerEvidence)
 	s.tabHook = sess
-	if readerEvidence {
-		ovfObserve(s, sess)
-	}
+	ovfDrainConnectEvents(t, ctx, s, sess)
 	marker := ovfListed(t, s, ovfMarker)
 	awaitGetTargets(t, st, 1)
 	// The queue consumer is not running yet: fill the queue, then open A.
@@ -308,7 +301,9 @@ func ovfDiscoveryRace(t *testing.T, readerEvidence bool) {
 		t.Fatal(err)
 	}
 	closeOnce(second)
-	ovfAwait(t, ctx, "marker removed", func() bool { _, ok := s.tabs.Lookup(marker); return !ok })
+	// Known, not Lookup: the marker stops resolving the moment its notification
+	// is read; it is forgotten when the consumer gets to it.
+	ovfAwait(t, ctx, "marker removed", func() bool { return !s.tabs.Known(target.ID(marker)) })
 
 	if s.tabs.Has(ovfA) {
 		t.Error("A is registered after the overflow resync that did not list it")

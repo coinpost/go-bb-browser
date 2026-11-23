@@ -385,7 +385,7 @@ func TestQueuedInfoEventDoesNotReviveTabAfterCloseAndResync(t *testing.T) {
 	defer srv.closeAudit()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	sess, err := browser.Connect(ctx, st.url())
+	sess, err := browser.Connect(ctx, st.url(), browser.WithTargetObserver(srv.tabs))
 	if err != nil {
 		t.Fatal(err)
 	}

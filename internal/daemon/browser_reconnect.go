@@ -48,9 +48,15 @@ func isCDPSessionLost(err error) bool {
 
 // connectBrowserLocked attaches a new chromedp session. Caller must hold s.tabMu.
 func (s *Server) connectBrowserLocked(ctx context.Context) error {
-	sess, err := browser.Connect(context.WithoutCancel(ctx), s.cfg.DebuggerURL)
+	// The registry observes the connection reader from the first message on:
+	// lifecycle events are stamped, and destroyed notifications recorded, in
+	// connection order before any reply that names targets can be applied.
+	sess, err := browser.Connect(context.WithoutCancel(ctx), s.cfg.DebuggerURL, browser.WithTargetObserver(s.tabs))
 	if err != nil {
 		return err
+	}
+	if derr := sess.TargetDiscoveryErr(); derr != nil && s.logger != nil {
+		s.logger.Warn("browser target discovery not enabled: tabs closed in the browser are only noticed by the next target enumeration", "err", derr)
 	}
 	s.tabLive = sess
 	s.sessDone = sess.Close
@@ -58,7 +64,6 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	s.browserFailures = 0
 	s.browserLastProbe = time.Now()
 	s.watchCDPSession(sess)
-	s.observeTargetEvents(sess)
 	go s.runTargetSync(ctx, sess)
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
@@ -96,27 +101,11 @@ func (s *Server) syncInitialTargets(conn targetDirtyMarker, w *state.Window, tar
 	return nil
 }
 
-// observeTargetEvents connects the session's connection reader to the registry,
-// before any request whose reply names targets is sent on it:
-//   - lifecycle events are stamped with the registry clock as they are read, so
-//     the consumer can order them against replies applied while they were
-//     queued;
-//   - destroyed notifications are recorded in the request windows in flight as
-//     they are read, so a reply requested earlier cannot register the target
-//     even when the notification itself is dropped by a full queue.
-func (s *Server) observeTargetEvents(sess *browser.Session) {
-	sess.SetTargetEventStamp(s.tabs.EventStamp)
-	sess.SetTargetDestroyedHook(s.tabs.NoteDestroyedRead)
-}
-
 // runTargetSync is the only consumer of the session's lifecycle event queue.
 func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 	if sess == nil {
 		return
 	}
-	// Idempotent; events read before a clock was installed carry the zero
-	// stamp, which is older than any evidence applied so far.
-	s.observeTargetEvents(sess)
 	retry := time.NewTicker(time.Second)
 	defer retry.Stop()
 	for {
@@ -162,12 +151,14 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 }
 
 // applyTargetEvent applies one queued lifecycle event. "Gone" is always
-// applied: it stays true however late it is handled. "Exists" is applied only
-// if nothing newer than the event has been applied since it was read
-// (TabRegistry.RegisterEvent), so an event that waited in the queue across a
-// tab_close or a resync cannot bring a closed tab back. An event refused for
-// that reason asks for a fresh enumeration instead, which registers the target
-// if it is really there.
+// applied: it stays true however late it is handled (and the registry already
+// stopped resolving the target when the notification was read). "Exists" is
+// evidence about the instant the event was read (TabRegistry.RegisterEvent):
+// it is applied with that instant, and not at all when something newer was
+// applied meanwhile, so an event that waited in the queue across a tab_close
+// or a resync cannot bring a closed tab back. An event refused for that reason
+// asks for a fresh enumeration instead, which registers the target if it is
+// really there.
 func (s *Server) applyTargetEvent(conn any, ev browser.TargetEvent) {
 	if ev.Destroyed != "" {
 		s.removeEventTarget(conn, ev.Destroyed)
@@ -176,9 +167,7 @@ func (s *Server) applyTargetEvent(conn any, ev browser.TargetEvent) {
 		if info.Type != "page" && info.Type != "tab" {
 			s.removeEventTarget(conn, info.TargetID)
 		} else if !s.tabs.RegisterEvent(ev.Stamp, info.TargetID) {
-			if m, ok := conn.(targetDirtyMarker); ok {
-				m.MarkTargetDirty()
-			}
+			requestEnumeration(conn)
 		}
 	}
 }

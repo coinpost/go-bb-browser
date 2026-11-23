@@ -124,11 +124,12 @@ type Session struct {
 
 	targetEvents chan TargetEvent
 	targetDirty  atomic.Bool
-	// targetStamp, when set, supplies TargetEvent.Stamp (see SetTargetEventStamp).
-	targetStamp atomic.Pointer[func() uint64]
-	// targetGone, when set, is told about destroyed notifications as they are
-	// read (see SetTargetDestroyedHook).
-	targetGone atomic.Pointer[func(target.ID, bool)]
+	// targetObserver, when set, is told about lifecycle events as they are read
+	// (see SetTargetObserver).
+	targetObserver atomic.Pointer[TargetObserver]
+	// discoverErr is why browser-level target discovery could not be enabled
+	// (nil when it was); written once by Connect.
+	discoverErr error
 }
 
 func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
@@ -144,11 +145,32 @@ func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
 type TargetEvent struct {
 	Info      *target.Info
 	Destroyed target.ID
-	// Stamp is the consumer's clock when the event was read from the browser
-	// connection (zero until SetTargetEventStamp installs a clock). The event
-	// waits in a queue; the stamp lets the consumer tell which of its own state
-	// changes are newer than the event.
+	// Stamp is what the TargetObserver returned when the event was read from
+	// the browser connection (zero without an observer). The event waits in a
+	// queue; the stamp lets the consumer order it against its own state changes.
 	Stamp uint64
+}
+
+// TargetObserver is told about lifecycle events on the connection reader, in
+// connection order, before the consumer of TargetEvents can see them. Both
+// methods run on the reader and must not block.
+type TargetObserver interface {
+	// NoteEventRead is called for every lifecycle event as it is read, before
+	// it is queued. destroyed is the target of a Target.targetDestroyed
+	// notification, empty for other events. The result becomes the Stamp.
+	NoteEventRead(destroyed target.ID) uint64
+	// EventDropped is called when the queue was full and the event was not
+	// queued, before the overflow becomes visible through ConsumeTargetDirty.
+	EventDropped()
+}
+
+// ConnectOption configures Connect.
+type ConnectOption func(*Session)
+
+// WithTargetObserver installs o before the connection delivers its first
+// lifecycle event (see SetTargetObserver).
+func WithTargetObserver(o TargetObserver) ConnectOption {
+	return func(s *Session) { s.SetTargetObserver(o) }
 }
 
 type tabPoolEntry struct {
@@ -260,7 +282,11 @@ func connectFailureHint(err error) string {
 
 // Connect opens a CDP session to an already-running Chrome instance.
 // debuggerURL may be host:port, ws(s) URL, or http(s) URL (chromedp resolves to browser websocket).
-func Connect(parent context.Context, debuggerURL string) (*Session, error) {
+//
+// The returned session receives the browser's target lifecycle events: Connect
+// enables browser-level discovery on the connection itself (see
+// enableTargetDiscovery).
+func Connect(parent context.Context, debuggerURL string, opts ...ConnectOption) (*Session, error) {
 	if debuggerURL == "" {
 		return nil, fmt.Errorf("debugger URL is empty")
 	}
@@ -312,8 +338,47 @@ func Connect(parent context.Context, debuggerURL string) (*Session, error) {
 		allocCancel()
 	}
 	s := newSession(ctx, cancel)
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.listenTargetEvents()
+	s.discoverErr = s.enableTargetDiscovery(parent)
 	return s, nil
+}
+
+// targetDiscoveryTimeout bounds the one command that turns lifecycle events on.
+const targetDiscoveryTimeout = 15 * time.Second
+
+// enableTargetDiscovery sends Target.setDiscoverTargets on the browser session
+// (no sessionId). Without it Chrome reports target lifecycle only on the page
+// sessions chromedp attaches, and those notifications are routed to the page
+// executors: ListenBrowser, and with it TargetEvents, would stay silent. The
+// listener is registered first, so nothing the command triggers is missed.
+//
+// A failure is not fatal — a DevTools host may not implement discovery — but
+// then tab removal is only learned from enumerations; see TargetDiscoveryErr.
+func (s *Session) enableTargetDiscovery(parent context.Context) error {
+	ex := browserExecutor(s.ctx)
+	if ex == nil {
+		return fmt.Errorf("browser not available in context")
+	}
+	// The browser executor waits on this context only; it is not the chromedp
+	// context, so the deadline cannot tear the session down.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), targetDiscoveryTimeout)
+	defer cancel()
+	if err := target.SetDiscoverTargets(true).Do(cdp.WithExecutor(ctx, ex)); err != nil {
+		return wrapCDPError("Target.setDiscoverTargets", "", err)
+	}
+	return nil
+}
+
+// TargetDiscoveryErr reports why browser-level target discovery is not enabled
+// on this session, or nil when lifecycle events are being delivered.
+func (s *Session) TargetDiscoveryErr() error {
+	if s == nil {
+		return errNilSession()
+	}
+	return s.discoverErr
 }
 
 func (s *Session) listenTargetEvents() {
@@ -336,56 +401,40 @@ func (s *Session) listenTargetEvents() {
 	})
 }
 
-// SetTargetEventStamp installs the clock read for every lifecycle event at the
-// moment chromedp's reader hands it over, which is in connection order: an
-// event the browser sent before a command reply is stamped before the caller
-// of that command sees the reply. clock must not block.
-func (s *Session) SetTargetEventStamp(clock func() uint64) {
+// SetTargetObserver installs the observer of the lifecycle event stream; nil
+// removes it. Install it before the first request whose reply names targets is
+// sent, so every event that can be ordered against such a reply was observed.
+func (s *Session) SetTargetObserver(o TargetObserver) {
 	if s == nil {
 		return
 	}
-	if clock == nil {
-		s.targetStamp.Store(nil)
+	if o == nil {
+		s.targetObserver.Store(nil)
 		return
 	}
-	s.targetStamp.Store(&clock)
+	s.targetObserver.Store(&o)
 }
 
-// SetTargetDestroyedHook installs a callback that is told about every
-// Target.targetDestroyed notification at the moment chromedp's reader hands it
-// over, in connection order, and whether the notification found room in the
-// lifecycle queue (queued) or was dropped because the queue was full. A dropped
-// notification is otherwise only visible as the dirty flag, which says that
-// something was lost but not what; the hook keeps the one fact that never stops
-// being true — this target is gone. hook runs on the connection reader and must
-// not block.
-func (s *Session) SetTargetDestroyedHook(hook func(id target.ID, queued bool)) {
-	if s == nil {
-		return
-	}
-	if hook == nil {
-		s.targetGone.Store(nil)
-		return
-	}
-	s.targetGone.Store(&hook)
-}
-
+// enqueueTargetEvent runs on the connection reader. The order is the contract:
+// the observer learns about the event first (a destroyed target is recorded as
+// gone before anything else can act on the event), a dropped event is reported
+// to the observer next, and only then is the overflow published to the
+// consumer. Whoever consumes the dirty flag therefore requests its enumeration
+// after everything the dropped event meant has been recorded.
 func (s *Session) enqueueTargetEvent(event TargetEvent) {
-	if clock := s.targetStamp.Load(); clock != nil {
-		event.Stamp = (*clock)()
+	obs := s.targetObserver.Load()
+	if obs != nil {
+		event.Stamp = (*obs).NoteEventRead(event.Destroyed)
 	}
-	queued := true
 	select {
 	case s.targetEvents <- event:
+		return
 	default:
-		queued = false
-		s.targetDirty.Store(true)
 	}
-	if event.Destroyed != "" {
-		if hook := s.targetGone.Load(); hook != nil {
-			(*hook)(event.Destroyed, queued)
-		}
+	if obs != nil {
+		(*obs).EventDropped()
 	}
+	s.targetDirty.Store(true)
 }
 
 func (s *Session) TargetEvents() <-chan TargetEvent {
@@ -462,9 +511,12 @@ func (s *Session) Close() {
 	}
 }
 
-// ForgetTarget drops daemon-owned resources after Chrome has already removed a target.
-// Cancelling a live chromedp child closes its tab, so this must only be called from an
-// authoritative target-removal path.
+// ForgetTarget drops daemon-owned resources of a target the browser has
+// reported gone (close reply, destroyed notification, or absence from an
+// enumeration that is provably newer than the target). Cancelling a chromedp
+// child context makes chromedp send Target.closeTarget for its target, so this
+// must never be called on weaker evidence: a tab whose existence is merely in
+// doubt keeps its attachment.
 func (s *Session) ForgetTarget(id target.ID) {
 	if s == nil || id == "" {
 		return

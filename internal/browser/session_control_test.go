@@ -87,43 +87,67 @@ func TestTargetEventQueueOverflowMarksDirty(t *testing.T) {
 	}
 }
 
-// Lifecycle events are stamped with the consumer's clock at the moment they are
-// handed over (connection order), not when they are consumed.
+// recordingObserver is a TargetObserver that records what the reader told it
+// and what the session looked like at that moment.
+type recordingObserver struct {
+	s     *Session
+	clock uint64
+	calls []string
+	// dirtyAtDrop is whether the overflow was already visible to the consumer
+	// when EventDropped ran.
+	dirtyAtDrop []bool
+	// queuedAtRead is the queue length when NoteEventRead ran.
+	queuedAtRead []int
+}
+
+func (o *recordingObserver) NoteEventRead(destroyed target.ID) uint64 {
+	o.clock++
+	o.calls = append(o.calls, "read:"+string(destroyed))
+	o.queuedAtRead = append(o.queuedAtRead, len(o.s.targetEvents))
+	return o.clock
+}
+
+func (o *recordingObserver) EventDropped() {
+	o.calls = append(o.calls, "dropped")
+	o.dirtyAtDrop = append(o.dirtyAtDrop, o.s.targetDirty.Load())
+}
+
+// Lifecycle events are stamped by the observer at the moment they are handed
+// over (connection order), not when they are consumed.
 func TestTargetEventsCarryStampFromEnqueueTime(t *testing.T) {
 	s := newSession(context.Background(), func() {})
-	s.enqueueTargetEvent(TargetEvent{Destroyed: "before-clock"})
-	var clock atomic.Uint64
-	clock.Store(7)
-	s.SetTargetEventStamp(clock.Load)
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "before-observer"})
+	obs := &recordingObserver{s: s, clock: 6}
+	s.SetTargetObserver(obs)
 	s.enqueueTargetEvent(TargetEvent{Info: &target.Info{TargetID: "A", Type: "page"}})
-	clock.Store(9)
+	obs.clock = 8
 	s.enqueueTargetEvent(TargetEvent{Destroyed: "B"})
-	clock.Store(100) // the consumer falls behind; stamps must not move
+	obs.clock = 100 // the consumer falls behind; stamps must not move
 	for i, want := range []uint64{0, 7, 9} {
 		if ev := <-s.TargetEvents(); ev.Stamp != want {
 			t.Fatalf("event %d stamp = %d, want %d", i, ev.Stamp, want)
 		}
 	}
-	s.SetTargetEventStamp(nil)
+	s.SetTargetObserver(nil)
 	s.enqueueTargetEvent(TargetEvent{Destroyed: "C"})
 	if ev := <-s.TargetEvents(); ev.Stamp != 0 {
-		t.Fatalf("stamp without a clock = %d", ev.Stamp)
+		t.Fatalf("stamp without an observer = %d", ev.Stamp)
 	}
 }
 
-// A destroyed notification is reported to the hook when it is read, whether it
-// was queued or dropped by a full queue; other lifecycle events are not.
-func TestDestroyedHookSeesQueuedAndDroppedNotifications(t *testing.T) {
-	type seen struct {
-		id     target.ID
-		queued bool
-	}
-	var got []seen
+// The reader's order is a contract (review round 6, P1-3): the observer learns
+// about an event — in particular which target a destroyed notification names —
+// BEFORE the event is queued, a dropped event is reported to the observer
+// next, and only then does the overflow become visible to the consumer. A
+// consumer that sees the dirty flag therefore requests its enumeration after
+// everything the dropped event meant has been recorded.
+func TestObserverIsToldBeforeQueueAndBeforeDirtyIsPublished(t *testing.T) {
 	s := &Session{targetEvents: make(chan TargetEvent, 2)}
-	s.enqueueTargetEvent(TargetEvent{Destroyed: "before-hook"})
-	s.SetTargetDestroyedHook(func(id target.ID, queued bool) { got = append(got, seen{id, queued}) })
+	obs := &recordingObserver{s: s}
+	s.enqueueTargetEvent(TargetEvent{Destroyed: "before-observer"}) // queued, unobserved
+	s.SetTargetObserver(obs)
 	s.enqueueTargetEvent(TargetEvent{Destroyed: "A"})                                  // fills the queue
-	s.enqueueTargetEvent(TargetEvent{Info: &target.Info{TargetID: "B", Type: "page"}}) // dropped, not a destruction
+	s.enqueueTargetEvent(TargetEvent{Info: &target.Info{TargetID: "B", Type: "page"}}) // dropped
 	if !s.ConsumeTargetDirty() {
 		t.Fatal("precondition: the queue must be full")
 	}
@@ -131,17 +155,30 @@ func TestDestroyedHookSeesQueuedAndDroppedNotifications(t *testing.T) {
 	if !s.ConsumeTargetDirty() {
 		t.Fatal("dropped notification did not mark target state dirty")
 	}
-	want := []seen{{"A", true}, {"C", false}}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("hook saw %+v, want %+v", got, want)
+	want := []string{"read:A", "read:", "dropped", "read:C", "dropped"}
+	if len(obs.calls) != len(want) {
+		t.Fatalf("observer calls = %v, want %v", obs.calls, want)
+	}
+	for i := range want {
+		if obs.calls[i] != want[i] {
+			t.Fatalf("observer calls = %v, want %v", obs.calls, want)
+		}
+	}
+	if obs.queuedAtRead[0] != 1 {
+		t.Fatalf("queue held %d events when A was observed: observed after it was queued", obs.queuedAtRead[0])
+	}
+	for i, dirty := range obs.dirtyAtDrop {
+		if dirty {
+			t.Fatalf("drop %d: the overflow was published before the observer was told", i)
+		}
 	}
 	if len(s.TargetEvents()) != 2 {
 		t.Fatalf("queue holds %d events, want the 2 that fit", len(s.TargetEvents()))
 	}
-	s.SetTargetDestroyedHook(nil)
+	s.SetTargetObserver(nil)
 	<-s.TargetEvents()
 	s.enqueueTargetEvent(TargetEvent{Destroyed: "D"})
-	if len(got) != len(want) {
-		t.Fatalf("hook called after it was removed: %+v", got)
+	if len(obs.calls) != len(want) {
+		t.Fatalf("observer called after it was removed: %v", obs.calls)
 	}
 }

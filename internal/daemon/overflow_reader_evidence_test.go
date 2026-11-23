@@ -8,9 +8,58 @@ import (
 	"github.com/yiplee/go-bb-browser/internal/browser"
 )
 
-// ovfObserve wires the connection reader to the registry as
-// connectBrowserLocked does, before any request is sent.
-func ovfObserve(s *Server, sess *browser.Session) { s.observeTargetEvents(sess) }
+// ovfConnect attaches a real browser.Session to the stub the way
+// connectBrowserLocked does: the registry observes the connection reader from
+// the first message on, and the connection itself enables root-level target
+// discovery. observe=false leaves the reader unobserved (events carry the zero
+// stamp and destroyed notifications are not recorded when read), which is what
+// is left when only enumerations can decide.
+func ovfConnect(t *testing.T, ctx context.Context, s *Server, st *cdpStub, observe bool) *browser.Session {
+	t.Helper()
+	if observe {
+		return ovfConnectObserved(t, ctx, st, s.tabs)
+	}
+	return ovfConnectObserved(t, ctx, st, nil)
+}
+
+func ovfConnectObserved(t *testing.T, ctx context.Context, st *cdpStub, obs browser.TargetObserver) *browser.Session {
+	t.Helper()
+	var opts []browser.ConnectOption
+	if obs != nil {
+		opts = append(opts, browser.WithTargetObserver(obs))
+	}
+	sess, err := browser.Connect(ctx, st.url(), opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sess.Close)
+	if err := sess.TargetDiscoveryErr(); err != nil {
+		t.Fatalf("target discovery: %v", err)
+	}
+	if n := st.rootDiscoverRequests(); n != 1 {
+		t.Fatalf("the connection sent %d root-level Target.setDiscoverTargets, want 1", n)
+	}
+	return sess
+}
+
+// ovfDrainConnectEvents consumes the announcements of the pre-existing targets
+// that enabling discovery produced, so a test that counts queue slots starts
+// from an empty queue and a clean dirty flag.
+func ovfDrainConnectEvents(t *testing.T, ctx context.Context, s *Server, sess *browser.Session) {
+	t.Helper()
+	if err := sess.PingBrowserContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case ev := <-sess.TargetEvents():
+			s.applyTargetEvent(sess, ev)
+		default:
+			sess.ConsumeTargetDirty()
+			return
+		}
+	}
+}
 
 // The discovery race in production order: the reader records the dropped
 // destroyed notification in the list request in flight, so the list reply
@@ -30,13 +79,9 @@ func TestLiveTabSurvivesContradictingEnumeration(t *testing.T) {
 	defer s.closeAudit()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	sess, err := browser.Connect(ctx, st.url())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sess.Close()
+	sess := ovfConnect(t, ctx, s, st, true)
 	s.tabHook = sess
-	ovfObserve(s, sess)
+	ovfDrainConnectEvents(t, ctx, s, sess)
 	ovfListed(t, s, ovfB)
 	awaitGetTargets(t, st, 1)
 	resync, list := st.holdNextGetTargets(), st.holdNextGetTargets()

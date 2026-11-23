@@ -12,7 +12,7 @@ func TestCommitCreatedOrdersReplyAgainstRemoval(t *testing.T) {
 	t.Run("no removal", func(t *testing.T) {
 		r := NewTabRegistry()
 		w := r.OpenWindow()
-		if !r.CommitCreated(w, regIDA) || !r.Has(regIDA) {
+		if !commitOK(r, w, regIDA) || !r.Has(regIDA) {
 			t.Fatalf("registered = %v", r.Has(regIDA))
 		}
 	})
@@ -25,7 +25,7 @@ func TestCommitCreatedOrdersReplyAgainstRemoval(t *testing.T) {
 			t.Fatal("precondition: A was registered by the list")
 		}
 		r.RemoveEventTarget(regIDA) // targetDestroyed
-		if r.CommitCreated(w, regIDA) || r.Has(regIDA) {
+		if commitOK(r, w, regIDA) || r.Has(regIDA) {
 			t.Fatal("the late create reply revived A")
 		}
 		if !r.Has(regIDB) {
@@ -36,7 +36,7 @@ func TestCommitCreatedOrdersReplyAgainstRemoval(t *testing.T) {
 		r := NewTabRegistry()
 		w := r.OpenWindow()
 		r.RemoveEventTarget(regIDA)
-		if r.CommitCreated(w, regIDA) || r.Has(regIDA) {
+		if commitOK(r, w, regIDA) || r.Has(regIDA) {
 			t.Fatal("destroyed target registered")
 		}
 	})
@@ -47,7 +47,7 @@ func TestCommitCreatedOrdersReplyAgainstRemoval(t *testing.T) {
 		if _, removed := r.SyncPageTargetsDetailed(nil); len(removed) != 1 {
 			t.Fatalf("removed = %v", removed)
 		}
-		if r.CommitCreated(w, regIDA) || r.Has(regIDA) {
+		if commitOK(r, w, regIDA) || r.Has(regIDA) {
 			t.Fatal("target dropped by an enumeration registered")
 		}
 	})
@@ -55,7 +55,7 @@ func TestCommitCreatedOrdersReplyAgainstRemoval(t *testing.T) {
 		r := NewTabRegistry()
 		w := r.OpenWindow()
 		r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)) // may predate the creation
-		if !r.CommitCreated(w, regIDA) || !r.Has(regIDA) {
+		if !commitOK(r, w, regIDA) || !r.Has(regIDA) {
 			t.Fatal("creation refused because an overlapping enumeration did not list it")
 		}
 	})
@@ -63,13 +63,13 @@ func TestCommitCreatedOrdersReplyAgainstRemoval(t *testing.T) {
 		r := NewTabRegistry()
 		r.RemoveTarget(regIDA)
 		w := r.OpenWindow()
-		if !r.CommitCreated(w, regIDA) {
+		if !commitOK(r, w, regIDA) {
 			t.Fatal("creation refused for a removal that predates its request")
 		}
 	})
 	t.Run("empty id", func(t *testing.T) {
 		r := NewTabRegistry()
-		if r.CommitCreated(r.OpenWindow(), "") || r.Has("") {
+		if commitOK(r, r.OpenWindow(), "") || r.Has("") {
 			t.Fatal("empty id registered")
 		}
 		if r.OpenWindows() != 0 {
@@ -91,15 +91,15 @@ func TestCommitCreatedRefusedAfterRemovalEvenIfRegisteredAgain(t *testing.T) {
 		t.Fatal("precondition: tab_close removed A")
 	}
 	// Requested after the close; the browser still lists the closing target.
-	if snaps, _ := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)); len(snaps) != 2 || !r.Has(regIDA) {
+	if snaps, _, _ := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)); len(snaps) != 2 || !r.Has(regIDA) {
 		t.Fatalf("precondition: lingering A listed by a current enumeration: %v", snapshotIDs(snaps))
 	}
-	if r.CommitCreated(create, regIDA) {
+	if commitOK(r, create, regIDA) {
 		t.Fatal("creation committed although the tab was closed after it was requested")
 	}
 	// The refusal does not touch what the current enumeration registered; the
 	// next enumeration without A removes it.
-	if _, removed := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)); len(removed) != 1 || r.Has(regIDA) {
+	if _, removed, _ := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)); len(removed) != 1 || r.Has(regIDA) {
 		t.Fatalf("removed = %v, want A", removed)
 	}
 }
@@ -114,10 +114,10 @@ func TestCommitCreatedDoesNotRenewRegistrationAndMaskAbsence(t *testing.T) {
 	create := r.OpenWindow()
 	r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDA, regIDB)) // A exists: registered
 	onlyB := r.OpenWindow()                                       // requested after A was closed in the browser
-	if !r.CommitCreated(create, regIDA) || !r.Has(regIDA) {
+	if !commitOK(r, create, regIDA) || !r.Has(regIDA) {
 		t.Fatal("precondition: nothing reported A gone yet, the creation commits")
 	}
-	snaps, removed := r.ApplyEnumeration(onlyB, pageInfos(regIDB))
+	snaps, removed, _ := r.ApplyEnumeration(onlyB, pageInfos(regIDB))
 	if len(removed) != 1 || removed[0].TargetID != regIDA || r.Has(regIDA) {
 		t.Fatalf("late create commit masked the absence of A: snaps=%v removed=%v", snapshotIDs(snaps), removed)
 	}
@@ -136,13 +136,13 @@ func TestCommitCreatedProtectsNewTargetFromOverlappingEnumeration(t *testing.T) 
 	r.SyncPageTargets(pageInfos(regIDB))
 	stale := r.OpenWindow()
 	create := r.OpenWindow()
-	if !r.CommitCreated(create, regIDA) {
+	if !commitOK(r, create, regIDA) {
 		t.Fatal("creation refused")
 	}
-	if _, removed := r.ApplyEnumeration(stale, pageInfos(regIDB)); len(removed) != 0 || !r.Has(regIDA) {
+	if _, removed, _ := r.ApplyEnumeration(stale, pageInfos(regIDB)); len(removed) != 0 || !r.Has(regIDA) {
 		t.Fatalf("new tab removed by an overlapping enumeration: %v", removed)
 	}
-	if _, removed := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)); len(removed) != 1 {
+	if _, removed, _ := r.ApplyEnumeration(r.OpenWindow(), pageInfos(regIDB)); len(removed) != 1 {
 		t.Fatalf("enumeration requested after the commit removed %v, want A", removed)
 	}
 }
@@ -158,7 +158,7 @@ func TestConcurrentCommitCreatedAndRemoval(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(3)
 		var committed bool
-		go func() { defer wg.Done(); committed = r.CommitCreated(w, regIDA) }()
+		go func() { defer wg.Done(); committed = commitOK(r, w, regIDA) }()
 		go func() { defer wg.Done(); r.ApplyEnumeration(list, pageInfos(regIDA, regIDB)) }()
 		go func() { defer wg.Done(); r.RemoveTarget(regIDA) }()
 		wg.Wait()

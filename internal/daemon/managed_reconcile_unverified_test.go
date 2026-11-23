@@ -192,7 +192,7 @@ func TestRefusedTargetEventRequestsResync(t *testing.T) {
 	enumMustRPC(t, srv, "tab_list", nil)
 
 	marker := &countingDirtyMarker{}
-	stamp := srv.tabs.EventStamp()
+	stamp := srv.tabs.NoteEventRead("")
 	srv.applyTargetEvent(marker, browserInfoEvent(stamp, fullIDB)) // registered: nothing to do
 	srv.applyTargetEvent(marker, browserInfoEvent(stamp, fullIDA)) // current: registers
 	if marker.n != 0 || !srv.tabs.Has(fullIDA) {

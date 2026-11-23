@@ -500,8 +500,9 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	pinTarget(ctx, tid)
-	if !s.commitCreatedTab(win, tid) {
-		// The tab was reported gone while it was being created. Make sure of
+	if !s.commitCreatedTab(ctx, conn, win, tid) {
+		// The tab was reported gone while it was being created, or right after
+		// by the enumeration that settled contradicting evidence. Make sure of
 		// it: one bounded close of exactly this id, so no unmanaged tab is
 		// left behind silently.
 		cleanup := s.rollbackCreatedTab(ctx, conn, tid)
