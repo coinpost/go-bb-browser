@@ -774,11 +774,18 @@ func (e *rcEnv) listed(id target.ID) bool {
 }
 
 // clearsAccept reports how many of the three observation clears accept tab.
+// A clear that is not accepted must have been refused as "unknown tab id": a
+// lookup that failed (a Target.getTargets that timed out, say) says nothing
+// about the id and is reported as a test failure, not counted as a refusal.
 func (e *rcEnv) clearsAccept(id target.ID) int {
+	e.t.Helper()
 	n := 0
 	for _, m := range []string{"network_clear", "console_clear", "errors_clear"} {
-		if r := e.rpc(m, map[string]any{"tab": string(id)}); r.Error == nil {
+		r := e.rpc(m, map[string]any{"tab": string(id)})
+		if r.Error == nil {
 			n++
+		} else if r.Error["message"] != "unknown tab id" {
+			e.t.Errorf("%s on %s failed with %v, which is not a refusal of the id", m, id, r.Error)
 		}
 	}
 	return n
