@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 3
+round: 4
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -173,3 +173,39 @@ owner 本次明确要求：
 > FT28 移到 new 然后继续用 cc 去 build
 
 按 owner 授权从 review/ 移回 new/，继续原分支第 4 轮（超过 max_rounds 的本次人工授权，不修改配置）。使用 Claude Code 修复最新 review 两项 P1：迟到创建回包恢复已销毁身份、较旧枚举覆盖较新枚举确认的缺席；保留完整 ID 不复用及既定任务范围。P2/P3 notes 供检查关联风险，不自动扩为本轮任务；FT7 本次不启动，不合并或发布。
+
+## factory · plan · 2026-11-23 13:01
+
+## Behaviour
+- tab_new：创建请求发出前取生命周期代数；回包登记 A 时，若 A 在此之后已被删除（tab_close 确认 / targetDestroyed / 枚举移除），不再登记、不写受管记录、不选中，返回明确错误（tab 在创建完成前已被关闭）。登记后再写受管记录并复核登记，受管（idle + rpc.jsonl）与删除保持一致先后，不会在删除之后留下 managed_tab_open。
+- 枚举：每次枚举应用都记入代数。旧回复列出但当前未登记的 id，只要其请求之后已有另一枚举应用且该枚举未列出它（确认缺席），就不登记、不列出；包括已注销、从未登记的 id。已登记目标、并发新建保护（请求后登记的目标不被旧快照删除）、后续当前枚举照常登记不变。
+- 三种 clear / 其它定向 RPC 对失效完整 id 继续 unknown tab id；同后缀 B 不受影响。
+
+## Scope
+- internal/state/tab_registry.go、internal/daemon（tab_new、枚举后受管对账）、对应测试、AGENTS/README 相关说明。
+- 关联修复（避免新有界记忆扩大已知 P2）：受管对账只把“浏览器回复确实未列出”的候选退役；回复列出但 registry 因历史遗忘无法验证的不退役并重试枚举。
+- 不做：生命周期队列旧事件(P2)、明确 target-gone 清理(P2)、tab_select 锁(P2)、CLI/Pool/文档美化(P2/P3)、FT7。
+
+## Decisions
+- 枚举确认缺席用有界“已应用枚举”日志（相同集合合并，超出上限按不可验证保守处理），不用永久墓碑。
+- 判定按“请求—应用”窗口而非令牌先后：两个交叠请求在浏览器侧的快照顺序不可知，窗口内任一应用未列出该 id 即不可信。
+- 创建遇到删除历史已遗忘（不可验证）时用一次当前枚举裁决，而不是乐观登记。
+- 合并 origin/main@2be49f8（仅 main），文档冲突沿用完整 id 契约。
+
+## Checking
+- 先红后绿：registry + daemon 屏障回归（迟到 tab_new 回包；较新列表确认缺席后放行旧列表），三种 clear、同后缀 B、idle 跟踪、磁盘重放。
+- 有界性/溢出/并发新建保护回归。
+- test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...；定向 -race -count=20。
+- 证据：本目录 red.log / green.log / race-repeat.log / full.log。
+
+## factory · 2026-11-23 13:01
+Claude Code 完成 owner 人工授权第4轮，提交 fcdb42f（合并 origin/main@2be49f8 并解决 AGENTS/Pool 冲突）、f1bd04507dfaa1c5d7236235eadd156bf8a03a36（修复及永久回归）。仅合并 main，未合并其他 factory 分支。
+- 创建请求发出前取生命周期令牌；迟到创建回复若目标已删除，不登记、不选中、不写受管记录，返回 tab closed before tab_new completed。登记/受管记录后复核，防止与删除交错导致 idle 或磁盘重放复活。删除记忆溢出时用当前枚举裁决。
+- 已应用枚举的缺席证据约束交叠请求的旧回复，含此前已注销或从未登记的身份；保留并发新建保护。记忆为最近64个不同目标集合，相邻相同集合合并，溢出保守拒绝未验证登记。代价：真实外部新 tab 可能晚一次枚举登记。
+- 关联修复原P2：新增有界记忆不能扩大“不确定被持久退役”风险，生产对账以浏览器原始回复判断缺席；被列出但未验证者保留受管记录并重试。旧诊断直接调用底层 reconcileIdleFromLog 绕过生产包装仍失败；新增包装层回归通过，需 review 核查生产循环。
+- 红绿：合并main后、修复前 registry 5项失败；daemon迟到创建5种删除调度、旧枚举2种前置×4入口均失败；修复后通过，三种clear拒绝A、同后缀B不受影响、idle/磁盘重放不恢复A。新API/有界性及对账测试无独立红证据；并发压力在旧代码亦通过，仅算race检查。既有 TestRepeatedRemovalStaysBounded 对调两次应用顺序以符合新缺席契约，断言保留，review 注意是否掩盖旧保证。
+- coder定向 -race -count=20 通过、全量通过；manager独立 test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./... 通过（Go1.27.4，11测试包、1无测试包）。diff --check通过，never路径未变；工作树干净。证据本机 build/evidence/FT28-round4/ 下 plan.md、red.log、green.log、race-repeat.log、full.log、manager-full.log。
+- 安装：无；go.mod/go.sum未变。HOME/TMPDIR/GOCACHE隔离、复用模块缓存、GOPROXY=off/GOSUMDB=off，无真实外网。
+- 未验：真实Chrome（仅fake CDP/stub）、Go1.26、跨浏览器会话ID唯一性；不确定对账后重试未经真实runTargetSync循环端到端验证；创建溢出裁决枚举失败分支无专门测试。双重溢出/裁决失败可能留下存活但未受管tab并返回错误，需review关注。
+- 未处理P2/P3：队列旧事件重新登记、明确target-gone不清理、tab_select绕锁诊断仍失败；CLI裁剪、Pool错误类型、残留短ID示例未作为本轮修复或重新验证。无UI变更。
+状态：代码已推送，new/ → review/，round 4（本次owner授权，不更改max_rounds）；待独立审查，未合并main、未发布、不启动FT7、不改变定时任务。
