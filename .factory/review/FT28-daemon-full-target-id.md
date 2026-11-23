@@ -209,3 +209,26 @@ Claude Code 完成 owner 人工授权第4轮，提交 fcdb42f（合并 origin/ma
 - 未验：真实Chrome（仅fake CDP/stub）、Go1.26、跨浏览器会话ID唯一性；不确定对账后重试未经真实runTargetSync循环端到端验证；创建溢出裁决枚举失败分支无专门测试。双重溢出/裁决失败可能留下存活但未受管tab并返回错误，需review关注。
 - 未处理P2/P3：队列旧事件重新登记、明确target-gone不清理、tab_select绕锁诊断仍失败；CLI裁剪、Pool错误类型、残留短ID示例未作为本轮修复或重新验证。无UI变更。
 状态：代码已推送，new/ → review/，round 4（本次owner授权，不更改max_rounds）；待独立审查，未合并main、未发布、不启动FT7、不改变定时任务。
+
+
+## factory · review · 2026-11-23 13:12
+head: f1bd04507dfaa1c5d7236235eadd156bf8a03a36
+verdict: fix
+fix:
+- [P1] internal/state/tab_registry.go:314: 迟到创建回包刷新已登记 A 的代数，覆盖实际创建之后的缺席证据：挂起 tab_new 回包→列表登记 A→A 关闭→挂起仅含 B 的新列表→放行创建→放行列表，三种 clear 仍接受 A，idle 与磁盘重放仍保留 A。另一调度先成功 tab_close(A)，再被仍含 A 的当前列表登记，第305行因此跳过已知删除证据，创建也错误成功。提交创建时先检查令牌之后的已知删除，不受当前是否登记影响；已登记目标保留原登记代数，仅首次登记推进，并保留历史溢出的当前验证及两种永久屏障回归。
+notes:
+- [P2] internal/daemon/tab_idle.go:289: 普通 tab_list 并发登记 A 可让生产重试因 Has(A) 提前结束，A 仍持久受管但没有 idle 跟踪。应按本次接受的 snaps 判断重试，或同步补齐跟踪。无并发列表时生产自动重试已验证成功。
+- [P2] internal/daemon/tab_idle.go:67: 删除历史溢出后，创建裁决枚举被过滤或瞬时失败，留下存活但未受管的 tab。区分确认缺席和证据不足，在期限内重试；最终无法提交时有界回滚刚创建的完整 ID 并报告清理状态。
+- [P2] pkg/daemonclient/pool.go:891: main 合并引入的 TrimSpace 让 TabList/TabFocus 返回带尾空格的原 ID，却绑定裁剪值；原值无法 Eval。删除观测绑定处裁剪。合成不透明 ID 边界，非真实 Chrome 已验证行为；合并前同用例通过。
+- [P2] cmd/bb-browser/main.go:1250: 合成 X 与带首尾空格的 X 同时存在，open/默认 close 裁剪导致错关。第188、1147、1250–1252行仅检查空串并原样输出/回传。
+- [P2] internal/daemon/browser_reconnect.go:123: 溢出重枚举确认 A 消失后，排队旧 targetInfoChanged 又登记 A；应淘汰成功快照覆盖的旧事件。main 亦复现。
+- [P2] internal/daemon/tab_idle.go:315: 显式 close 收到明确 ErrorTargetGone 后仍保留登记/受管；清理该身份，同时保留错误响应。main 亦复现。
+- [P2] internal/daemon/v1.go:437: idle 持锁关闭时 tab_select 仍成功并续期；应获取同一目标锁，获锁复核存活并持锁续期。main 亦复现。
+- [P2] pkg/daemonclient/pool.go:444: 正确后端返回 unknown tab id 时缺 UnknownTabError 语义；callBound 两条返回路径包装明确错误并保留底层 RPCError。main 亦复现。
+- [P3] pkg/daemonclient/README.md:3: 短 tab id、0:abcd 及 skills/bb-browser-adapter/SKILL.md:127 的 --tab ab12 仍残留，应改为创建/列举返回的完整值。
+
+Codex 独立只读审查 origin/main@2be49f8...HEAD 全52文件，含 main 合并；无可用 review-code skill。上轮两个P1原始调度 HEAD 各20/20通过，修复前及main失败。本次P1是新遗漏调度，不是重复原finding：A仅创建一次，不复用完整ID，同后缀B不受影响。HEAD、修复前fcdb42f及main两种新调度各5/5失败，属于既有缺陷遗漏；manager核对源码与日志，并独立以导出副本 -race -count=3 重现两种调度全部失败。未声称是第4轮新引入。
+配置 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 全通过，11测试包、1无测试包，Go1.27.4；相关永久回归和原P1定向race各20轮通过，16目标idle关闭轮转重放为0。manager核对配置日志，未另行重复全量；诊断失败与配置检查分开记录，不能以配置通过宣告安全。
+证据保留本机 review/evidence/FT28-f1bd045/：REVIEW.md、reproduce.md、probes/、configured.log、original-head-20.log、round4-count20.log、refresh-head/pre/main.log、linger-head/pre/main.log、r4-head/pre.log、pool-premerge.log、manager-diagnostics.log。临时诊断尚非永久回归；工作树干净，无代码变更、提交或安装，go.mod/go.sum及保护路径未变。HOME/TMPDIR/缓存隔离，复用固定模块，GOPROXY=off/GOSUMDB=off，仅fake CDP/本地回环stub。
+未验真实非headless Chrome、Go1.26、部署或跨浏览器重启；未启动浏览器或操作用户窗口。无链接issue/PR，不发GitHub评论。
+round=4，已超过max_rounds=3；owner只授权该轮build，不自动追加修复。发现P1，留在review/等owner决定；需继续请添加说明并移至new/。本次仅review，未改代码、未合并main、未发布。
