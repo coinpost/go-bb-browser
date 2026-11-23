@@ -37,6 +37,7 @@ type cdpStub struct {
 	arrived     chan int        // call number of every Target.getTargets request
 	holds       map[string][]*cdpStubHold
 	failures    map[string]int         // upcoming commands per method answered with an error
+	failureMsgs map[string][]string    // error text of those failures, in order; default when exhausted
 	sessions    map[target.ID][]string // flat sessions attached per target, oldest first
 	detached    map[string]bool        // flat sessions detached again by the client
 }
@@ -163,6 +164,18 @@ func (st *cdpStub) failNext(method string) {
 	st.mu.Unlock()
 }
 
+// failNextWith is failNext with the browser's own error text. It must not be
+// mixed with failNext for the same method.
+func (st *cdpStub) failNextWith(method, message string) {
+	st.mu.Lock()
+	if st.failureMsgs == nil {
+		st.failureMsgs = make(map[string][]string)
+	}
+	st.failureMsgs[method] = append(st.failureMsgs[method], message)
+	st.mu.Unlock()
+	st.failNext(method)
+}
+
 // sessionFor returns the most recent flat session attached to id.
 func (st *cdpStub) sessionFor(id target.ID) (string, bool) {
 	st.mu.Lock()
@@ -211,6 +224,19 @@ func (st *cdpStub) destroyPage(id target.ID) {
 	st.pages = kept
 	st.mu.Unlock()
 	st.emit("Target.targetDestroyed", map[string]any{"targetId": string(id)})
+}
+
+// dropPage makes a page vanish without any lifecycle notification.
+func (st *cdpStub) dropPage(id target.ID) {
+	st.mu.Lock()
+	kept := st.pages[:0]
+	for _, p := range st.pages {
+		if p != id {
+			kept = append(kept, p)
+		}
+	}
+	st.pages = kept
+	st.mu.Unlock()
 }
 
 func (st *cdpStub) queueCreateID(id target.ID) {
@@ -344,12 +370,17 @@ func (st *cdpStub) handle(msg cdpStubMessage) {
 func (st *cdpStub) dispatch(msg cdpStubMessage) {
 	st.mu.Lock()
 	fail := st.failures[msg.Method] > 0
+	text := "stub: " + msg.Method + " refused"
 	if fail {
 		st.failures[msg.Method]--
+		if list := st.failureMsgs[msg.Method]; len(list) > 0 {
+			text = list[0]
+			st.failureMsgs[msg.Method] = list[1:]
+		}
 	}
 	st.mu.Unlock()
 	if fail {
-		out := map[string]any{"id": msg.ID, "error": map[string]any{"code": -32000, "message": "stub: " + msg.Method + " refused"}}
+		out := map[string]any{"id": msg.ID, "error": map[string]any{"code": -32000, "message": text}}
 		if msg.SessionID != "" {
 			out["sessionId"] = msg.SessionID
 		}

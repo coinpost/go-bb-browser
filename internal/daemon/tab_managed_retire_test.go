@@ -41,7 +41,7 @@ func tabNewShort(t *testing.T, srv *Server) string {
 
 // restartIdleServer shuts the old server's store down and brings up a new
 // server on the same state dir, running the same startup reconciliation as
-// connectBrowserLocked.
+// connectBrowser.
 func restartIdleServer(t *testing.T, old *Server, fc *fakeConn, stateDir string) *Server {
 	t.Helper()
 	drainRPCLog(t, old)
@@ -55,7 +55,7 @@ func restartIdleServer(t *testing.T, old *Server, fc *fakeConn, stateDir string)
 }
 
 // reconcileFresh runs one successful enumeration + managed reconciliation the
-// way connectBrowserLocked / runTargetSync do, for a target list that nothing
+// way connectBrowser / runTargetSync do, for a target list that nothing
 // overlaps: candidates and token first, then the list is applied.
 func reconcileFresh(srv *Server, infos []*target.Info) {
 	candidates := srv.beginManagedReconcile()

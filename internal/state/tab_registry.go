@@ -28,6 +28,14 @@ type TabRegistry struct {
 	// stays registered, so it tells one lifecycle of a target id from the next.
 	regSeq    uint64
 	targetReg map[target.ID]uint64
+
+	// openEnums counts, per token generation, the enumerations that were begun
+	// and neither applied nor abandoned yet. removedGen holds, for those
+	// enumerations only, the generation at which a target left the registry: a
+	// snapshot requested before that must not register the target again. Both
+	// are empty whenever no enumeration is in flight.
+	openEnums  map[uint64]int
+	removedGen map[target.ID]uint64
 }
 
 // TabRegistration identifies one registration of a target: the span between
@@ -45,8 +53,13 @@ type TabRegistration struct {
 // EnumerationToken marks the moment a full target enumeration was requested.
 // The zero value is the oldest possible token: applying a snapshot with it
 // registers targets but never removes one.
+//
+// A token from BeginEnumeration keeps removal markers alive until it is ended:
+// pass it to ApplyEnumeration, or to AbandonEnumeration when the request failed.
 type EnumerationToken struct {
 	gen uint64
+	// open is set by BeginEnumeration; only such a token is counted in openEnums.
+	open bool
 }
 
 type RemovedTab struct {
@@ -60,6 +73,8 @@ func NewTabRegistry() *TabRegistry {
 		shortToTarget: make(map[string]target.ID),
 		targetGen:     make(map[target.ID]uint64),
 		targetReg:     make(map[target.ID]uint64),
+		openEnums:     make(map[uint64]int),
+		removedGen:    make(map[target.ID]uint64),
 	}
 }
 
@@ -122,10 +137,60 @@ func (r *TabRegistry) RemoveRegistration(reg TabRegistration) bool {
 // list. The returned token makes ApplyEnumeration ignore the absence of any
 // target registered after this point: such a target may have been created
 // after the browser took the snapshot, so the snapshot says nothing about it.
+// Likewise it ignores the presence of any target removed after this point: the
+// snapshot may predate the removal.
+//
+// Every token must be ended exactly once, by ApplyEnumeration or, when the
+// request failed, by AbandonEnumeration.
 func (r *TabRegistry) BeginEnumeration() EnumerationToken {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.openEnums[r.gen]++
+	return EnumerationToken{gen: r.gen, open: true}
+}
+
+// AbandonEnumeration ends an enumeration whose snapshot will never be applied.
+// Ending a token again, or one BeginEnumeration did not return, does nothing.
+func (r *TabRegistry) AbandonEnumeration(tok EnumerationToken) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.endEnumerationLocked(tok)
+}
+
+// PendingEnumerations reports how many enumerations were begun and not ended
+// yet. It is zero whenever no target enumeration is in flight.
+func (r *TabRegistry) PendingEnumerations() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return EnumerationToken{gen: r.gen}
+	n := 0
+	for _, c := range r.openEnums {
+		n += c
+	}
+	return n
+}
+
+// endEnumerationLocked forgets tok and the removal markers no enumeration
+// still in flight can need: those not newer than the oldest remaining token.
+func (r *TabRegistry) endEnumerationLocked(tok EnumerationToken) {
+	if !tok.open || r.openEnums[tok.gen] == 0 {
+		return
+	}
+	if r.openEnums[tok.gen]--; r.openEnums[tok.gen] == 0 {
+		delete(r.openEnums, tok.gen)
+	}
+	if len(r.openEnums) == 0 {
+		clear(r.removedGen)
+		return
+	}
+	oldest := ^uint64(0)
+	for gen := range r.openEnums {
+		oldest = min(oldest, gen)
+	}
+	for id, gen := range r.removedGen {
+		if gen <= oldest {
+			delete(r.removedGen, id)
+		}
+	}
 }
 
 // SyncPageTargets updates registration from the current set of page-type targets.
@@ -150,11 +215,16 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 // ApplyEnumeration aligns the registry with a snapshot requested at tok.
 // Targets missing from infos are removed (and reported) only if they were last
 // registered at or before tok; targets registered later are kept untouched.
-// The returned snapshots describe exactly the page targets in infos.
+// A target in infos that left the registry after tok is not registered again
+// and gets no snapshot: the browser listed it before it was released, and a
+// released target must not come back through a late reply. The returned
+// snapshots describe exactly the other page targets in infos. tok is ended.
 func (r *TabRegistry) ApplyEnumeration(tok EnumerationToken, infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.applyLocked(tok, infos)
+	snaps, removed := r.applyLocked(tok, infos)
+	r.endEnumerationLocked(tok)
+	return snaps, removed
 }
 
 func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
@@ -162,6 +232,11 @@ func (r *TabRegistry) applyLocked(tok EnumerationToken, infos []*target.Info) ([
 	present := make(map[target.ID]struct{}, len(infos))
 	for _, info := range infos {
 		if info == nil || !isPageTarget(info) {
+			continue
+		}
+		if _, registered := r.targetToShort[info.TargetID]; !registered && r.removedGen[info.TargetID] > tok.gen {
+			// Released after the enumeration was requested: the snapshot predates
+			// the release and is not evidence that the target is alive.
 			continue
 		}
 		present[info.TargetID] = struct{}{}
@@ -280,6 +355,11 @@ func (r *TabRegistry) removeLocked(id target.ID) {
 	delete(r.shortToTarget, short)
 	delete(r.targetGen, id)
 	delete(r.targetReg, id)
+	if len(r.openEnums) > 0 {
+		// Only enumerations already in flight can still list this target.
+		r.gen++
+		r.removedGen[id] = r.gen
+	}
 	if r.selected == short {
 		r.selected = ""
 	}

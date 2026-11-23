@@ -6,6 +6,12 @@ import (
 	"github.com/chromedp/cdproto/target"
 )
 
+func (r *TabRegistry) removalMarkers() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.removedGen)
+}
+
 func pageInfos(ids ...target.ID) []*target.Info {
 	out := make([]*target.Info, 0, len(ids))
 	for _, id := range ids {
@@ -113,5 +119,100 @@ func TestSyncPageTargetsTreatsListAsCurrent(t *testing.T) {
 	r.RegisterPageTarget("AAAA0001")
 	if _, removed := r.SyncPageTargetsDetailed(nil); len(removed) != 1 {
 		t.Fatalf("removed = %#v, want AAAA0001", removed)
+	}
+}
+
+// A snapshot requested before a target was removed must not register that
+// target again; one requested afterwards may.
+func TestApplyEnumerationDoesNotReRegisterTargetRemovedAfterToken(t *testing.T) {
+	r := NewTabRegistry()
+	r.SyncPageTargets(pageInfos("AAAA0001", "AAAA0002"))
+	short1, _ := r.ShortForTarget("AAAA0001")
+
+	tok := r.BeginEnumeration()
+	stale := pageInfos("AAAA0001", "AAAA0002")
+	if _, ok := r.RemoveTarget("AAAA0001"); !ok {
+		t.Fatal("precondition: target not removed")
+	}
+
+	snaps, removed := r.ApplyEnumeration(tok, stale)
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none", removed)
+	}
+	if len(snaps) != 1 || snaps[0].TargetID != "AAAA0002" {
+		t.Fatalf("snapshots = %+v, want only AAAA0002", snaps)
+	}
+	if _, ok := r.ShortForTarget("AAAA0001"); ok {
+		t.Fatal("stale snapshot registered the removed target again")
+	}
+	if _, ok := r.Lookup(short1); ok {
+		t.Fatal("stale snapshot gave the removed target its alias back")
+	}
+
+	// The enumeration is finished, so its removal marker is no longer needed.
+	if n := r.removalMarkers(); n != 0 {
+		t.Fatalf("%d removal markers outlive every enumeration", n)
+	}
+	// A snapshot requested after the removal is newer evidence.
+	snaps, _ = r.ApplyEnumeration(r.BeginEnumeration(), stale)
+	if len(snaps) != 2 {
+		t.Fatalf("newer snapshot = %+v, want both targets", snaps)
+	}
+}
+
+func TestApplyEnumerationRemovalByNewerSnapshotBlocksOlderOne(t *testing.T) {
+	r := NewTabRegistry()
+	r.SyncPageTargets(pageInfos("AAAA0001"))
+	older := r.BeginEnumeration()
+	newer := r.BeginEnumeration()
+	if _, removed := r.ApplyEnumeration(newer, nil); len(removed) != 1 {
+		t.Fatalf("newer snapshot removed %v, want AAAA0001", removed)
+	}
+	if snaps, _ := r.ApplyEnumeration(older, pageInfos("AAAA0001")); len(snaps) != 0 {
+		t.Fatalf("older snapshot restored %+v", snaps)
+	}
+	if n := r.removalMarkers(); n != 0 {
+		t.Fatalf("%d removal markers outlive every enumeration", n)
+	}
+}
+
+// Removal markers exist only for enumerations still in flight: none without
+// one, and an abandoned (failed) enumeration releases its own.
+func TestRemovalMarkersAreBoundedByOpenEnumerations(t *testing.T) {
+	r := NewTabRegistry()
+	for i := range 100 {
+		id := target.ID("BBBB" + string(rune('0'+i%10)) + string(rune('0'+i/10)))
+		r.RegisterPageTarget(id)
+		r.RemoveTarget(id)
+	}
+	if n := r.removalMarkers(); n != 0 {
+		t.Fatalf("%d removal markers without an enumeration in flight", n)
+	}
+
+	older := r.BeginEnumeration()
+	r.RegisterPageTarget("AAAA0001")
+	r.RemoveTarget("AAAA0001")
+	newer := r.BeginEnumeration()
+	r.RegisterPageTarget("AAAA0002")
+	r.RemoveTarget("AAAA0002")
+	if n := r.removalMarkers(); n != 2 {
+		t.Fatalf("removal markers = %d, want 2", n)
+	}
+	r.AbandonEnumeration(older)
+	if n := r.removalMarkers(); n != 1 {
+		t.Fatalf("removal markers after the older enumeration ended = %d, want 1", n)
+	}
+	if snaps, _ := r.ApplyEnumeration(newer, pageInfos("AAAA0001", "AAAA0002")); len(snaps) != 1 || snaps[0].TargetID != "AAAA0001" {
+		// AAAA0001 was removed before `newer` was requested, AAAA0002 after.
+		t.Fatalf("snapshots = %+v, want only AAAA0001", snaps)
+	}
+	if n := r.removalMarkers(); n != 0 {
+		t.Fatalf("removal markers after every enumeration ended = %d, want 0", n)
+	}
+	// Ending a token twice, or one that was never begun, changes nothing.
+	r.AbandonEnumeration(newer)
+	r.AbandonEnumeration(EnumerationToken{})
+	if n := r.PendingEnumerations(); n != 0 {
+		t.Fatalf("pending enumerations = %d, want 0", n)
 	}
 }

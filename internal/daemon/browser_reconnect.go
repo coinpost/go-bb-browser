@@ -46,17 +46,24 @@ func isCDPSessionLost(err error) bool {
 	return browser.ErrorKindOf(err) == browser.ErrorTransport
 }
 
-// connectBrowserLocked attaches a new chromedp session. Caller must hold s.tabMu.
-func (s *Server) connectBrowserLocked(ctx context.Context) error {
+// connectBrowser attaches a new chromedp session, publishes it and aligns the
+// daemon with the browser's targets. The caller must not hold s.tabMu: the
+// lock covers only publishing the connection. The first enumeration can release
+// targets the lifecycle loop registered before it, and a release looks up the
+// published session (tabConn) to retire the observer writer before the buffers
+// are cleared, so it cannot run under the write lock.
+func (s *Server) connectBrowser(ctx context.Context) error {
 	sess, err := browser.Connect(context.WithoutCancel(ctx), s.cfg.DebuggerURL)
 	if err != nil {
 		return err
 	}
+	s.tabMu.Lock()
 	s.tabLive = sess
 	s.sessDone = sess.Close
 	s.browserState = sessionReady
 	s.browserFailures = 0
 	s.browserLastProbe = time.Now()
+	s.tabMu.Unlock()
 	s.watchCDPSession(sess)
 	go s.runTargetSync(ctx, sess)
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
@@ -92,6 +99,7 @@ func (s *Server) syncInitialTargets(marker targetDirtyMarker, tok state.Enumerat
 	if err == nil {
 		return s.syncTabsFromTargets(tok, targets)
 	}
+	s.abandonTargetEnumeration(tok)
 	if s.logger != nil {
 		s.logger.Warn("list targets after browser connect", "err", err)
 	}
@@ -140,6 +148,7 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 				// is required when the startup target enumeration failed.
 				s.reconcileIdleFromLog(candidates, snaps)
 			} else {
+				s.abandonTargetEnumeration(tok)
 				sess.MarkTargetDirty()
 				s.triggerBrowserProbe()
 				if s.logger != nil {

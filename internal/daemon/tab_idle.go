@@ -79,9 +79,15 @@ func (s *Server) logManagedPersistFailure(msg, short string, tid target.ID, err 
 
 // beginTargetEnumeration must run before the browser is asked for its targets;
 // the token keeps the (possibly stale) reply from removing tabs registered
-// while the request was in flight.
+// while the request was in flight, and from registering again tabs released
+// meanwhile. Every token ends in syncTabsFromTargets or, when the request
+// failed, in abandonTargetEnumeration.
 func (s *Server) beginTargetEnumeration() state.EnumerationToken {
 	return s.tabs.BeginEnumeration()
+}
+
+func (s *Server) abandonTargetEnumeration(tok state.EnumerationToken) {
+	s.tabs.AbandonEnumeration(tok)
 }
 
 // enumerateTabs is the single request path for a full Target.getTargets
@@ -91,6 +97,7 @@ func (s *Server) enumerateTabs(ctx context.Context, conn tabConn) ([]state.TabSn
 	tok := s.beginTargetEnumeration()
 	targets, err := pageTargets(ctx, conn)
 	if err != nil {
+		s.abandonTargetEnumeration(tok)
 		return nil, err
 	}
 	return s.syncTabsFromTargets(tok, targets), nil
@@ -322,8 +329,16 @@ func (s *Server) closeTabByShortLocked(ctx context.Context, conn tabConn, tab st
 // keyed operation lock of its short id. The close is bound to reg: whatever
 // happens to the target id while Target.closeTarget is in flight, only reg is
 // released afterwards.
+//
+// A definitive target-gone answer also releases reg: the page no longer exists,
+// and no lifecycle event may be left to clean up after it. The error is still
+// returned, so an explicit tab_close reports it unchanged. Any other failed
+// close leaves the (possibly live) tab untouched.
 func (s *Server) closeRegistrationLocked(ctx context.Context, conn tabConn, reg state.TabRegistration) error {
 	if err := closeTarget(ctx, conn, reg.TargetID); err != nil {
+		if browser.ErrorKindOf(err) == browser.ErrorTargetGone {
+			s.releaseRegistration(reg)
+		}
 		return err
 	}
 	// Target.closeTarget succeeded, so clear every target-scoped resource even if
@@ -400,14 +415,12 @@ func (s *Server) closeExpiredTabs(ctx context.Context) {
 			continue
 		}
 		err := s.closeRegistrationLocked(ctx, conn, reg)
+		unlock()
 		if err != nil && browser.ErrorKindOf(err) == browser.ErrorTargetGone {
-			// Idle cleanup is complete when Chrome has already removed the target.
-			// Keep explicit tab_close RPC errors unchanged.
-			s.releaseRegistration(reg)
-			unlock()
+			// Idle cleanup is complete when Chrome has already removed the target;
+			// closeRegistrationLocked released the registration.
 			continue
 		}
-		unlock()
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("tab idle cleanup failed", "tab", short, "err", err)

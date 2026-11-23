@@ -125,7 +125,7 @@ func newReconcileRaceServer(t *testing.T, conn *enumConn, dir string, maxLogByte
 	return srv
 }
 
-// The enumeration steps of connectBrowserLocked / runTargetSync, with tab_new
+// The enumeration steps of connectBrowser / runTargetSync, with tab_new
 // completing at each point where it can interleave with them. The state dir
 // starts as a restarted daemon finds it, so the startup reconciliation and the
 // dirty retry (same steps) are both covered.

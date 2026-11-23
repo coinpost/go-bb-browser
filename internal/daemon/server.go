@@ -224,12 +224,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}()
 
 	if !s.SkipBrowserAttach && s.tabHook == nil {
-		s.tabMu.Lock()
-		if err := s.connectBrowserLocked(runCtx); err != nil {
-			s.tabMu.Unlock()
+		if err := s.connectBrowser(runCtx); err != nil {
 			return fmt.Errorf("cdp attach: %w", err)
 		}
-		s.tabMu.Unlock()
 	}
 
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)

@@ -752,9 +752,7 @@ func TestStartupEnumerationKeepsTargetRegisteredMeanwhile(t *testing.T) {
 	gate := st.holdNextGetTargets()
 	done := make(chan error, 1)
 	go func() {
-		srv.tabMu.Lock()
-		defer srv.tabMu.Unlock()
-		done <- srv.connectBrowserLocked(ctx)
+		done <- srv.connectBrowser(ctx)
 	}()
 	awaitGetTargets(t, st, 1)
 
