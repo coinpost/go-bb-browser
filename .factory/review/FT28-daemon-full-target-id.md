@@ -1,6 +1,6 @@
 ---
 branch: factory/FT28-daemon-full-target-id
-round: 7
+round: 8
 ---
 # [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID 兼容
 
@@ -386,3 +386,14 @@ owner 本次明确要求：
 Behaviour：所有创建提交入口（包括已登记目标）执行一致的窗口缺席冲突判定，冲突须同步核验后才能成功；已知目标保留较早有效事件读取证据，因果更晚的确认缺席不得被较晚提交覆盖。未知目标的销毁读取约束旧排队存在事件，证据仅随在途工作保留；核验错误后已被并发关闭的目标不得成功返回。存活控制组及真正晚于请求的新建仍获保护。
 Scope：registry因果约束、daemon创建核验错误分支、永久确定性回归和真实Chrome验收；不加无界历史或旁路缓存，不重写其他任务。
 Checking：最新四项生命周期诊断原样重现并提升永久回归，保存修复前失败/修复后通过；重点已知目标两个入口、未知destroyed/旧created、核验失败与并发close以及存活控制组。修正真实Chrome反向冲突测试，在eval之前断言自动恢复且额外getTargets已发生；隔离非headless Chrome、生产discovery无额外注入。关键race重复20轮及全量gofmt/vet/race，保留CDP证据，零页面未覆盖如实记录。测试HOME/TMPDIR/缓存均隔离run内，不依赖真实外网。
+
+
+## factory · 2026-11-23 22:58
+Claude Code 已完成 owner 人工授权第8轮，沿用原分支；代码提交357a75a、8cb5f39、2af47a580a3d4cb91a68578ac728db796e554404（head），均已推送。origin/main为祖先，未新合并或重写历史。
+- 修复最新review两项P1及关联P2：已登记目标也检查创建窗口缺席冲突；保留已知目标较早有效事件读取证据；未知目标destroyed读出约束旧排队事件且随在途工作回收；同步核验错误时复核并发关闭；反向冲突真实Chrome验收在eval前检查自动恢复与额外枚举。完整target ID、不兼容短ID保持。
+- 原review四项生命周期诊断及第7轮探针修复后各20轮通过；永久回归及红测证据见build/evidence/FT28-round8/。CC的state/browser/daemon整包-race-count=20通过（3.9s/96.5s/222.6s）；全量gofmt/vet/race通过；manager在最终head独立隔离环境重跑全量gofmt/vet/go test -race -count=1 ./...通过，11测试包、protocol无测试，Go1.27.4。diff --check通过、工作树干净、never路径及go.mod/go.sum未变，无安装。
+- 收尾中manager发现新测试20轮600s超时：预留枚举闸门误扣住clear的解析枚举，每次等60s，helper把超时当拒绝，不是已确认生产死锁。CC以2af47a5修复测试闸门顺序并将拒绝限定unknown tab id，之后整包20轮及全量通过。初次续跑超时导致验收结果未收齐、代码未push和看板滞留new；本次已补齐，不另起修复轮。
+- 非headless真实Chrome生产路径关键场景各5轮通过，90条轨迹包括两项新已登记目标调度、存活控制组、反向冲突eval前自动恢复、既有调度。root discovery由生产发起，无代理额外注入。证据基于8cb5f39；最终2af47a5仅改两处非realchrome测试，不改生产或Chrome验收文件，未在最终head重跑Chrome。manager核对日志及轨迹摘要，不声称独立启动Chrome。
+- 未验：两种零页面场景各5次SKIP，仍未验证；其他Chrome/CDP宿主、Go1.26、部署、自然概率及跨会话ID唯一性未验。不以测试通过代替独立review。无UI变更，未碰用户窗口。
+证据本机build/evidence/FT28-round8/：review-probes-round7/round8.log、red-daemon.log、fix-key-race20.log、fix-full.log、fix-summary.md、manager-final.log、real-chrome/final/go-test.log与轨迹、inspected-final.log。初始超时日志保留供复核。
+状态：new/ → review/，round=8（owner人工授权，不改max_rounds），等待独立审查。未合并main、未发布、不启动下一轮review或FT7、不改定时任务。
