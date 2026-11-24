@@ -158,16 +158,29 @@ func TestRotationFailureKeepsLogWritableAndRecoverable(t *testing.T) {
 				return f.Sync()
 			})
 		}},
-		{"backup shift", func(t *testing.T, s *Store) {
+		{"stage link", func(t *testing.T, s *Store) {
+			swap(t, &linkPath, func(from, to string) error {
+				if strings.HasSuffix(to, rotateKeepSuffix) {
+					return errInjected
+				}
+				return os.Link(from, to)
+			})
+		}},
+		{"keep older generation", func(t *testing.T, s *Store) {
+			swap(t, &linkPath, func(from, to string) error {
+				if strings.HasSuffix(to, ".2") {
+					return errInjected
+				}
+				return os.Link(from, to)
+			})
+		}},
+		{"publish previous", func(t *testing.T, s *Store) {
 			swap(t, &renamePath, func(from, to string) error {
-				if strings.HasSuffix(from, ".1") {
+				if strings.HasSuffix(from, rotateKeepSuffix) {
 					return errInjected
 				}
 				return os.Rename(from, to)
 			})
-		}},
-		{"keep previous", func(t *testing.T, s *Store) {
-			swap(t, &linkPath, func(from, to string) error { return errInjected })
 		}},
 		{"publish", func(t *testing.T, s *Store) {
 			swap(t, &renamePath, func(from, to string) error {
@@ -218,6 +231,7 @@ func TestRotationFailureKeepsLogWritableAndRecoverable(t *testing.T) {
 			}
 			requireLogBytesMatchFile(t, s, logPath)
 			requireAbsent(t, logPath+rotateTmpSuffix)
+			requireAbsent(t, logPath+rotateKeepSuffix)
 			requireActivity(t, s, want)
 			// A daemon restarted on this state recovers everything.
 			requireRestart(t, dir, want)
