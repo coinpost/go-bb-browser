@@ -88,3 +88,13 @@ Codex 只读审查 origin/main...HEAD（base fb2c535），无代码提交，工�
 第 1/3 轮审查发现 P1，review/ → new/，下一次 build 在同一分支修复 fix 列表。无新增安装；无新增可见 /tmp 路径，TMPDIR 外仅按要求刷新本 run 锁。未做真实断电、kill -9、Linux、Windows、无硬链接文件系统或真实 Chrome 验收。未合并、未发 tag、未发布，未移动后续 backlog 项。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。
 
 通知失败：Review started 按 cron 指定 contact_id 与 chat_id 发送，被渠道拒绝（chat_id 与群目标不匹配）；未擅自替换路由，后续结果与 Summary 留在运行输出。
+
+## Guoyin · 2026-11-25 00:17
+不会有多进程共用状态目录的问题
+
+## factory · 2026-11-25 00:17
+按 owner 此次说明，本项以单进程独占该状态目录为使用前提。factory · review · 2026-11-25 00:07 的第一条 P1（internal/store/store.go:546：两个 Store/daemon 共用状态目录时，固定 rpc.jsonl.tmp 可被另一实例删除并重建，先完成者随后发布对方尚未写入的快照）属于跨进程共享场景，超出当前验收范围，不再作为 FT4 交付阻塞，不要求为该场景新增跨进程锁。此边界不得泛化豁免单进程故障、线程竞争或日志恢复问题。
+
+同一审查的第二条 P1（internal/store/store.go:619：活动日志被删除后再次轮转，先将可恢复 .1 顺移到 .2，活动路径缺失被当作可继续；若随后发布 rename 失败，启动只查 .1 并成功新建空日志，恢复集合丢失）仍为交付阻塞，须继续解决。其他已有问题（该审查 notes 中的 P2/P3，以及此前收窄范围内的轮转原子性、失败恢复/吞错、可写探测误删）仍按原记录处理。
+
+不改先前 review 正文与 verdict: fix；本项仍留在 new/，本 run 不启动 build/review/ship，不改代码。
