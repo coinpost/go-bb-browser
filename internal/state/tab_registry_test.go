@@ -1,43 +1,58 @@
 package state
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chromedp/cdproto/target"
 )
 
-func TestShortIDFromSuffix(t *testing.T) {
+const (
+	regIDA = target.ID("AAAA0000000000000000000000AB1234")
+	regIDB = target.ID("BBBB0000000000000000000000AB1234")
+)
+
+func TestSnapshotsCarryCompleteTargetID(t *testing.T) {
 	r := NewTabRegistry()
-	infos := []*target.Info{
-		{TargetID: "ABCDEF123456", Type: "page", Title: "a", URL: "https://a"},
+	snap := r.SyncPageTargets([]*target.Info{
+		{TargetID: regIDB, Type: "page", Title: "b", URL: "https://b"},
+		{TargetID: regIDA, Type: "page", Title: "a", URL: "https://a"},
+		{TargetID: "WORKER", Type: "service_worker"},
+	})
+	if len(snap) != 2 || snap[0].TargetID != regIDA || snap[1].TargetID != regIDB {
+		t.Fatalf("snapshots = %#v, want the two page targets ordered by id", snap)
 	}
-	snap := r.SyncPageTargets(infos)
-	if len(snap) != 1 {
-		t.Fatalf("snap len %d", len(snap))
+	if snap[0].Title != "a" || snap[0].URL != "https://a" {
+		t.Fatalf("snapshot = %#v", snap[0])
 	}
-	// Last 4 hex chars of id: ...3456
-	if snap[0].ShortID != "3456" {
-		t.Fatalf("short id %q want 3456", snap[0].ShortID)
+	if _, ok := r.Lookup("WORKER"); ok {
+		t.Fatal("a non-page target must not resolve")
 	}
 }
 
-func TestShortIDCollisionLengthens(t *testing.T) {
+// Lookup takes the complete target id verbatim. In particular the suffix
+// aliases the registry used to derive ("1234", lengthened on collision) and
+// every other partial or normalized spelling resolve to nothing.
+func TestLookupMatchesCompleteIDExactly(t *testing.T) {
 	r := NewTabRegistry()
-	// Two ids that share the same last 4 hex digits
-	infos := []*target.Info{
-		{TargetID: "1111AAAA2222BBBB", Type: "page", Title: "1", URL: ""},
-		{TargetID: "9999CCCC2222BBBB", Type: "page", Title: "2", URL: ""},
+	r.SyncPageTargets(pageInfos(regIDA, regIDB))
+
+	for _, id := range []target.ID{regIDA, regIDB} {
+		if got, ok := r.Lookup(string(id)); !ok || got != id {
+			t.Fatalf("Lookup(%q) = %q, %v", id, got, ok)
+		}
 	}
-	snap := r.SyncPageTargets(infos)
-	if len(snap) != 2 {
-		t.Fatalf("snap len %d", len(snap))
-	}
-	shorts := map[string]struct{}{}
-	for _, s := range snap {
-		shorts[s.ShortID] = struct{}{}
-	}
-	if len(shorts) != 2 {
-		t.Fatalf("expected distinct short ids, got %#v", snap)
+	a := string(regIDA)
+	for _, in := range []string{
+		"", "1234", "ab1234", "AB1234", a[len(a)-8:], a[1:], a[:4], a[:len(a)-1],
+		strings.ToLower(a), " " + a, a + " ", a + "\n", a + "0",
+	} {
+		if got, ok := r.Lookup(in); ok {
+			t.Errorf("Lookup(%q) resolved to %q", in, got)
+		}
+		if r.Select(target.ID(in)) {
+			t.Errorf("Select(%q) succeeded", in)
+		}
 	}
 }
 
@@ -56,91 +71,71 @@ func TestSelectUnknownTab(t *testing.T) {
 	}
 }
 
-func TestShortIDCollisionUsesMoreDigits(t *testing.T) {
-	r := NewTabRegistry()
-	infos := []*target.Info{
-		{TargetID: "AAA11115678", Type: "page"},
-		{TargetID: "BBB22225678", Type: "page"},
-	}
-	snap := r.SyncPageTargets(infos)
-	if len(snap) != 2 {
-		t.Fatalf("snap len %d", len(snap))
-	}
-	shorts := map[string]struct{}{}
-	for _, s := range snap {
-		shorts[s.ShortID] = struct{}{}
-	}
-	if len(shorts) != 2 {
-		t.Fatalf("want distinct shorts, got %#v", snap)
+// When A goes away and a same-suffix B appears, A's id stops resolving and
+// never comes to mean B, whatever order the two were registered in and also
+// in a registry rebuilt from scratch.
+func TestGoneTargetIDNeverResolvesToSameSuffixTarget(t *testing.T) {
+	orders := map[string][]target.ID{"A first": {regIDA, regIDB}, "B first": {regIDB, regIDA}}
+	for name, order := range orders {
+		t.Run(name, func(t *testing.T) {
+			r := NewTabRegistry()
+			for _, id := range order {
+				r.RegisterPageTarget(id)
+			}
+			if !r.Select(regIDA) {
+				t.Fatal("select A")
+			}
+			_, removed := r.SyncPageTargetsDetailed(pageInfos(regIDB))
+			if len(removed) != 1 || removed[0].TargetID != regIDA {
+				t.Fatalf("removed = %#v, want A", removed)
+			}
+			if got, ok := r.Lookup(string(regIDA)); ok {
+				t.Fatalf("gone A resolved to %q", got)
+			}
+			if r.Selected() != "" {
+				t.Fatalf("selection = %q, want cleared with A (never moved to B)", r.Selected())
+			}
+			if got, ok := r.Lookup(string(regIDB)); !ok || got != regIDB {
+				t.Fatalf("live B = %q, %v", got, ok)
+			}
+
+			rebuilt := NewTabRegistry()
+			rebuilt.SyncPageTargets(pageInfos(regIDB))
+			if _, ok := rebuilt.Lookup(string(regIDA)); ok {
+				t.Fatal("rebuilt registry resolved the gone A")
+			}
+			if got, ok := rebuilt.Lookup(string(regIDB)); !ok || got != regIDB {
+				t.Fatalf("rebuilt registry: B = %q, %v", got, ok)
+			}
+		})
 	}
 }
 
-// A registration is the identity of one stay of a target in the registry: it
-// survives re-registration of the live target and ends with its removal, even
-// when the same target id and short id come back.
-func TestTabRegistrationIdentity(t *testing.T) {
+func TestRemoveTargetReportsRegistration(t *testing.T) {
 	r := NewTabRegistry()
-	const tid = target.ID("BBBB000000000000000000000000C0DE")
-	short := r.RegisterPageTarget(tid)
-	reg, ok := r.Registration(short)
-	if !ok || reg.TargetID != tid || reg.ShortID != short {
-		t.Fatalf("Registration(%q) = %+v, %v", short, reg, ok)
+	r.RegisterPageTarget(regIDA)
+	if !r.RemoveTarget(regIDA) {
+		t.Fatal("RemoveTarget of a registered target = false")
 	}
-	if byTarget, ok := r.RegistrationOf(tid); !ok || byTarget != reg {
-		t.Fatalf("RegistrationOf = %+v, %v; want %+v", byTarget, ok, reg)
+	if r.RemoveTarget(regIDA) || r.Has(regIDA) {
+		t.Fatal("target still registered after removal")
 	}
-	// Lifecycle events re-register a live target; that is the same registration.
-	r.RegisterPageTarget(tid)
-	r.SyncPageTargets([]*target.Info{{TargetID: tid, Type: "page"}})
-	if !r.IsCurrent(reg) {
-		t.Fatal("re-registering a live target ended its registration")
-	}
+}
 
-	if _, removed := r.RemoveTarget(tid); !removed {
-		t.Fatal("RemoveTarget")
-	}
-	if r.IsCurrent(reg) {
-		t.Fatal("registration current after removal")
-	}
-	// Same full id, same short id: still another registration.
-	if again := r.RegisterPageTarget(tid); again != short {
-		t.Fatalf("precondition: short id = %q, want %q again", again, short)
-	}
-	next, _ := r.Registration(short)
-	if next == reg || r.IsCurrent(reg) || !r.IsCurrent(next) {
-		t.Fatalf("reused ids not told apart: old %+v, new %+v", reg, next)
-	}
-	if r.RemoveRegistration(reg) {
-		t.Fatal("stale registration removed the target's new registration")
-	}
-	if _, ok := r.Lookup(short); !ok {
-		t.Fatal("new registration lost")
-	}
+// commitOK is CommitCreated for tests that only care whether it registered.
+func commitOK(r *TabRegistry, w *Window, id target.ID) bool {
+	ok, _ := r.CommitCreated(w, id)
+	return ok
+}
 
-	// The short id moves to another target, the full id returns under another.
-	r.RemoveTarget(tid)
-	const other = target.ID("AAAB000000000000000000000000C0DE")
-	if got := r.RegisterPageTarget(other); got != short {
-		t.Fatalf("precondition: other target short id = %q, want %q", got, short)
+// readDestroyed plays the connection reader for one Target.targetDestroyed
+// notification: read (NoteEventRead), then either queued or dropped by a full
+// queue (EventDropped), in the order Session.enqueueTargetEvent uses.
+// It returns the stamp of the notification.
+func readDestroyed(r *TabRegistry, id target.ID, queued bool) uint64 {
+	stamp := r.NoteEventRead("", id)
+	if !queued {
+		r.EventDropped()
 	}
-	moved := r.RegisterPageTarget(tid)
-	if moved == short {
-		t.Fatal("precondition: expected a new short id")
-	}
-	if r.IsCurrent(next) || r.RemoveRegistration(next) {
-		t.Fatal("registration current although its short id names another target")
-	}
-	current, _ := r.RegistrationOf(tid)
-	if current.ShortID != moved || !r.RemoveRegistration(current) || r.RemoveRegistration(current) {
-		t.Fatal("RemoveRegistration must remove the current registration exactly once")
-	}
-	if _, ok := r.Lookup(moved); ok {
-		t.Fatal("removed registration still resolvable")
-	}
-	if got, _ := r.Lookup(short); got != other {
-		t.Fatalf("other target lost its short id: %q", got)
-	}
-	if r.IsCurrent(TabRegistration{}) || r.IsCurrent(TabRegistration{TargetID: other, ShortID: short}) {
-		t.Fatal("a registration that was never handed out is current")
-	}
+	return stamp
 }

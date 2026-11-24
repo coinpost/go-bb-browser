@@ -17,9 +17,10 @@ import (
 // Regressions for the managed reconciliation race: a target enumeration may
 // only retire persisted managed tabs that were already persisted when the
 // enumeration was requested. A tab_new that overlaps the request, or completes
-// after its reply was applied to the registry but before the managed set is
-// reconciled, is older than nothing in that reply and must stay managed, in
-// memory and on disk.
+// right after its reply was applied, is older than nothing in that reply and
+// must stay managed, in memory and on disk. (The reply is applied to the
+// registry and the managed set in one critical section, so there is no point
+// between the two for a tab_new to land in.)
 
 const (
 	// Persisted by a previous daemon run and gone from the browser since.
@@ -40,7 +41,7 @@ func seedManagedState(t *testing.T, dir string, ids ...target.ID) {
 	}
 	at := time.Now().UTC().Add(-time.Second)
 	for _, id := range ids {
-		if err := st.RegisterManagedTab("", string(id), at); err != nil {
+		if err := st.RegisterManagedTab(string(id), at); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -125,21 +126,21 @@ func newReconcileRaceServer(t *testing.T, conn *enumConn, dir string, maxLogByte
 	return srv
 }
 
-// The enumeration steps of connectBrowser / runTargetSync, with tab_new
+// The enumeration steps of connectBrowserLocked / runTargetSync, with tab_new
 // completing at each point where it can interleave with them. The state dir
 // starts as a restarted daemon finds it, so the startup reconciliation and the
 // dirty retry (same steps) are both covered.
 func TestReconcileDoesNotRetireTabCreatedAfterEnumerationWasRequested(t *testing.T) {
 	const (
 		whileInFlight = iota // request sent, reply not yet applied
-		afterSync            // reply applied to the registry, managed set not yet reconciled
+		afterSync            // reply applied
 	)
 	for _, tc := range []struct {
 		name  string
 		point int
 	}{
 		{"tab_new while enumeration in flight", whileInFlight},
-		{"tab_new after registry sync before reconcile", afterSync},
+		{"tab_new after the reply was applied", afterSync},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -148,8 +149,7 @@ func TestReconcileDoesNotRetireTabCreatedAfterEnumerationWasRequested(t *testing
 			conn.nextIDs = []target.ID{reconcileNewID}
 			srv := newReconcileRaceServer(t, conn, dir, 0)
 
-			candidates := srv.beginManagedReconcile()
-			tok := srv.beginTargetEnumeration()
+			win := srv.tabs.OpenWindow()
 			infos, err := conn.PageTargets() // the browser's snapshot, without the new tab
 			if err != nil {
 				t.Fatal(err)
@@ -157,17 +157,16 @@ func TestReconcileDoesNotRetireTabCreatedAfterEnumerationWasRequested(t *testing
 			if tc.point == whileInFlight {
 				enumTabNew(t, srv)
 			}
-			snaps := srv.syncTabsFromTargets(tok, infos)
+			srv.applyEnumeration(conn, win, infos)
 			if tc.point == afterSync {
 				enumTabNew(t, srv)
 			}
 			if !conn.has(reconcileNewID) {
 				t.Fatal("precondition: tab_new did not create the tab in the browser")
 			}
-			srv.reconcileIdleFromLog(candidates, snaps)
 
 			assertReconcileOutcome(t, srv)
-			if _, ok := srv.tabs.ShortForTarget(reconcileNewID); !ok {
+			if !srv.tabs.Has(reconcileNewID) {
 				t.Error("tab created by tab_new is no longer registered")
 			}
 
@@ -192,15 +191,13 @@ func TestReconcileDoesNotRetireTabCreatedAfterEnumerationWasRequested(t *testing
 	}
 }
 
+// reconcileFreshConn runs one current enumeration, as every production path
+// does (window, request, apply with managed recovery).
 func reconcileFreshConn(t *testing.T, srv *Server, conn *enumConn) {
 	t.Helper()
-	candidates := srv.beginManagedReconcile()
-	tok := srv.beginTargetEnumeration()
-	infos, err := conn.PageTargets()
-	if err != nil {
+	if _, err := srv.enumerateTabs(context.Background(), conn); err != nil {
 		t.Fatal(err)
 	}
-	srv.reconcileIdleFromLog(candidates, srv.syncTabsFromTargets(tok, infos))
 }
 
 // The surviving membership must also survive a log rotation (the snapshot is
@@ -212,15 +209,13 @@ func TestReconcileRaceSurvivorKeptAcrossRotation(t *testing.T) {
 	conn.nextIDs = []target.ID{reconcileNewID}
 	srv := newReconcileRaceServer(t, conn, dir, 2048)
 
-	candidates := srv.beginManagedReconcile()
-	tok := srv.beginTargetEnumeration()
+	win := srv.tabs.OpenWindow()
 	infos, err := conn.PageTargets()
 	if err != nil {
 		t.Fatal(err)
 	}
-	snaps := srv.syncTabsFromTargets(tok, infos)
 	short := enumTabNew(t, srv)
-	srv.reconcileIdleFromLog(candidates, snaps)
+	srv.applyEnumeration(conn, win, infos)
 
 	logPath := filepath.Join(dir, store.RPCLogFile())
 	for i := 0; i < 200; i++ {
@@ -237,35 +232,31 @@ func TestReconcileRaceSurvivorKeptAcrossRotation(t *testing.T) {
 	assertPersistedAfterReopen(t, srv, dir)
 }
 
-// A failed enumeration never reaches reconciliation, and candidates alone (no
-// successful reply) retire nothing; without candidates nothing is retirable.
-func TestReconcileRetiresOnlyCandidatesOfASuccessfulEnumeration(t *testing.T) {
+// A failed enumeration retires nothing, however often it fails; only the reply
+// of a successful one settles the tabs a previous run persisted.
+func TestReconcileRetiresOnlyOnASuccessfulEnumeration(t *testing.T) {
 	dir := t.TempDir()
 	seedManagedState(t, dir, reconcileGoneID, reconcileLiveID)
 	conn := newEnumConn(reconcileLiveID)
 	srv := newReconcileRaceServer(t, conn, dir, 0)
 
-	candidates := srv.beginManagedReconcile()
-	if len(candidates) != 2 {
-		t.Fatalf("candidates = %v, want the two persisted targets", candidates)
-	}
 	conn.setListErr(errors.New("Target.getTargets: timeout"))
-	tok := srv.beginTargetEnumeration()
+	win := srv.tabs.OpenWindow()
 	infos, err := conn.PageTargets()
-	if snaps := srv.syncInitialTargets(noopDirtyMarker{}, tok, infos, err); snaps != nil {
+	if snaps := srv.syncInitialTargets(noopDirtyMarker{}, win, infos, err); snaps != nil {
 		t.Fatalf("failed enumeration produced snapshots: %v", snaps)
+	}
+	if _, err := srv.enumerateTabs(context.Background(), conn); err == nil {
+		t.Fatal("precondition: enumeration must fail")
 	}
 	if got := managedTargetSet(srv.store.ManagedTabs()); !got[reconcileGoneID] || !got[reconcileLiveID] {
 		t.Fatalf("failed enumeration retired persisted tabs: %v", got)
 	}
-
-	// No candidate set: an (empty) enumeration result proves nothing.
-	srv.reconcileIdleFromLog(nil, nil)
-	if got := managedTargetSet(srv.store.ManagedTabs()); !got[reconcileGoneID] || !got[reconcileLiveID] {
-		t.Fatalf("reconcile without candidates retired persisted tabs: %v", got)
+	if n := srv.tabs.OpenWindows(); n != 0 {
+		t.Fatalf("failed enumerations left %d windows open", n)
 	}
 
-	// The successful retry retires exactly the absent candidate.
+	// The successful retry retires exactly the absent tab.
 	conn.setListErr(nil)
 	reconcileFreshConn(t, srv, conn)
 	got := managedTargetSet(srv.store.ManagedTabs())
@@ -277,7 +268,7 @@ func TestReconcileRetiresOnlyCandidatesOfASuccessfulEnumeration(t *testing.T) {
 	}
 }
 
-// First run: an empty state dir yields no candidates, and a tab created while
+// First run: an empty state dir has nothing to recover, and a tab created while
 // that first enumeration is processed stays managed.
 func TestReconcileFirstRunKeepsTabCreatedMeanwhile(t *testing.T) {
 	dir := t.TempDir()
@@ -285,18 +276,13 @@ func TestReconcileFirstRunKeepsTabCreatedMeanwhile(t *testing.T) {
 	conn.nextIDs = []target.ID{reconcileNewID}
 	srv := newReconcileRaceServer(t, conn, dir, 0)
 
-	candidates := srv.beginManagedReconcile()
-	if len(candidates) != 0 {
-		t.Fatalf("empty state produced candidates: %v", candidates)
-	}
-	tok := srv.beginTargetEnumeration()
+	win := srv.tabs.OpenWindow()
 	infos, err := conn.PageTargets()
 	if err != nil {
 		t.Fatal(err)
 	}
-	snaps := srv.syncTabsFromTargets(tok, infos)
 	enumTabNew(t, srv)
-	srv.reconcileIdleFromLog(candidates, snaps)
+	srv.applyEnumeration(conn, win, infos)
 
 	if !managedTargetSet(srv.store.ManagedTabs())[reconcileNewID] {
 		t.Error("first-run enumeration retired the tab created meanwhile")
@@ -333,7 +319,7 @@ func TestDirtyResyncReplyOlderThanTabNewKeepsPersistedMembership(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sess, err := browser.Connect(ctx, st.url())
+	sess, err := browser.Connect(ctx, st.url(), browser.WithTargetObserver(srv.tabs))
 	if err != nil {
 		t.Fatal(err)
 	}

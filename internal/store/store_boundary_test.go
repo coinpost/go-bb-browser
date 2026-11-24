@@ -22,7 +22,6 @@ func tabNewRecord(tab string, at time.Time) LogRecord {
 	return LogRecord{
 		Action: ActionManagedTabOpen,
 		Body:   lifecycleBody,
-		Tab:    tab,
 		Target: managedTarget(tab),
 		OK:     true,
 		Time:   at,
@@ -33,7 +32,7 @@ func managedTarget(tab string) string { return "TARGET-" + tab }
 
 // appendManaged writes the same record as tabNewRecord through the store.
 func appendManaged(s *Store, tab string, at time.Time) error {
-	return s.RegisterManagedTab(tab, managedTarget(tab), at)
+	return s.RegisterManagedTab(managedTarget(tab), at)
 }
 
 func mustMarshalRecord(t *testing.T, rec LogRecord) []byte {
@@ -81,7 +80,7 @@ func requireManaged(t *testing.T, s *Store, tabs ...string) {
 	t.Helper()
 	managed := s.ReplayManagedTabActivity()
 	for _, tab := range tabs {
-		if _, ok := managed[tab]; !ok {
+		if _, ok := managed[managedTarget(tab)]; !ok {
 			t.Fatalf("managed tab %q missing: %#v", tab, managed)
 		}
 	}
@@ -417,7 +416,6 @@ func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
 	if err := s.AppendRPC(LogRecord{
 		Action: protocol.MethodGoto,
 		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`),
-		Tab:    "aa11",
 		OK:     true,
 		Time:   t0.Add(2 * time.Minute),
 	}); err != nil {
@@ -451,7 +449,7 @@ func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
 	defer s2.Close()
 	managed := s2.ReplayManagedTabActivity()
 	for _, tab := range []string{"aa11", "cc33"} {
-		if _, ok := managed[tab]; !ok {
+		if _, ok := managed[managedTarget(tab)]; !ok {
 			t.Fatalf("managed tab %q lost after short snapshot write: %#v", tab, managed)
 		}
 	}

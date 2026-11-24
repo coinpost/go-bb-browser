@@ -14,33 +14,45 @@ import (
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
 
+// registerTestTab registers tid and returns the tab id clients address it by:
+// the complete target id.
+func registerTestTab(srv *Server, tid target.ID) string {
+	srv.tabs.RegisterPageTarget(tid)
+	return string(tid)
+}
+
+// testTabID returns the client-facing tab id of tid and whether it is registered.
+func testTabID(srv *Server, tid target.ID) (string, bool) {
+	return string(tid), srv.tabs.Has(tid)
+}
+
 func tabLockEntryCount(srv *Server) int {
 	srv.tabMuOps.Lock()
 	defer srv.tabMuOps.Unlock()
 	return len(srv.tabCDPLocks)
 }
 
-// tabLockState reports the entry currently mapped for short and its reference count.
-func tabLockState(srv *Server, short string) (*tabLockEntry, int) {
+// tabLockState reports the entry currently mapped for tab and its reference count.
+func tabLockState(srv *Server, tab string) (*tabLockEntry, int) {
 	srv.tabMuOps.Lock()
 	defer srv.tabMuOps.Unlock()
-	ent := srv.tabCDPLocks[short]
+	ent := srv.tabCDPLocks[tab]
 	if ent == nil {
 		return nil, 0
 	}
 	return ent, ent.refs
 }
 
-func waitTabLockRefs(t *testing.T, srv *Server, short string, want int) *tabLockEntry {
+func waitTabLockRefs(t *testing.T, srv *Server, tab string, want int) *tabLockEntry {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		ent, refs := tabLockState(srv, short)
+		ent, refs := tabLockState(srv, tab)
 		if refs == want {
 			return ent
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("lock refs for %q = %d, want %d", short, refs, want)
+			t.Fatalf("lock refs for %q = %d, want %d", tab, refs, want)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -101,7 +113,7 @@ func TestUnknownTabRPCsLeaveNoLockEntries(t *testing.T) {
 func TestClosedTabRetriesLeaveNoLockEntries(t *testing.T) {
 	srv := newIdleTestServer(&fakeConn{}, time.Minute)
 
-	var shorts []string
+	var tabIDs []string
 	for i := 0; i < 3; i++ {
 		rec := postRPC(t, srv, rpcReq(protocol.MethodTabNew, map[string]any{"url": "https://example.com"}, 1))
 		var env struct {
@@ -112,13 +124,13 @@ func TestClosedTabRetriesLeaveNoLockEntries(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || env.Result.Tab == "" {
 			t.Fatalf("tab_new: err %v body %s", err, rec.Body.String())
 		}
-		shorts = append(shorts, env.Result.Tab)
+		tabIDs = append(tabIDs, env.Result.Tab)
 	}
-	for _, short := range shorts {
-		rec := postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": short}, 2))
+	for _, tab := range tabIDs {
+		rec := postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": tab}, 2))
 		var resp protocol.Response
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.Error != nil {
-			t.Fatalf("tab_close %q: err %v body %s", short, err, rec.Body.String())
+			t.Fatalf("tab_close %q: err %v body %s", tab, err, rec.Body.String())
 		}
 	}
 	if got := tabLockEntryCount(srv); got != 0 {
@@ -126,9 +138,9 @@ func TestClosedTabRetriesLeaveNoLockEntries(t *testing.T) {
 	}
 
 	for round := 0; round < 2; round++ {
-		for _, short := range shorts {
+		for _, tab := range tabIDs {
 			for _, method := range tabLockRPCMethods {
-				expectUnknownTabError(t, srv, method, short)
+				expectUnknownTabError(t, srv, method, tab)
 			}
 		}
 	}
@@ -142,7 +154,7 @@ func TestLockTabReleasesEntryAfterLastReference(t *testing.T) {
 	srv := newIdleTestServer(&fakeConn{infos: []*target.Info{
 		{TargetID: tid, Type: "page", Title: "t", URL: "https://ex"},
 	}}, time.Minute)
-	valid := srv.tabs.RegisterPageTarget(tid)
+	valid := registerTestTab(srv, tid)
 
 	// The empty key is a no-op lock and must not touch the map, even on first use.
 	unlock, ok := srv.lockTab(context.Background(), "")
@@ -256,32 +268,32 @@ func TestLockTabSerializesConcurrentSameKey(t *testing.T) {
 }
 
 // Target removal while an operation holds the lock must not open a second lock
-// generation for the same short id: the next caller waits on the same entry.
+// generation for the same tab id: the next caller waits on the same entry.
 func TestRemovedTargetLockIsSharedUntilReferencesDrain(t *testing.T) {
 	tid := target.ID("ABCDEF123456")
 	srv := newIdleTestServer(&fakeConn{}, time.Minute)
-	short := srv.tabs.RegisterPageTarget(tid)
+	tab := registerTestTab(srv, tid)
 
-	unlock, ok := srv.lockTab(context.Background(), short)
+	unlock, ok := srv.lockTab(context.Background(), tab)
 	if !ok {
 		t.Fatal("initial lock failed")
 	}
-	held := waitTabLockRefs(t, srv, short, 1)
+	held := waitTabLockRefs(t, srv, tab, 1)
 	srv.removeTargetState(tid)
-	if ent, refs := tabLockState(srv, short); ent != held || refs != 1 {
+	if ent, refs := tabLockState(srv, tab); ent != held || refs != 1 {
 		t.Fatalf("after removal: entry %p refs %d, want held entry %p refs 1", ent, refs, held)
 	}
 
 	acquired := make(chan func(), 1)
 	go func() {
-		unlock, ok := srv.lockTab(context.Background(), short)
+		unlock, ok := srv.lockTab(context.Background(), tab)
 		if !ok {
 			acquired <- nil
 			return
 		}
 		acquired <- unlock
 	}()
-	if ent := waitTabLockRefs(t, srv, short, 2); ent != held {
+	if ent := waitTabLockRefs(t, srv, tab, 2); ent != held {
 		t.Fatal("reacquire after removal created a second lock generation")
 	}
 	select {
@@ -296,7 +308,7 @@ func TestRemovedTargetLockIsSharedUntilReferencesDrain(t *testing.T) {
 		if unlock2 == nil {
 			t.Fatal("waiter failed to acquire after release")
 		}
-		if ent, refs := tabLockState(srv, short); ent != held || refs != 1 {
+		if ent, refs := tabLockState(srv, tab); ent != held || refs != 1 {
 			t.Fatalf("waiter holds entry %p refs %d, want %p refs 1", ent, refs, held)
 		}
 		unlock2()

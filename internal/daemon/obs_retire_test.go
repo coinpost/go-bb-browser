@@ -68,10 +68,10 @@ func assertObservationReleased(t *testing.T, srv *Server, tid target.ID) {
 func TestTargetReleaseRetiresWriterThenClearsObservation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		release func(t *testing.T, srv *Server, fc *fakeConn, tid target.ID, short string)
+		release func(t *testing.T, srv *Server, fc *fakeConn, tid target.ID, tab string)
 	}{
-		{"tab_close", func(t *testing.T, srv *Server, _ *fakeConn, _ target.ID, short string) {
-			postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": short}, 20))
+		{"tab_close", func(t *testing.T, srv *Server, _ *fakeConn, _ target.ID, tab string) {
+			postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": tab}, 20))
 		}},
 		{"idle_reclaim", func(_ *testing.T, srv *Server, _ *fakeConn, tid target.ID, _ string) {
 			srv.tabIdle.MarkManagedAt(tid, time.Now().Add(-time.Hour))
@@ -86,9 +86,9 @@ func TestTargetReleaseRetiresWriterThenClearsObservation(t *testing.T) {
 			fc.infos = nil
 			postRPC(t, srv, rpcReq(protocol.MethodTabList, map[string]any{}, 20))
 		}},
-		{"removed_twice", func(_ *testing.T, srv *Server, _ *fakeConn, tid target.ID, short string) {
+		{"removed_twice", func(_ *testing.T, srv *Server, _ *fakeConn, tid target.ID, _ string) {
 			srv.removeTargetState(tid)
-			srv.clearRemovedTarget(tid)
+			srv.removeTargetState(tid)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,17 +104,17 @@ func TestTargetReleaseRetiresWriterThenClearsObservation(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 				t.Fatal(err)
 			}
-			short := env.Result.Tab
-			tid, ok := srv.tabs.Lookup(short)
+			tab := env.Result.Tab
+			tid, ok := srv.tabs.Lookup(tab)
 			if !ok {
-				t.Fatalf("tab %q not registered", short)
+				t.Fatalf("tab %q not registered", tab)
 			}
 
 			// Nothing is buffered until a query starts the observation lifecycle.
 			recordAllKinds(srv.obsSink, tid, 1)
 			assertObservationReleased(t, srv, tid)
 			for i, method := range []string{protocol.MethodNetwork, protocol.MethodConsole, protocol.MethodErrors} {
-				postRPC(t, srv, rpcReq(method, map[string]any{"tab": short}, 2+i))
+				postRPC(t, srv, rpcReq(method, map[string]any{"tab": tab}, 2+i))
 			}
 			if n := srv.obsStore.TargetCount(); n != 1 {
 				t.Fatalf("buckets after observation queries = %d, want 1", n)
@@ -143,7 +143,7 @@ func TestTargetReleaseRetiresWriterThenClearsObservation(t *testing.T) {
 				<-flushed
 			}
 
-			tc.release(t, srv, fc, tid, short)
+			tc.release(t, srv, fc, tid, tab)
 
 			if got := conn.forgotten(); len(got) == 0 || got[0] != tid {
 				t.Fatalf("ForgetTarget calls = %v, want %q first", got, tid)
@@ -154,7 +154,7 @@ func TestTargetReleaseRetiresWriterThenClearsObservation(t *testing.T) {
 			assertObservationReleased(t, srv, tid)
 			recordAllKinds(srv.obsSink, tid, 4) // stray event after release
 			assertObservationReleased(t, srv, tid)
-			if _, present := srv.tabs.Lookup(short); present {
+			if _, present := srv.tabs.Lookup(tab); present {
 				t.Error("registry entry retained")
 			}
 		})
@@ -170,16 +170,15 @@ func TestEnableObservationForReleasedTargetLeavesNoBuffers(t *testing.T) {
 	srv.tabHook = conn
 	const tid = target.ID("ABCDEF123456")
 
-	// A registration that was released, and one that never existed.
+	// A target that was released, and one that never existed.
 	srv.tabs.RegisterPageTarget(tid)
-	released, _ := srv.tabs.RegistrationOf(tid)
 	srv.removeTargetState(tid)
 	forgottenBefore := len(conn.forgotten())
-	for _, reg := range []state.TabRegistration{released, {TargetID: tid, ShortID: "3456"}} {
-		_, err := srv.enableObservation(context.Background(), conn, reg, browser.ObservationNetwork)
-		if !errors.Is(err, errObservationTargetGone) {
-			t.Fatalf("err = %v, want errObservationTargetGone", err)
-		}
+	if _, err := srv.enableObservation(context.Background(), conn, tid, browser.ObservationNetwork); !errors.Is(err, errObservationTargetGone) {
+		t.Fatalf("released target: err = %v, want errObservationTargetGone", err)
+	}
+	if _, err := srv.enableObservation(context.Background(), conn, target.ID("NEVEREXISTED"), browser.ObservationNetwork); !errors.Is(err, errObservationTargetGone) {
+		t.Fatalf("unregistered target: err = %v, want errObservationTargetGone", err)
 	}
 	if got := conn.forgotten(); len(got) != forgottenBefore {
 		t.Fatalf("ForgetTarget calls = %v, want none for the stale queries: nothing was set up", got)
@@ -187,17 +186,12 @@ func TestEnableObservationForReleasedTargetLeavesNoBuffers(t *testing.T) {
 	recordAllKinds(srv.obsSink, tid, 1)
 	assertObservationReleased(t, srv, tid)
 
-	// The same target id registered again is a new lifecycle: its own
-	// registration works, the released one stays stale and leaves it alone.
+	// When the target id is registered again, its own lifecycle works.
 	srv.tabs.RegisterPageTarget(tid)
-	current, _ := srv.tabs.RegistrationOf(tid)
-	if _, err := srv.enableObservation(context.Background(), conn, current, browser.ObservationNetwork); err != nil {
+	if _, err := srv.enableObservation(context.Background(), conn, tid, browser.ObservationNetwork); err != nil {
 		t.Fatal(err)
 	}
 	recordAllKinds(srv.obsSink, tid, 2)
-	if _, err := srv.enableObservation(context.Background(), conn, released, browser.ObservationNetwork); !errors.Is(err, errObservationTargetGone) {
-		t.Fatalf("released registration on a reused target id: err = %v, want errObservationTargetGone", err)
-	}
 	if events, _, _ := srv.obsStore.QueryNetwork(tid, 0); len(events) != 1 || events[0].Seq != 2 {
 		t.Fatalf("live target events = %#v", events)
 	}
@@ -207,7 +201,8 @@ func TestEnableObservationForReleasedTargetLeavesNoBuffers(t *testing.T) {
 func TestObservationClearKeepsLiveTargetObservable(t *testing.T) {
 	fc := &fakeConn{infos: []*target.Info{{TargetID: "ABCDEF123456", Type: "page"}}}
 	srv := newIdleTestServer(fc, time.Minute)
-	const tid, short = target.ID("ABCDEF123456"), "3456"
+	const tid = target.ID("ABCDEF123456")
+	const tab = string(tid)
 	for i, d := range []struct {
 		query, clear string
 		events       func(target.ID, uint64) ([]state.ObsEvent, uint64, uint64)
@@ -216,9 +211,9 @@ func TestObservationClearKeepsLiveTargetObservable(t *testing.T) {
 		{protocol.MethodConsole, protocol.MethodConsoleClear, srv.obsStore.QueryConsole},
 		{protocol.MethodErrors, protocol.MethodErrorsClear, srv.obsStore.QueryErrors},
 	} {
-		postRPC(t, srv, rpcReq(d.query, map[string]any{"tab": short}, 1))
+		postRPC(t, srv, rpcReq(d.query, map[string]any{"tab": tab}, 1))
 		recordAllKinds(srv.obsSink, tid, uint64(10*i+1))
-		postRPC(t, srv, rpcReq(d.clear, map[string]any{"tab": short}, 2))
+		postRPC(t, srv, rpcReq(d.clear, map[string]any{"tab": tab}, 2))
 		if events, _, _ := d.events(tid, 0); len(events) != 0 {
 			t.Fatalf("%s: %d event(s) after clear", d.clear, len(events))
 		}
@@ -240,13 +235,12 @@ func TestObservationChurnLeavesNoBuffers(t *testing.T) {
 	srv.tabHook = conn
 	for round := range 200 {
 		tid := target.ID(fmt.Sprintf("CHURN%04d", round%8))
-		short := srv.tabs.RegisterPageTarget(tid)
-		reg, _ := srv.tabs.RegistrationOf(tid)
+		srv.tabs.RegisterPageTarget(tid)
 		var wg sync.WaitGroup
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			_, _ = srv.enableObservation(context.Background(), conn, reg, browser.ObservationConsole)
+			_, _ = srv.enableObservation(context.Background(), conn, tid, browser.ObservationConsole)
 		}()
 		go func() {
 			defer wg.Done()
@@ -261,7 +255,7 @@ func TestObservationChurnLeavesNoBuffers(t *testing.T) {
 		wg.Wait()
 		recordAllKinds(srv.obsSink, tid, 99)
 		if n := srv.obsStore.TargetCount(); n != 0 {
-			t.Fatalf("round %d (%s): %d bucket(s) left after release", round, short, n)
+			t.Fatalf("round %d (%s): %d bucket(s) left after release", round, tid, n)
 		}
 	}
 }

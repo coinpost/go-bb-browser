@@ -55,7 +55,7 @@ func TestStartupEnumerationReleasesVanishedTargetsWithoutDeadlock(t *testing.T) 
 		buf := make([]byte, 1<<20)
 		n := runtime.Stack(buf, true)
 		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
-			if strings.Contains(g, "ListenAndServe") && strings.Contains(g, "syncTabsFromTargets") {
+			if strings.Contains(g, "ListenAndServe") && strings.Contains(g, "applyEnumeration") {
 				t.Fatalf("%s: startup is blocked inside its first enumeration:\n%s", what, g)
 			}
 		}
@@ -84,7 +84,7 @@ func TestStartupEnumerationReleasesVanishedTargetsWithoutDeadlock(t *testing.T) 
 	}
 
 	for _, id := range gone {
-		if _, ok := srv.tabs.ShortForTarget(id); ok {
+		if srv.tabs.Known(id) {
 			t.Errorf("%s is still registered after the startup enumeration", id)
 		}
 		if srv.obsStore.HasTarget(id) {
@@ -98,7 +98,7 @@ func TestStartupEnumerationReleasesVanishedTargetsWithoutDeadlock(t *testing.T) 
 	if n := srv.obsStore.TargetCount(); n != 0 {
 		t.Errorf("observation store holds %d targets, want 0", n)
 	}
-	if _, ok := srv.tabs.ShortForTarget(obsLifeRootID); !ok {
+	if !srv.tabs.Has(obsLifeRootID) {
 		t.Error("the live page was not registered by the startup enumeration")
 	}
 
@@ -128,8 +128,8 @@ func TestStartupEnumerationReleaseIsCancellable(t *testing.T) {
 	awaitGetTargets(t, st, 1)
 	deadline := time.Now().Add(obsLifeWait)
 	for {
-		_, a := srv.tabs.ShortForTarget(obsLifeTabID)
-		_, b := srv.tabs.ShortForTarget(obsLifeOtherID)
+		a := srv.tabs.Known(obsLifeTabID)
+		b := srv.tabs.Known(obsLifeOtherID)
 		if !a && !b {
 			break
 		}
@@ -151,8 +151,8 @@ func TestStartupEnumerationReleaseIsCancellable(t *testing.T) {
 
 // A tab_list reply that was snapshotted before the user closed a tab arrives
 // after that tab's release has completed. It must not bring the dead target
-// back: the alias stays free, a following network query is an unknown tab and
-// creates no buffers, and a late event of the old writer is still rejected.
+// back: a following network query is an unknown tab and creates no buffers,
+// and a late event of the old writer is still rejected.
 func TestStaleTabListDoesNotResurrectReleasedTarget(t *testing.T) {
 	e := newObsLifeEnv(t)
 	e.startObserving("https://first.test/")
@@ -167,8 +167,8 @@ func TestStaleTabListDoesNotResurrectReleasedTarget(t *testing.T) {
 	if e.srv.obsStore.HasTarget(obsLifeTabID) {
 		t.Fatal("precondition: release left the observation buffers")
 	}
-	if _, ok := e.srv.tabs.Lookup(e.short); ok {
-		t.Fatal("precondition: release left the alias")
+	if _, ok := e.srv.tabs.Lookup(e.tab); ok {
+		t.Fatal("precondition: release left the registry entry")
 	}
 
 	send()
@@ -178,17 +178,17 @@ func TestStaleTabListDoesNotResurrectReleasedTarget(t *testing.T) {
 	}
 	tabs, _ := reply.Result["tabs"].([]any)
 	for _, item := range tabs {
-		if m, _ := item.(map[string]any); m["tab"] == e.short {
-			t.Errorf("stale tab_list reported the released tab %q", e.short)
+		if m, _ := item.(map[string]any); m["tab"] == e.tab {
+			t.Errorf("stale tab_list reported the released tab %q", e.tab)
 		}
 	}
-	if tid, ok := e.srv.tabs.Lookup(e.short); ok {
-		t.Errorf("stale tab_list registered the released target again: %s -> %s", e.short, tid)
+	if tid, ok := e.srv.tabs.Lookup(e.tab); ok {
+		t.Errorf("stale tab_list registered the released target again: %s -> %s", e.tab, tid)
 	}
-	if _, ok := e.srv.tabs.ShortForTarget(obsLifeTabID); ok {
+	if e.srv.tabs.Known(obsLifeTabID) {
 		t.Error("released target is back in the registry")
 	}
-	if _, ok := e.srv.tabs.ShortForTarget(obsLifeOtherID); !ok {
+	if !e.srv.tabs.Has(obsLifeOtherID) {
 		t.Error("stale tab_list dropped a live tab that was registered meanwhile")
 	}
 
@@ -197,7 +197,7 @@ func TestStaleTabListDoesNotResurrectReleasedTarget(t *testing.T) {
 	e.st.failNext("Target.attachToTarget")
 	attach, refuse := e.st.holdNextReply("Target.attachToTarget")
 	defer refuse()
-	query := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.short})
+	query := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.tab})
 	var got enumRPCReply
 	select {
 	case <-attach:
@@ -234,13 +234,13 @@ func TestStaleTabListDoesNotResurrectReleasedTarget(t *testing.T) {
 		t.Errorf("fresh tab_list has %d tabs, want the root page and the other live tab: %v", len(tabs), tabs)
 	}
 
-	// A failed enumeration ends its token too, so removal markers stay bounded.
+	// A failed enumeration ends its window too, so open windows stay bounded.
 	e.st.failNext("Target.getTargets")
 	if failed, err := enumRPC(e.srv, protocol.MethodTabList, nil); err != nil || failed.Error == nil {
 		t.Fatalf("tab_list with a refused Target.getTargets = %+v, %v; want an RPC error", failed, err)
 	}
-	if n := e.srv.tabs.PendingEnumerations(); n != 0 {
-		t.Errorf("%d enumerations are still pending with none in flight", n)
+	if n := e.srv.tabs.OpenWindows(); n != 0 {
+		t.Errorf("%d windows are still open with none in flight", n)
 	}
 }
 
@@ -254,14 +254,14 @@ func TestExplicitCloseOfGoneTargetReleasesItsObservation(t *testing.T) {
 	e.startObserving("https://first.test/")
 
 	e.st.failNext("Target.closeTarget")
-	refused, err := enumRPC(e.srv, protocol.MethodTabClose, map[string]any{"tab": e.short})
+	refused, err := enumRPC(e.srv, protocol.MethodTabClose, map[string]any{"tab": e.tab})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if refused.Error == nil || refused.Error["message"] != "failed to close tab" {
 		t.Fatalf("refused tab_close = %+v, want failed to close tab", refused)
 	}
-	if tid, ok := e.srv.tabs.Lookup(e.short); !ok || tid != obsLifeTabID {
+	if tid, ok := e.srv.tabs.Lookup(e.tab); !ok || tid != obsLifeTabID {
 		t.Fatalf("a refused close released the live tab (%q, %v)", tid, ok)
 	}
 	e.emitRequest("https://second.test/")
@@ -270,15 +270,15 @@ func TestExplicitCloseOfGoneTargetReleasesItsObservation(t *testing.T) {
 	sid, _ := e.st.sessionFor(obsLifeTabID)
 	e.st.dropPage(obsLifeTabID)
 	e.st.failNextWith("Target.closeTarget", "No target with given id found")
-	gone, err := enumRPC(e.srv, protocol.MethodTabClose, map[string]any{"tab": e.short})
+	gone, err := enumRPC(e.srv, protocol.MethodTabClose, map[string]any{"tab": e.tab})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gone.Error == nil || gone.Error["message"] != "failed to close tab" {
 		t.Fatalf("tab_close of a gone target = %+v, want the failed to close tab error", gone)
 	}
-	if tid, ok := e.srv.tabs.Lookup(e.short); ok {
-		t.Errorf("gone target kept its registration: %s -> %s", e.short, tid)
+	if tid, ok := e.srv.tabs.Lookup(e.tab); ok {
+		t.Errorf("gone target kept its registration: %s -> %s", e.tab, tid)
 	}
 	if e.srv.obsStore.HasTarget(obsLifeTabID) {
 		t.Errorf("gone target kept its observation buffers: %v", e.networkURLs())
@@ -295,7 +295,7 @@ func TestExplicitCloseOfGoneTargetReleasesItsObservation(t *testing.T) {
 	if e.srv.obsStore.HasTarget(obsLifeTabID) {
 		t.Error("a late event rebuilt the gone target's buffers")
 	}
-	again, err := enumRPC(e.srv, protocol.MethodNetwork, map[string]any{"tab": e.short})
+	again, err := enumRPC(e.srv, protocol.MethodNetwork, map[string]any{"tab": e.tab})
 	if err != nil {
 		t.Fatal(err)
 	}

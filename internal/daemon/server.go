@@ -48,11 +48,15 @@ type Server struct {
 	obsSink  *obsSink
 	tabIdle  *state.TabIdleTracker
 
-	// obsLifeMu orders target releases against observation registration. It is
-	// held only for map/registry updates, never across CDP or a release.
-	obsLifeMu sync.Mutex
+	// lifeMu serializes the application of lifecycle evidence to the registry
+	// and everything keyed by a registered target (see tab_idle.go). Lock
+	// order: lifeMu before the registry / idle tracker / store locks.
+	lifeMu sync.Mutex
+	// managedRecovered is set once the managed tabs persisted by a previous
+	// daemon process have been settled. Guarded by lifeMu.
+	managedRecovered bool
 	// targetReleases has an entry per target id for as long as any release of
-	// that id is still running (see beginTargetReleaseLocked).
+	// that id is still running (see beginTargetReleaseLocked). Guarded by lifeMu.
 	targetReleases map[target.ID]*targetRelease
 	// obsStepHook is nil outside tests. Lifecycle regressions set it to park an
 	// observation query between two of its steps (see obsStep*).

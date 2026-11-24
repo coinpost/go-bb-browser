@@ -36,7 +36,7 @@ const (
 // Managed-tab lifecycle records. They are written synchronously by the store
 // (never through the asynchronous RPC audit path) and are the only records that
 // add or remove persisted managed-tab membership. Both carry the full CDP
-// target id in LogRecord.Target; the short tab id is informational only.
+// target id in LogRecord.Target.
 const (
 	// ActionManagedTabOpen registers a daemon-created tab. It is also the
 	// record used to seed a freshly rotated log with the live managed tabs.
@@ -47,7 +47,7 @@ const (
 )
 
 // lifecycleBody is the placeholder body of lifecycle records (they are not
-// JSON-RPC requests; recovery only needs Action/Tab/Target/Time).
+// JSON-RPC requests; recovery only needs Action/Target/Time).
 var lifecycleBody = json.RawMessage(`{}`)
 
 // ErrClosed is returned by writes after Close on a disk-backed store.
@@ -76,7 +76,7 @@ type Store struct {
 	logBytes    int64
 	maxLogBytes int64
 	seq         atomic.Uint64
-	managed     map[string]managedEntry // keyed by full CDP target id
+	managed     map[string]time.Time // keyed by full CDP target id
 	logger      *slog.Logger
 	inMemory    bool
 	closed      bool
@@ -92,18 +92,22 @@ type Store struct {
 }
 
 // LogRecord is one append-only RPC log line.
+//
+// Target is the complete CDP target id the record refers to (for an RPC audit
+// line: the id the request was resolved to). It is the only field recovery
+// reads a tab identity from: managed-tab membership and activity are matched on
+// it by exact equality. Older logs also named tabs by a short suffix alias
+// under "tab"; that key is no longer written or read, so a record without
+// Target identifies no tab.
 type LogRecord struct {
-	Action string          `json:"action"`
-	Body   json.RawMessage `json:"body"`
-	Tab    string          `json:"tab,omitempty"`
-	// Target is the full CDP target id the record refers to. Managed-tab
-	// membership and activity are matched on it, never on the short Tab alias.
-	Target   string    `json:"target,omitempty"`
-	SenderIP string    `json:"sender_ip"`
-	Seq      uint64    `json:"seq,omitempty"`
-	OK       bool      `json:"ok"`
-	Error    string    `json:"error,omitempty"`
-	Time     time.Time `json:"time"`
+	Action   string          `json:"action"`
+	Body     json.RawMessage `json:"body"`
+	Target   string          `json:"target,omitempty"`
+	SenderIP string          `json:"sender_ip"`
+	Seq      uint64          `json:"seq,omitempty"`
+	OK       bool            `json:"ok"`
+	Error    string          `json:"error,omitempty"`
+	Time     time.Time       `json:"time"`
 }
 
 // Open initializes rpc.jsonl on disk, or in-memory when cfg.StateDir is "" or
@@ -130,7 +134,7 @@ func Open(cfg OpenConfig) (*Store, error) {
 	s := &Store{
 		logger:      logger,
 		inMemory:    useMemory,
-		managed:     make(map[string]managedEntry),
+		managed:     make(map[string]time.Time),
 		maxLogBytes: maxLogBytes,
 	}
 	s.seq.Store(uint64(time.Now().UnixNano()))
@@ -166,21 +170,24 @@ func Open(cfg OpenConfig) (*Store, error) {
 		return nil, fmt.Errorf("open rpc log %q: %w", logPath, err)
 	}
 
-	managed := make(map[string]managedEntry)
-	legacy := make(map[string]struct{})
+	managed := make(map[string]time.Time)
+	unidentified := 0
 	needNewline, err := replayLog(f, logger, func(rec LogRecord) error {
 		applyManagedUpdate(managed, rec)
-		trackLegacyManaged(legacy, rec)
+		if isUnidentifiedTabNew(rec) {
+			unidentified++
+		}
 		return nil
 	})
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("replay rpc log: %w", err)
 	}
-	if len(legacy) > 0 {
-		// Written before target identity was persisted: a short id alone cannot
+	if unidentified > 0 {
+		// Written by a daemon that named tabs by short alias: an alias cannot
 		// prove a live tab is the one the daemon created, so these are dropped.
-		logger.Warn("rpc log has managed tabs without target identity; not restoring them for idle cleanup", "count", len(legacy))
+		logger.Warn("rpc log has tab_new records without a complete target id (written by an older daemon); those tabs are not adopted for idle cleanup",
+			"records", unidentified)
 	}
 
 	s.logFile = f
@@ -361,15 +368,15 @@ func (s *Store) AppendRPC(rec LogRecord) error {
 	return s.appendLocked(rec)
 }
 
-// RegisterManagedTab records that the daemon created targetID (short id tab)
-// and that it was last active at `at`. Registering the same target again only
+// RegisterManagedTab records that the daemon created targetID and
+// that it was last active at `at`. Registering the same target again only
 // replaces its entry.
 //
 // The in-memory managed set is always updated. A non-nil error means the
 // lifecycle record was not written to rpc.jsonl, so the tab will not be
 // restored as managed after a restart (it is then left open, never adopted
-// through its alias); callers should log it.
-func (s *Store) RegisterManagedTab(tab, targetID string, at time.Time) error {
+// by guesswork); callers should log it.
+func (s *Store) RegisterManagedTab(targetID string, at time.Time) error {
 	if s == nil {
 		return fmt.Errorf("store not initialized")
 	}
@@ -384,7 +391,6 @@ func (s *Store) RegisterManagedTab(tab, targetID string, at time.Time) error {
 	return s.appendLocked(LogRecord{
 		Action: ActionManagedTabOpen,
 		Body:   lifecycleBody,
-		Tab:    tab,
 		Target: targetID,
 		OK:     true,
 		Time:   at,
@@ -407,14 +413,12 @@ func (s *Store) RetireManagedTarget(targetID string) (bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ent, ok := s.managed[targetID]
-	if !ok {
+	if _, ok := s.managed[targetID]; !ok {
 		return false, nil
 	}
 	return true, s.appendLocked(LogRecord{
 		Action: ActionManagedTabRetire,
 		Body:   lifecycleBody,
-		Tab:    ent.tab,
 		Target: targetID,
 		OK:     true,
 		Time:   time.Now().UTC(),
@@ -432,7 +436,7 @@ func (s *Store) appendLocked(rec LogRecord) error {
 	line := append(data, '\n')
 
 	if s.managed == nil {
-		s.managed = make(map[string]managedEntry)
+		s.managed = make(map[string]time.Time)
 	}
 	applyManagedUpdate(s.managed, rec)
 
@@ -506,14 +510,12 @@ func (s *Store) writeManagedSnapshotLocked() error {
 
 	var buf bytes.Buffer
 	for _, id := range targets {
-		ent := s.managed[id]
 		data, err := json.Marshal(LogRecord{
 			Action: ActionManagedTabOpen,
 			Body:   lifecycleBody,
-			Tab:    ent.tab,
 			Target: id,
 			OK:     true,
-			Time:   ent.at,
+			Time:   s.managed[id],
 		})
 		if err != nil {
 			return err
@@ -566,16 +568,14 @@ func (s *Store) rawWriteLocked(p []byte) (int, error) {
 
 // ManagedTab is one persisted daemon-created tab.
 type ManagedTab struct {
-	// Tab is the short id the tab had when it was registered (informational).
-	Tab string
-	// TargetID is the full CDP target id; the tab's identity.
+	// TargetID is the complete CDP target id; the tab's identity.
 	TargetID string
 	// LastActivity is the time of its last successful tab-related RPC.
 	LastActivity time.Time
 }
 
-// ManagedTabs returns the managed tabs with their full target identity, sorted
-// by target id. Recovery must match on TargetID, not on the short alias.
+// ManagedTabs returns the managed tabs, sorted by target id. Recovery matches
+// a live tab on TargetID by exact equality.
 func (s *Store) ManagedTabs() []ManagedTab {
 	if s == nil {
 		return nil
@@ -583,16 +583,15 @@ func (s *Store) ManagedTabs() []ManagedTab {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]ManagedTab, 0, len(s.managed))
-	for id, ent := range s.managed {
-		out = append(out, ManagedTab{Tab: ent.tab, TargetID: id, LastActivity: ent.at})
+	for id, at := range s.managed {
+		out = append(out, ManagedTab{TargetID: id, LastActivity: at})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TargetID < out[j].TargetID })
 	return out
 }
 
-// ReplayManagedTabActivity returns the short ids and last activity of the
-// managed tabs (see ManagedTabs). Short ids are aliases, not identities: use
-// ManagedTabs to decide whether a live tab is the one the daemon created.
+// ReplayManagedTabActivity returns the managed tabs keyed by complete CDP
+// target id with their last activity (the same set as ManagedTabs).
 func (s *Store) ReplayManagedTabActivity() map[string]time.Time {
 	if s == nil {
 		return nil
@@ -600,10 +599,8 @@ func (s *Store) ReplayManagedTabActivity() map[string]time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make(map[string]time.Time, len(s.managed))
-	for _, ent := range s.managed {
-		if prev, ok := out[ent.tab]; !ok || ent.at.After(prev) {
-			out[ent.tab] = ent.at
-		}
+	for id, at := range s.managed {
+		out[id] = at
 	}
 	return out
 }

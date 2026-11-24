@@ -1,6 +1,6 @@
 # daemonclient
 
-`daemonclient` 是 **bb-daemon** 的 Go HTTP 客户端：通过 **JSON-RPC 2.0** 调用 `POST /v1`，并提供 `Live`、`Ready`、`Health` 三种健康检查。一台 daemon 用 `NewClient`；多台用 `NewPool`（见下文）。协议字段与 **`pkg/protocol`**（包名 `protocol`）中的类型、方法名一致，与仓库根目录 `AGENTS.md` 中描述的守护进程行为对齐（短 tab id、全局单调 `seq`、观测类接口的 `cursor` 等）。
+`daemonclient` 是 **bb-daemon** 的 Go HTTP 客户端：通过 **JSON-RPC 2.0** 调用 `POST /v1`，并提供 `Live`、`Ready`、`Health` 三种健康检查。一台 daemon 用 `NewClient`；多台用 `NewPool`（见下文）。协议字段与 **`pkg/protocol`**（包名 `protocol`）中的类型、方法名一致，与仓库根目录 `AGENTS.md` 中描述的守护进程行为对齐（完整 CDP target id 作为 tab id、全局单调 `seq`、观测类接口的 `cursor` 等）。
 
 ## 适用场景
 
@@ -61,15 +61,19 @@ c := daemonclient.NewClient("http://127.0.0.1:8080",
 
 若干独立的 `bb-daemon`（各自 Chrome / `--debugger-url`）不能共享 tab。`Pool` 在客户端做负载分担，并把 **tab 钉在创建它的那一个 daemon 上**。
 
-**Pool 对外 tab id**（仅 Pool 表面；单 `Client` 仍返回 daemon 短 id）格式为：
+**Tab id**：daemon 的 tab id 是**完整 CDP target id**（不透明字符串，原样精确匹配；旧版短 id 已移除，见仓库 [README](../../README.md)）。单 `Client` 的 `TabNew` / `TabList` / `TabFocus` 直接返回它，后续调用原样回传即可；未知或过期的 id 得到 `*RPCError`（`unknown tab id`），不会回退到其他 tab。
+
+**Pool 对外 tab id**（仅 Pool 表面）格式为：
 
 ```text
-<backendKey>:<daemonShortId>
+<backendKey>:<targetId>
 ```
 
-- `backendKey` 默认是 `NewPool` 参数顺序的 **0-based 下标**（`"0"`、`"1"`、…）。也可用 `NewPoolBackends` 配稳定名字（不可含 `:`，不可重复），例如 `"west:abcd"`。
-- 调用方把 `TabNew` / `TabList` / `TabFocus` 返回的 id 原样传回后续 tab 操作。Pool **按前缀路由**到对应后端，发给 daemon 时只带原生短 id。
-- 因此跨 daemon 的原生短 id 碰撞在 Pool API 边界上不可能混淆。格式错误或未知 `backendKey` 会返回 `*InvalidTabIDError`；格式正确但不是本池创建或列出（或已关闭 / `ForgetTab`）的 id 仍为 `*UnknownTabError`。
+其中 `targetId` 即该 daemon 返回的完整 CDP target id。
+
+- `backendKey` 默认是 `NewPool` 参数顺序的 **0-based 下标**（`"0"`、`"1"`、…）。也可用 `NewPoolBackends` 配稳定名字（不可含 `:`，不可重复），例如 `"west:E3B0C44298FC1C149AFBF4C8996FB924"`。
+- 调用方把 `TabNew` / `TabList` / `TabFocus` 返回的 id 原样传回后续 tab 操作。Pool **按前缀路由**到对应后端，发给 daemon 时去掉前缀、只带完整 target id。Pool 对 id 逐字节精确匹配（不去空白、不折叠大小写、不做部分匹配），`TabList` / `TabFocus` 观察到的 id 也按返回值原样绑定；**裸 target id 不被接受**——没有前缀就无法确定后端，Pool 不会猜。
+- 不同 daemon 即使返回相同的 target id，在 Pool API 边界上也不会混淆。格式错误或未知 `backendKey` 会返回 `*InvalidTabIDError`；格式正确但不是本池创建或列出（或已关闭 / `ForgetTab`）的 id 仍为 `*UnknownTabError`。
 
 ```go
 pool, err := daemonclient.NewPool(
@@ -89,7 +93,8 @@ if err != nil {
 }
 
 out, err := pool.TabNew(ctx, protocol.TabNewParams{URL: "https://example.com"})
-// out.Tab 形如 "0:abcd"；Eval / Goto / TabClose / … 必须带这个 id
+// out.Tab 形如 "0:E3B0C44298FC1C149AFBF4C8996FB924"（<backendKey>:<完整 CDP target id>）；
+// Eval / Goto / TabClose / … 必须原样带这个 id
 _, err = pool.Eval(ctx, protocol.EvalParams{Tab: out.Tab, Script: "document.title"})
 ```
 
@@ -100,10 +105,10 @@ _, err = pool.Eval(ctx, protocol.EvalParams{Tab: out.Tab, Script: "document.titl
 | **启动** | `NewPool` **不**探测后端。部分 daemon 当时不可用也可以构造成功。 |
 | **无 tab 的请求** | `Health` / `Ready` / `Live`、`tab_new`：选 **in-flight 最少**的后端（并列时 round-robin），失败则试下一个；全部失败返回 `*AllFailedError`。`tab_new` 的 failover 只表示「新 tab 开在另一个 daemon」，**不会**把已有 tab 挪走。 |
 | **tab_new 均摊** | `tab_new` 的轮询游标独立于 `Health` / `Ready` / `Live` 及其它无 tab 调用，「先探活再开 tab」不会让 tab 集中到同一个 daemon。后端按**每次尝试**选取：在本请求尚未试过的后端中取 in-flight 最少者，并列时从游标起按环序取第一个；每次尝试（无论成败）都把游标移到所选后端之后，每个请求对每个后端最多尝试一次。因此故障后端的份额在其余健康后端间均分（顺序调用时差值 ≤1），并发请求在故障转移时也不会重复占用或跳过其它请求尚未用到的健康后端；后端恢复后直接回到轮询，不补发。选取只在一把短锁内完成，HTTP 调用不持锁。长时间挂起（不返回错误）的后端、长期不均的 in-flight 负载不在此保证之内。 |
-| **tab_list** | **并发查询每一个后端**，把各端短 id 加上前缀后按 **构造顺序**（而非应答先后）合并。某端失败则 **跳过**（该端 tab 不会出现在结果里），其余端仍返回；全部失败才是 `*AllFailedError`。空列表算成功。成功端的 `tabs` 数组用于对账，旧绑定的回收规则见下文「绑定生命周期」。Pool 没有跨 daemon 的焦点：`tab` / `focus` 取构造顺序上第一个非空值。`seq` 为成功端中的最大值。 |
+| **tab_list** | **并发查询每一个后端**，把各端 tab id 加上前缀后按 **构造顺序**（而非应答先后）合并。某端失败则 **跳过**（该端 tab 不会出现在结果里），其余端仍返回；全部失败才是 `*AllFailedError`。空列表算成功。成功端的 `tabs` 数组用于对账，旧绑定的回收规则见下文「绑定生命周期」。Pool 没有跨 daemon 的焦点：`tab` / `focus` 取构造顺序上第一个非空值。`seq` 为成功端中的最大值。 |
 | **tab_focus** | 并发查询所有后端，取构造顺序上 **第一个成功**的后端（跳过失败端；不是最快应答者），返回前缀化的 `tab` / `focus` 并绑定。排在它前面的后端都已应答后立即返回，不等后面的后端。局部观察不会回收其它绑定。不是池级焦点。全部失败返回 `*AllFailedError`。 |
 | **tab_list / tab_focus 超时** | 这两个聚合查询最多等待 **2 秒**（调用方 deadline 更短则以其为准；即使调用方 deadline 更长或没有 deadline 也是 2 秒）。到时仍未应答的后端按失败 **跳过** 并取消其请求，已收到的成功结果照常返回，所以一个接受连接但不应答的 daemon 只会让调用变慢到该上限，不会让它失败或永久阻塞。没有任何成功结果时：调用方 deadline 已到则返回其 context 错误，否则返回 `*AllFailedError`（超时端记为 `context.DeadlineExceeded`）。调用前 context 已结束则不发请求；调用中 **主动取消** context 会立即返回 `context.Canceled`，丢弃已收到的结果、不写入映射、也不改动调用方传入的 `result`：前缀化结果与整批绑定变更（含回收）先暂存（结果在锁外解码到一个新值），最后一次取消检查在池的 tab 映射锁内、紧挨着提交之前进行，因此在并发查询、结果准备或等锁期间发生的取消都生效；只有晚于这次检查的取消来不及生效（调用按成功返回并已绑定）。deadline 到达不算主动取消，预算内的成功结果照常提交。成功时暂存值整体替换 `*result`（不与原值合并）。其它 Pool 方法和单 `Client` 没有内置超时。 |
-| **有 tab 的请求** | **硬性**：必须打到 **该前缀对应的同一个 daemon**（含 `tab_select`）。池对外 id 为 `<backendKey>:<daemonShortId>`（`TabNew` / `TabList` / `TabFocus` 成功时写入映射；`TabClose` 成功、`ForgetTab`、或该端之后成功的 `TabList` 不再列出时删除）；发给 daemon 时去掉前缀。对端失败 **不会**改道到其它 daemon，也不做跨 daemon 转发。未知（未创建/未列出/已关闭/已被列表对账移除）tab 返回 `*UnknownTabError`；格式错误或未知前缀返回 `*InvalidTabIDError`。省略 `tab` 会得到 `ErrTabRequired`。 |
+| **有 tab 的请求** | **硬性**：必须打到 **该前缀对应的同一个 daemon**（含 `tab_select`）。池对外 id 为 `<backendKey>:<targetId>`（`TabNew` / `TabList` / `TabFocus` 成功时写入映射；`TabClose` 成功、`ForgetTab`、或该端之后成功的 `TabList` 不再列出时删除）；发给 daemon 时去掉前缀。对端失败 **不会**改道到其它 daemon，也不做跨 daemon 转发。未知（未创建/未列出/已关闭/已被列表对账移除）tab 返回 `*UnknownTabError`；该 tab 在池外被关闭（直接调 daemon、idle 清理、在浏览器里关掉）而绑定尚未回收时，请求仍只发往它所属的 daemon，daemon 明确答复的 `unknown tab id` 同样以 `*UnknownTabError` 返回（`Tab` 为池对外 id，`errors.As` 仍可取到底层 `*RPCError`；其它 RPC 错误原样返回，绑定的回收仍按下文规则；daemon 因自己查询 target 列表失败/超时而答复的 `failed to list targets` 属于这一类，不表示 tab 不存在，绑定保留，可稍后重试）。格式错误或未知前缀返回 `*InvalidTabIDError`。省略 `tab` 会得到 `ErrTabRequired`。 |
 
 `Pool.Clients()` 可拿到各 `*Client`（每端独立 URL / `Headers`）。`TabClose` 成功后解除亲和；daemon 空闲关 tab 时可用 `ForgetTab`。`BackendKeys()` 返回构造顺序下的前缀。
 
@@ -122,7 +127,7 @@ _, err = pool.Eval(ctx, protocol.EvalParams{Tab: out.Tab, Script: "document.titl
 
 每个 backend 的 `WithAPIToken` 独立生效，Pool 不共享 token；后续 tab 操作仍发送到原 backend。
 
-各 daemon 独立派生短 tab id，不同 daemon 可能返回相同短 id。Pool 用前缀把它们变成互不混淆的对外 id，**不再**靠先到先得的 close-on-collide 作为主策略（`TabCollisionError` 仅作防御）。`Call(ctx, "tab_new", params, nil)` 与非 `protocol.TabNewResult` 的 result 指针只要能解码 JSON 对象，成功时同样写入映射并把 `tab` 改写成前缀形式；无法解码的 result 会在发请求前被拒绝。`tab_list` 合并所有后端并前缀化；`tab_focus` 返回第一个健康后端的前缀化焦点。
+各 daemon 的 tab id 互相独立。Pool 用前缀把它们变成互不混淆的对外 id，**不再**靠先到先得的 close-on-collide 作为主策略（`TabCollisionError` 仅作防御）。`Call(ctx, "tab_new", params, nil)` 与非 `protocol.TabNewResult` 的 result 指针只要能解码 JSON 对象，成功时同样写入映射并把 `tab` 改写成前缀形式；无法解码的 result 会在发请求前被拒绝。`tab_list` 合并所有后端并前缀化；`tab_focus` 返回第一个健康后端的前缀化焦点。
 
 ## 健康检查
 

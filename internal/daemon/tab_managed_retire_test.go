@@ -17,8 +17,8 @@ import (
 	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
 
-// Two full CDP target ids that derive the same short alias ("1234"): one is
-// created by the daemon, the other is a tab the user opened themselves.
+// Two complete CDP target ids sharing a suffix ("1234"): one is created by the
+// daemon, the other is a tab the user opened themselves.
 const (
 	managedTargetA = target.ID("AAAA0000000000000000000000001234")
 	userTargetC    = target.ID("CCCC0000000000000000000000001234")
@@ -41,7 +41,7 @@ func tabNewShort(t *testing.T, srv *Server) string {
 
 // restartIdleServer shuts the old server's store down and brings up a new
 // server on the same state dir, running the same startup reconciliation as
-// connectBrowser.
+// connectBrowserLocked.
 func restartIdleServer(t *testing.T, old *Server, fc *fakeConn, stateDir string) *Server {
 	t.Helper()
 	drainRPCLog(t, old)
@@ -54,13 +54,11 @@ func restartIdleServer(t *testing.T, old *Server, fc *fakeConn, stateDir string)
 	return srv
 }
 
-// reconcileFresh runs one successful enumeration + managed reconciliation the
-// way connectBrowser / runTargetSync do, for a target list that nothing
-// overlaps: candidates and token first, then the list is applied.
+// reconcileFresh applies one successful enumeration (with its managed
+// recovery) the way connectBrowserLocked / runTargetSync do, for a target list
+// that nothing overlaps.
 func reconcileFresh(srv *Server, infos []*target.Info) {
-	candidates := srv.beginManagedReconcile()
-	tok := srv.beginTargetEnumeration()
-	srv.reconcileIdleFromLog(candidates, srv.syncTabsFromTargets(tok, infos))
+	srv.applyEnumeration(nil, srv.tabs.OpenWindow(), infos)
 }
 
 func hasTarget(fc *fakeConn, id target.ID) bool {
@@ -209,16 +207,9 @@ func TestRestartRecoversOnlyExactTarget(t *testing.T) {
 // they must not turn whatever tab currently owns the alias into a managed tab.
 func TestRestartDoesNotAdoptLegacyAliasOnlyRecord(t *testing.T) {
 	dir := t.TempDir()
-	line, err := json.Marshal(store.LogRecord{
-		Action: protocol.MethodTabNew,
-		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1}`),
-		Tab:    "1234",
-		OK:     true,
-		Time:   time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Written verbatim: LogRecord no longer has a field for the legacy "tab" key.
+	line := []byte(`{"action":"tab_new","body":{"jsonrpc":"2.0","method":"tab_new","params":{},"id":1},"tab":"1234","sender_ip":"","ok":true,"time":"` +
+		time.Now().UTC().Format(time.RFC3339Nano) + `"}`)
 	if err := os.WriteFile(filepath.Join(dir, store.RPCLogFile()), append(line, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +277,7 @@ func TestTransientCloseFailureKeepsPersistedMembership(t *testing.T) {
 func TestFailedEnumerationKeepsPersistedMembership(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, short := newManagedTabServer(t, dir)
-	srv.syncInitialTargets(noopDirtyMarker{}, srv.beginTargetEnumeration(), nil, errors.New("Target.getTargets: timeout"))
+	srv.syncInitialTargets(noopDirtyMarker{}, srv.tabs.OpenWindow(), nil, errors.New("Target.getTargets: timeout"))
 	if _, ok := srv.store.ReplayManagedTabActivity()[short]; !ok {
 		t.Fatal("failed enumeration retired a managed tab")
 	}
@@ -359,7 +350,7 @@ func TestRotationSnapshotDropsRetiredKeepsLiveIdentity(t *testing.T) {
 		if err := json.Unmarshal(line, &rec); err != nil {
 			t.Fatalf("bad log line %q: %v", line, err)
 		}
-		if rec.Tab == retiredShort && rec.Action != protocol.MethodGoto {
+		if rec.Target == retiredShort && rec.Action != protocol.MethodGoto {
 			t.Errorf("rotated log seeds retired tab %q: %s", retiredShort, line)
 		}
 	}
@@ -391,12 +382,12 @@ func TestDelayedAuditCannotResurrectOrRetireAcrossAliasReuse(t *testing.T) {
 	srv.removeTargetState(managedTargetA)
 
 	// Delayed lines of the old lifecycle, both as this version writes them
-	// (naming the old target) and as alias-only lines.
+	// (naming the old target) and as lines without any identity, whose
+	// request body merely asks for the old tab.
 	delayed := func(action string, params map[string]any) []store.LogRecord {
 		rec := store.LogRecord{
 			Action: action,
 			Body:   json.RawMessage(rpcReq(action, params, 99)),
-			Tab:    short,
 			OK:     true,
 			Time:   time.Now().Add(time.Hour).UTC(),
 		}
@@ -415,14 +406,15 @@ func TestDelayedAuditCannotResurrectOrRetireAcrossAliasReuse(t *testing.T) {
 		t.Fatalf("delayed audit lines resurrected retired tab %q", short)
 	}
 
-	// The alias is reused by a new daemon-created tab; a delayed tab_close line
-	// from the old lifecycle must not retire it.
+	// A new daemon-created tab with the same id suffix starts; delayed tab_close
+	// and activity lines from the old lifecycle must not retire or renew it.
 	newTarget := target.ID("DDDD0000000000000000000000001234")
 	fc.createID = newTarget
-	if got := tabNewShort(t, srv); got != short {
-		t.Fatalf("alias not reused: got %q want %q", got, short)
+	newTab := tabNewShort(t, srv)
+	if newTab != string(newTarget) {
+		t.Fatalf("tab_new returned %q, want the complete id %q", newTab, newTarget)
 	}
-	registeredAt := srv.store.ReplayManagedTabActivity()[short]
+	registeredAt := srv.store.ReplayManagedTabActivity()[newTab]
 	for _, rec := range append(
 		delayed(protocol.MethodTabClose, map[string]any{"tab": short}),
 		delayed(protocol.MethodGoto, map[string]any{"tab": short, "url": "https://example.com"})...,
@@ -459,7 +451,7 @@ func TestManagedActivityPersistedByTargetIdentity(t *testing.T) {
 	postRPC(t, srv, rpcReq(protocol.MethodGoto, map[string]any{"tab": short, "url": "https://example.com"}, 2))
 	drainRPCLog(t, srv)
 	managed := srv.store.ManagedTabs()
-	if len(managed) != 1 || managed[0].TargetID != string(managedTargetA) || managed[0].Tab != short {
+	if len(managed) != 1 || managed[0].TargetID != string(managedTargetA) {
 		t.Fatalf("managed: %#v", managed)
 	}
 	if !managed[0].LastActivity.After(registeredAt) {
@@ -468,7 +460,7 @@ func TestManagedActivityPersistedByTargetIdentity(t *testing.T) {
 }
 
 // lockedConn makes fakeConn's target list safe for concurrent RPCs and hands
-// out unique target ids that all collide on the 4-digit short alias.
+// out unique target ids that all share one 4-digit suffix.
 type lockedConn struct {
 	*fakeConn
 	mu  sync.Mutex
@@ -544,7 +536,7 @@ func TestConcurrentLifecyclesLeaveNoPersistedMembership(t *testing.T) {
 					srv.closeExpiredTabs(context.Background())
 					if _, still := srv.tabIdle.Snapshot()[tid]; still {
 						// Another worker's sweep may hold this tab's turn; finish it here.
-						_ = srv.closeTabByShort(context.Background(), short)
+						_ = srv.closeTab(context.Background(), short)
 					}
 				}
 			}

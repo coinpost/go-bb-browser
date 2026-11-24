@@ -23,10 +23,10 @@ import (
 var attachKindsRPC = []struct {
 	name   string
 	method string
-	params func(short string) map[string]any
+	params func(tab string) map[string]any
 }{
-	{"observer", protocol.MethodNetwork, func(short string) map[string]any { return map[string]any{"tab": short} }},
-	{"pool", protocol.MethodEval, func(short string) map[string]any { return map[string]any{"tab": short, "script": "1"} }},
+	{"observer", protocol.MethodNetwork, func(tab string) map[string]any { return map[string]any{"tab": tab} }},
+	{"pool", protocol.MethodEval, func(tab string) map[string]any { return map[string]any{"tab": tab, "script": "1"} }},
 }
 
 // Review P1: the old lifecycle's release is parked on the reply to
@@ -37,7 +37,7 @@ func TestReleaseOfReusedTargetIDKeepsReplacementPage(t *testing.T) {
 	for _, kind := range attachKindsRPC {
 		t.Run(kind.name, func(t *testing.T) {
 			e := newObsLifeEnv(t)
-			enumMustRPC(t, e.srv, kind.method, kind.params(e.short))
+			enumMustRPC(t, e.srv, kind.method, kind.params(e.tab))
 			old := e.st.liveSessions(obsLifeTabID)
 			if len(old) != 1 {
 				t.Fatalf("precondition: sessions attached to the tab = %v, want one", old)
@@ -50,7 +50,7 @@ func TestReleaseOfReusedTargetIDKeepsReplacementPage(t *testing.T) {
 
 			e.st.addPage(obsLifeTabID, false)
 			enumMustRPC(t, e.srv, protocol.MethodTabList, nil)
-			if _, ok := e.srv.tabs.Lookup(e.short); !ok {
+			if _, ok := e.srv.tabs.Lookup(e.tab); !ok {
 				t.Fatal("precondition: reused target id not registered again")
 			}
 
@@ -65,7 +65,7 @@ func TestReleaseOfReusedTargetIDKeepsReplacementPage(t *testing.T) {
 			if live := e.st.liveSessions(obsLifeTabID); len(live) != 0 {
 				t.Errorf("old lifecycle's session(s) %v were not detached", live)
 			}
-			if _, ok := e.srv.tabs.Lookup(e.short); !ok {
+			if _, ok := e.srv.tabs.Lookup(e.tab); !ok {
 				t.Error("replacement page lost its registration")
 			}
 		})
@@ -143,21 +143,21 @@ func TestSessionCloseAndForgetTargetShareRetirementBarrier(t *testing.T) {
 	}
 }
 
-// Review P1: a query resolved its short id, and then the target was destroyed
+// Review P1: a query resolved its target id, and then the target was destroyed
 // and its release ran to completion. The late registration must not bring the
 // buffers back, not even for the time the doomed attach takes to fail.
 func TestStaleResolvedTargetCannotRegisterAfterRelease(t *testing.T) {
 	e := newObsLifeEnv(t)
 	ctx := context.Background()
 	// The first half of handleObsQuery ...
-	reg, ok := e.srv.resolveTabRegistration(ctx, e.sess, e.short)
-	if !ok || reg.TargetID != obsLifeTabID {
-		t.Fatalf("precondition: resolveTabRegistration = %+v, %v", reg, ok)
+	tid, err := e.srv.resolveTab(ctx, e.sess, e.tab)
+	if err != nil || tid != obsLifeTabID {
+		t.Fatalf("precondition: resolveTab = %q, %v", tid, err)
 	}
 	// ... the complete release in between ...
 	e.st.destroyPage(obsLifeTabID)
 	e.awaitTargetLoopIdle()
-	if _, ok := e.srv.tabs.Lookup(e.short); ok {
+	if _, ok := e.srv.tabs.Lookup(e.tab); ok {
 		t.Fatal("precondition: destroyed target is still registered")
 	}
 
@@ -166,10 +166,9 @@ func TestStaleResolvedTargetCannotRegisterAfterRelease(t *testing.T) {
 	defer releaseAttach()
 	result := make(chan error, 1)
 	go func() {
-		_, err := e.srv.enableObservation(ctx, e.sess, reg, browser.ObservationNetwork)
+		_, err := e.srv.enableObservation(ctx, e.sess, tid, browser.ObservationNetwork)
 		result <- err
 	}()
-	var err error
 	select {
 	case err = <-result:
 	case <-attachArrived:
@@ -191,7 +190,7 @@ func TestStaleResolvedTargetCannotRegisterAfterRelease(t *testing.T) {
 	}
 
 	// The same request through the RPC entry point is an unknown tab.
-	reply := e.awaitReply(e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.short}), "the query of the released tab")
+	reply := e.awaitReply(e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.tab}), "the query of the released tab")
 	if reply.Error == nil {
 		t.Errorf("query of a released tab succeeded: %v", reply.Result)
 	}
@@ -209,7 +208,7 @@ func TestTimedOutAttachDetachesLateSession(t *testing.T) {
 			e.sess.SetAttachTimeout(100 * time.Millisecond)
 			attachArrived, releaseAttach := e.st.holdNext("Target.attachToTarget")
 			defer releaseAttach()
-			reply := e.awaitReply(e.asyncRPC(kind.method, kind.params(e.short)), "the attach to time out")
+			reply := e.awaitReply(e.asyncRPC(kind.method, kind.params(e.tab)), "the attach to time out")
 			if reply.Error == nil {
 				t.Fatalf("call succeeded although the attach was never answered: %v", reply.Result)
 			}
@@ -231,7 +230,7 @@ func TestTimedOutAttachDetachesLateSession(t *testing.T) {
 			late, _ := e.st.sessionFor(obsLifeTabID)
 
 			// The retry attaches afresh and works.
-			enumMustRPC(t, e.srv, kind.method, kind.params(e.short))
+			enumMustRPC(t, e.srv, kind.method, kind.params(e.tab))
 			current, _ := e.st.sessionFor(obsLifeTabID)
 			if current == late {
 				t.Fatal("precondition: the retry did not attach a session of its own")
@@ -265,7 +264,7 @@ func TestSessionCloseDuringDomainInitializationFailsFirstQuery(t *testing.T) {
 	e := newObsLifeEnv(t)
 	disableArrived, releaseDisable := e.st.holdNext("Network.disable")
 	defer releaseDisable()
-	reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.short})
+	reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.tab})
 	e.await(disableArrived, "the first query to reach its domain initialization")
 
 	closed := make(chan struct{})
@@ -286,7 +285,7 @@ func TestSessionCloseDuringDomainInitializationFailsFirstQuery(t *testing.T) {
 	if e.srv.obsStore.PushNetwork(obsLifeTabID, 1, json.RawMessage(`{}`)) {
 		t.Error("late event accepted for a target whose observation never started")
 	}
-	if _, ok := e.srv.tabs.Lookup(e.short); !ok {
+	if _, ok := e.srv.tabs.Lookup(e.tab); !ok {
 		t.Error("closing the session removed the tab")
 	}
 }

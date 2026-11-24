@@ -184,3 +184,68 @@ func TestWrapCDPErrorPreservesNilAndTyped(t *testing.T) {
 		t.Fatal("re-wrapping a typed error must keep the original classification")
 	}
 }
+
+func TestConfirmedTargetAbsent(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "attachToTarget protocol no target",
+			err:  wrapCDPError("Target.attachToTarget", "T1", &cdproto.Error{Code: -32602, Message: "No target with given id found"}),
+			want: true,
+		},
+		{
+			name: "attachObserver plain target closed",
+			err:  wrapCDPError("Target.attachObserver", "T1", errors.New("Target closed")),
+			want: true,
+		},
+		{
+			name: "closeTarget protocol no target",
+			err:  wrapCDPError("Target.closeTarget", "T1", &cdproto.Error{Code: -32602, Message: "No target with given id found"}),
+			want: true,
+		},
+		{
+			name: "attachToTarget session-only error is not confirmed absent",
+			err:  wrapCDPError("Target.attachToTarget", "T1", &cdproto.Error{Code: -32001, Message: "No session with given id"}),
+			want: false,
+		},
+		{
+			name: "attachToTarget local pool eviction is not confirmed absent",
+			err:  &CDPError{Kind: ErrorTargetGone, Op: "Target.attachToTarget", Target: "T1", Err: errors.New("target removed while attaching")},
+			want: false,
+		},
+		{
+			name: "Runtime.evaluate error is never confirmed target absence",
+			err:  wrapCDPError("Runtime.evaluate", "T1", &cdproto.Error{Code: -32602, Message: "No target with given id found"}),
+			want: false,
+		},
+		{
+			name: "JS exception mentioning target absence is ignored",
+			err:  wrapCDPError("Runtime.evaluate", "T1", pageException("Error: No target with given id found")),
+			want: false,
+		},
+		{
+			name: "empty target id is rejected",
+			err:  &CDPError{Kind: ErrorTargetGone, Op: "Target.attachToTarget", Target: "", Err: errors.New("No target with given id found")},
+			want: false,
+		},
+		{
+			name: "untyped error is ignored",
+			err:  errors.New("No target with given id found"),
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := ConfirmedTargetAbsent(tc.err)
+			if ok != tc.want {
+				t.Fatalf("ConfirmedTargetAbsent(%v) = (%q, %v), want (_, %v)", tc.err, id, ok, tc.want)
+			}
+			if tc.want && id != "T1" {
+				t.Fatalf("ConfirmedTargetAbsent(%v) id = %q, want T1", tc.err, id)
+			}
+		})
+	}
+}

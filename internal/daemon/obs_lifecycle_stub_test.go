@@ -27,11 +27,11 @@ const (
 )
 
 type obsLifeEnv struct {
-	t     *testing.T
-	st    *cdpStub
-	srv   *Server
-	sess  *browser.Session
-	short string
+	t    *testing.T
+	st   *cdpStub
+	srv  *Server
+	sess *browser.Session
+	tab  string
 }
 
 // newObsLifeEnv connects a real Session to the stub, runs the daemon's target
@@ -43,7 +43,7 @@ func newObsLifeEnv(t *testing.T) *obsLifeEnv {
 	srv := newStubSessionServer(t, st)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	sess, err := browser.Connect(ctx, st.url())
+	sess, err := browser.Connect(ctx, st.url(), browser.WithTargetObserver(srv.tabs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +53,10 @@ func newObsLifeEnv(t *testing.T) *obsLifeEnv {
 	srv.tabMu.Unlock()
 	go srv.runTargetSync(ctx, sess)
 	enumMustRPC(t, srv, protocol.MethodTabList, nil)
-	short, ok := srv.tabs.ShortForTarget(obsLifeTabID)
-	if !ok {
+	if !srv.tabs.Has(obsLifeTabID) {
 		t.Fatal("precondition: tab not registered")
 	}
-	return &obsLifeEnv{t: t, st: st, srv: srv, sess: sess, short: short}
+	return &obsLifeEnv{t: t, st: st, srv: srv, sess: sess, tab: string(obsLifeTabID)}
 }
 
 func (e *obsLifeEnv) await(ch <-chan struct{}, what string) {
@@ -120,7 +119,7 @@ func (e *obsLifeEnv) awaitNetworkURLs(want ...string) {
 // one event of the tab's current lifecycle.
 func (e *obsLifeEnv) startObserving(url string) {
 	e.t.Helper()
-	enumMustRPC(e.t, e.srv, protocol.MethodNetwork, map[string]any{"tab": e.short})
+	enumMustRPC(e.t, e.srv, protocol.MethodNetwork, map[string]any{"tab": e.tab})
 	e.emitRequest(url)
 	e.awaitNetworkURLs(url)
 }
@@ -133,7 +132,7 @@ func (e *obsLifeEnv) awaitTargetLoopIdle() {
 	e.st.addPage(obsLifeOtherID, true)
 	deadline := time.Now().Add(obsLifeWait)
 	for {
-		if _, ok := e.srv.tabs.ShortForTarget(obsLifeOtherID); ok {
+		if e.srv.tabs.Has(obsLifeOtherID) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -184,7 +183,7 @@ func TestTargetDestroyedDuringObserverAttach(t *testing.T) {
 	e := newObsLifeEnv(t)
 	arrived, release := e.st.holdNext("Runtime.enable")
 	defer release()
-	reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.short})
+	reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.tab})
 	e.await(arrived, "the observer attach to reach its first session command")
 	if n := e.st.sessionCount(obsLifeTabID); n != 1 {
 		t.Fatalf("sessions attached to the tab = %d, want the observer's only", n)
@@ -197,7 +196,7 @@ func TestTargetDestroyedDuringObserverAttach(t *testing.T) {
 		t.Errorf("query of a target destroyed during attach succeeded: %v", got.Result)
 	}
 	e.awaitTargetLoopIdle()
-	if _, ok := e.srv.tabs.Lookup(e.short); ok {
+	if _, ok := e.srv.tabs.Lookup(e.tab); ok {
 		t.Error("destroyed target is still registered")
 	}
 	e.assertReleased("after the removal finished")
@@ -215,12 +214,11 @@ func TestTargetDestroyedRacingObserverAttachReply(t *testing.T) {
 		tid := target.ID(fmt.Sprintf("DDDD00000000000000000000000%05d", round))
 		e.st.addPage(tid, false)
 		enumMustRPC(t, e.srv, protocol.MethodTabList, nil)
-		short, ok := e.srv.tabs.ShortForTarget(tid)
-		if !ok {
+		if !e.srv.tabs.Has(tid) {
 			t.Fatalf("round %d: tab not registered", round)
 		}
 		arrived, release := e.st.holdNext("Target.attachToTarget")
-		reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": short})
+		reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": string(tid)})
 		e.await(arrived, "the observer attach to start")
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -240,7 +238,7 @@ func TestTargetDestroyedRacingObserverAttachReply(t *testing.T) {
 		e.awaitReply(reply, "the query racing the target removal")
 		deadline := time.Now().Add(obsLifeWait)
 		for {
-			if _, ok := e.srv.tabs.ShortForTarget(tid); !ok {
+			if !e.srv.tabs.Has(tid) {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -345,11 +343,11 @@ func TestReusedTargetIDWaitsForOldLifecycleRelease(t *testing.T) {
 	// The id comes back and is registered again by a full enumeration.
 	e.st.addPage(obsLifeTabID, false)
 	enumMustRPC(t, e.srv, protocol.MethodTabList, nil)
-	if _, ok := e.srv.tabs.Lookup(e.short); !ok {
+	if _, ok := e.srv.tabs.Lookup(e.tab); !ok {
 		t.Fatal("precondition: reused target id not registered again")
 	}
 
-	reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.short})
+	reply := e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.tab})
 	var got enumRPCReply
 	answered := false
 	select {
@@ -388,11 +386,11 @@ func TestTabCloseWaitsForReleaseStartedByTargetDestroyed(t *testing.T) {
 	detachArrived, releaseDetach := e.st.holdNext("Target.detachFromTarget")
 	defer releaseDetach()
 
-	reply := e.asyncRPC(protocol.MethodTabClose, map[string]any{"tab": e.short})
+	reply := e.asyncRPC(protocol.MethodTabClose, map[string]any{"tab": e.tab})
 	e.await(closeArrived, "tab_close to send Target.closeTarget")
 	e.st.destroyPage(obsLifeTabID)
 	e.await(detachArrived, "the event handler's release to reach Target.detachFromTarget")
-	if _, ok := e.srv.tabs.Lookup(e.short); ok {
+	if _, ok := e.srv.tabs.Lookup(e.tab); ok {
 		t.Fatal("precondition: event handler has not removed the registry entry")
 	}
 
@@ -412,11 +410,11 @@ func TestTabCloseWaitsForReleaseStartedByTargetDestroyed(t *testing.T) {
 func TestFailedObservationAttachRollsBackOnlyItsOwnRegistration(t *testing.T) {
 	e := newObsLifeEnv(t)
 	e.st.failNext("Target.attachToTarget")
-	reply := e.awaitReply(e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.short}), "the failing query")
+	reply := e.awaitReply(e.asyncRPC(protocol.MethodNetwork, map[string]any{"tab": e.tab}), "the failing query")
 	if reply.Error == nil {
 		t.Fatalf("query succeeded although the attach was refused: %v", reply.Result)
 	}
-	if _, ok := e.srv.tabs.Lookup(e.short); !ok {
+	if _, ok := e.srv.tabs.Lookup(e.tab); !ok {
 		t.Fatal("a failed attach removed the tab")
 	}
 	if n := e.srv.obsStore.TargetCount(); n != 0 {
@@ -428,7 +426,7 @@ func TestFailedObservationAttachRollsBackOnlyItsOwnRegistration(t *testing.T) {
 
 	e.startObserving("https://kept.test/")
 	e.st.failNext("Runtime.enable") // console activation on the live observer
-	reply = e.awaitReply(e.asyncRPC(protocol.MethodConsole, map[string]any{"tab": e.short}), "the failing console query")
+	reply = e.awaitReply(e.asyncRPC(protocol.MethodConsole, map[string]any{"tab": e.tab}), "the failing console query")
 	if reply.Error == nil {
 		t.Fatalf("console query succeeded although Runtime.enable was refused: %v", reply.Result)
 	}

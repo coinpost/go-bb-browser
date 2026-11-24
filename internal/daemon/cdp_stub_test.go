@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -20,6 +21,13 @@ import (
 //
 // Target.getTargets takes its snapshot when the request arrives and can then be
 // held back by the test, which is exactly the "stale enumeration" window.
+//
+// Like Chrome, the stub sends target lifecycle notifications on the browser
+// session only after the client asked for them there with a root-level
+// Target.setDiscoverTargets{discover:true} (a page-session one, which chromedp
+// sends when it attaches, does not count), and answers that command by
+// announcing every existing target first. A test therefore cannot hand the
+// daemon lifecycle events its production connection would not receive.
 type cdpStub struct {
 	t   *testing.T
 	srv *httptest.Server
@@ -27,19 +35,27 @@ type cdpStub struct {
 	writeMu sync.Mutex
 	conn    net.Conn
 
-	mu          sync.Mutex
-	pages       []target.ID
-	nextCreate  []target.ID
-	sessionSeq  int
-	closed      []target.ID
-	getTargets  int
-	holdTargets []chan struct{} // one entry per upcoming Target.getTargets call
-	arrived     chan int        // call number of every Target.getTargets request
-	holds       map[string][]*cdpStubHold
-	failures    map[string]int         // upcoming commands per method answered with an error
-	failureMsgs map[string][]string    // error text of those failures, in order; default when exhausted
-	sessions    map[target.ID][]string // flat sessions attached per target, oldest first
-	detached    map[string]bool        // flat sessions detached again by the client
+	mu       sync.Mutex
+	discover bool // root-level discovery enabled by the client
+	// failDiscover makes the stub a DevTools host without target discovery:
+	// the root-level command is answered with an error.
+	failDiscover  bool
+	discoverReq   int // root-level Target.setDiscoverTargets requests seen
+	pages         []target.ID
+	nextCreate    []target.ID
+	sessionSeq    int
+	closed        []target.ID
+	getTargets    int
+	holdTargets   []chan struct{} // one entry per upcoming Target.getTargets call
+	arrived       chan int        // call number of every Target.getTargets request
+	checkAttach   bool            // Target.attachToTarget requires targetId in st.pages
+	attachErrOnce string          // when non-empty, next Target.attachToTarget fails with this CDP error
+	evalExcOnce   string          // when non-empty, next Runtime.evaluate returns an exceptionDetails error
+	holds         map[string][]*cdpStubHold
+	failures      map[string]int         // upcoming commands per method answered with an error
+	failureMsgs   map[string][]string    // error text of those failures, in order; default when exhausted
+	sessions      map[target.ID][]string // flat sessions attached per target, oldest first
+	detached      map[string]bool        // flat sessions detached again by the client
 }
 
 // cdpStubHold parks one upcoming command of a given method: arrived is closed
@@ -214,29 +230,12 @@ func (st *cdpStub) emitSession(sessionID, method string, params any) {
 
 // destroyPage makes a page vanish as if the user closed it, and announces it.
 func (st *cdpStub) destroyPage(id target.ID) {
-	st.mu.Lock()
-	kept := st.pages[:0]
-	for _, p := range st.pages {
-		if p != id {
-			kept = append(kept, p)
-		}
-	}
-	st.pages = kept
-	st.mu.Unlock()
-	st.emit("Target.targetDestroyed", map[string]any{"targetId": string(id)})
+	st.removePage(id, true)
 }
 
 // dropPage makes a page vanish without any lifecycle notification.
 func (st *cdpStub) dropPage(id target.ID) {
-	st.mu.Lock()
-	kept := st.pages[:0]
-	for _, p := range st.pages {
-		if p != id {
-			kept = append(kept, p)
-		}
-	}
-	st.pages = kept
-	st.mu.Unlock()
+	st.removePage(id, false)
 }
 
 func (st *cdpStub) queueCreateID(id target.ID) {
@@ -254,12 +253,28 @@ func (st *cdpStub) closedTargets() []target.ID {
 func (st *cdpStub) hasPage(id target.ID) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	return st.hasPageLocked(id)
+}
+
+func (st *cdpStub) hasPageLocked(id target.ID) bool {
 	for _, p := range st.pages {
 		if p == id {
 			return true
 		}
 	}
 	return false
+}
+
+func (st *cdpStub) setAttachErrOnce(msg string) {
+	st.mu.Lock()
+	st.attachErrOnce = msg
+	st.mu.Unlock()
+}
+
+func (st *cdpStub) setEvalExcOnce(desc string) {
+	st.mu.Lock()
+	st.evalExcOnce = desc
+	st.mu.Unlock()
 }
 
 // addPage makes a page appear as if the user opened it, optionally announcing it.
@@ -270,6 +285,39 @@ func (st *cdpStub) addPage(id target.ID, announce bool) {
 	if announce {
 		st.emit("Target.targetCreated", map[string]any{"targetInfo": stubTargetInfo(id)})
 	}
+}
+
+// removePage makes a page disappear as if the user closed it in the browser:
+// no command of the daemon is involved. announce sends the destroyed
+// notification (when the client enabled discovery); without it the
+// notification is lost.
+func (st *cdpStub) removePage(id target.ID, announce bool) {
+	st.mu.Lock()
+	kept := st.pages[:0]
+	for _, p := range st.pages {
+		if p != id {
+			kept = append(kept, p)
+		}
+	}
+	st.pages = kept
+	st.mu.Unlock()
+	if announce {
+		st.emit("Target.targetDestroyed", map[string]any{"targetId": id})
+	}
+}
+
+// rootDiscoverRequests is how many root-level Target.setDiscoverTargets
+// commands the client sent.
+func (st *cdpStub) rootDiscoverRequests() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.discoverReq
+}
+
+func (st *cdpStub) getTargetsCalls() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.getTargets
 }
 
 func (st *cdpStub) emitInfoChanged(id target.ID) {
@@ -283,7 +331,17 @@ func stubTargetInfo(id target.ID) map[string]any {
 	}
 }
 
+// emit sends a browser-session notification. Target lifecycle notifications
+// are only sent once the client enabled root-level discovery.
 func (st *cdpStub) emit(method string, params any) {
+	if strings.HasPrefix(method, "Target.target") {
+		st.mu.Lock()
+		on := st.discover
+		st.mu.Unlock()
+		if !on {
+			return
+		}
+	}
 	st.write(map[string]any{"method": method, "params": params})
 }
 
@@ -416,6 +474,31 @@ func (st *cdpStub) dispatch(msg cdpStubMessage) {
 			<-gate
 			send()
 		}()
+	case "Target.setDiscoverTargets":
+		if msg.SessionID != "" {
+			st.reply(msg, map[string]any{})
+			return
+		}
+		var p struct {
+			Discover bool `json:"discover"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
+		st.mu.Lock()
+		st.discoverReq++
+		if st.failDiscover {
+			st.mu.Unlock()
+			st.write(map[string]any{"id": msg.ID, "error": map[string]any{"code": -32601, "message": "'Target.setDiscoverTargets' wasn't found"}})
+			return
+		}
+		st.discover = p.Discover
+		pages := append([]target.ID(nil), st.pages...)
+		st.mu.Unlock()
+		if p.Discover {
+			for _, id := range pages {
+				st.emit("Target.targetCreated", map[string]any{"targetInfo": stubTargetInfo(id)})
+			}
+		}
+		st.reply(msg, map[string]any{})
 	case "Target.createTarget":
 		st.mu.Lock()
 		var id target.ID
@@ -434,13 +517,25 @@ func (st *cdpStub) dispatch(msg cdpStubMessage) {
 		}
 		_ = json.Unmarshal(msg.Params, &p)
 		st.mu.Lock()
-		st.sessionSeq++
-		sid := fmt.Sprintf("stub-session-%d", st.sessionSeq)
-		if st.sessions == nil {
-			st.sessions = make(map[target.ID][]string)
+		errMsg := st.attachErrOnce
+		st.attachErrOnce = ""
+		if errMsg == "" && st.checkAttach && !st.hasPageLocked(p.TargetID) {
+			errMsg = "No target with given id found"
 		}
-		st.sessions[p.TargetID] = append(st.sessions[p.TargetID], sid)
+		var sid string
+		if errMsg == "" {
+			st.sessionSeq++
+			sid = fmt.Sprintf("stub-session-%d", st.sessionSeq)
+			if st.sessions == nil {
+				st.sessions = make(map[target.ID][]string)
+			}
+			st.sessions[p.TargetID] = append(st.sessions[p.TargetID], sid)
+		}
 		st.mu.Unlock()
+		if errMsg != "" {
+			st.write(map[string]any{"id": msg.ID, "error": map[string]any{"code": -32602, "message": errMsg}})
+			return
+		}
 		st.reply(msg, map[string]any{"sessionId": sid})
 	case "Target.detachFromTarget":
 		var p struct {
@@ -483,6 +578,30 @@ func (st *cdpStub) dispatch(msg cdpStubMessage) {
 			"localName": "", "nodeValue": "", "childNodeCount": 0, "frameId": "stub-frame",
 		}})
 	case "Runtime.evaluate":
+		var p struct {
+			Expression string `json:"expression"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
+		var exc string
+		if p.Expression != "self" {
+			st.mu.Lock()
+			exc = st.evalExcOnce
+			st.evalExcOnce = ""
+			st.mu.Unlock()
+		}
+		if exc != "" {
+			st.reply(msg, map[string]any{
+				"result": map[string]any{"type": "object", "subtype": "error", "description": exc},
+				"exceptionDetails": map[string]any{
+					"exceptionId":  1,
+					"text":         "Uncaught",
+					"lineNumber":   0,
+					"columnNumber": 0,
+					"exception":    map[string]any{"type": "object", "subtype": "error", "description": exc},
+				},
+			})
+			return
+		}
 		st.reply(msg, map[string]any{"result": map[string]any{"type": "number", "value": 1, "description": "1"}})
 	default:
 		st.reply(msg, map[string]any{})

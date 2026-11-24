@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -167,15 +166,13 @@ func (s *Server) scheduleAudit(ctx context.Context, resp []byte) {
 	if meta == nil || s.store == nil {
 		return
 	}
-	tab, seq, ok, errMsg := store.ParseResponseSummary(resp)
-	if tab == "" {
-		tab = store.TabFromRequestBody(meta.body)
-	}
+	seq, ok, errMsg := store.ParseResponseSummary(resp)
 	rec := store.LogRecord{
-		Action:   meta.action,
-		Body:     meta.body,
-		Tab:      tab,
-		Target:   meta.target,
+		Action: meta.action,
+		Body:   meta.body,
+		// Only the identity this request was actually resolved to is recorded;
+		// what the client asked for stays in Body.
+		Target:   string(meta.target),
 		SenderIP: meta.senderIP,
 		Seq:      seq,
 		OK:       ok,
@@ -218,7 +215,7 @@ func (s *Server) rpcErr(ctx context.Context, w http.ResponseWriter, id json.RawM
 }
 
 func (s *Server) rpcOK(ctx context.Context, w http.ResponseWriter, id json.RawMessage, result any) {
-	s.touchSuccessfulRPC(ctx, result)
+	s.touchSuccessfulRPC(ctx)
 	s.writeJSONRPCBytes(ctx, w, id, func() ([]byte, error) {
 		return protocol.MarshalResponse(id, result)
 	})
@@ -227,35 +224,30 @@ func (s *Server) rpcOK(ctx context.Context, w http.ResponseWriter, id json.RawMe
 // touchSuccessfulRPC keeps the in-memory idle clock aligned with rpc.jsonl:
 // only successful tab-related RPCs renew a managed tab. tab_new is registered
 // at creation, tab_close removes state, and tab_list is intentionally passive.
-func (s *Server) touchSuccessfulRPC(ctx context.Context, result any) {
+// The tab renewed is the identity pinned while the request ran; nothing is
+// looked up again here.
+func (s *Server) touchSuccessfulRPC(ctx context.Context) {
 	meta := auditMetaFrom(ctx)
-	if meta == nil || !protocol.IsTabRelatedMethod(meta.action) {
+	if meta == nil || meta.target == "" || !protocol.IsTabRelatedMethod(meta.action) {
 		return
 	}
 	switch meta.action {
 	case protocol.MethodTabNew, protocol.MethodTabClose, protocol.MethodTabList:
 		return
 	}
-	if meta.pinned != "" {
-		// Touching a target that was released meanwhile is a no-op, and an audit
-		// line naming it renews nothing.
-		meta.target = meta.pinned
-		s.touchTabActivity(target.ID(meta.pinned))
-		return
-	}
-	tab := store.TabFromRequestBody(meta.body)
-	if tab == "" && meta.action == protocol.MethodTabFocus {
-		if focus, ok := result.(protocol.TabFocusResult); ok {
-			tab = focus.Tab
-		}
-	}
-	if tid, ok := s.tabs.Lookup(tab); ok {
-		// The audit line names the full target so a delayed line cannot renew a
-		// different tab that later reuses this short id.
-		meta.target = string(tid)
-		s.touchTabActivity(tid)
+	s.touchTabActivity(meta.target)
+}
+
+// pinTarget records the complete target id this request operates on. It is set
+// once: the lock, the CDP command, the idle renewal and the audit record of a
+// request all refer to the same target.
+func pinTarget(ctx context.Context, tid target.ID) {
+	if meta := auditMetaFrom(ctx); meta != nil && meta.target == "" {
+		meta.target = tid
 	}
 }
+
+const unknownTabHint = "tab must be the complete CDP target id of an open tab, exactly as returned by tab_new / tab_list"
 
 func (s *Server) nextSeq(ctx context.Context, w http.ResponseWriter, id json.RawMessage) (uint64, bool) {
 	seq, err := s.store.NextSeq()
@@ -279,7 +271,7 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	snaps, err := s.enumerateTabs(ctx, conn)
+	snaps, err := s.enumerateAuthoritativeTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_list targets failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
@@ -288,28 +280,25 @@ func (s *Server) handleTabList(ctx context.Context, w http.ResponseWriter, id js
 		})
 		return
 	}
-	sort.Slice(snaps, func(i, j int) bool {
-		return snaps[i].ShortID < snaps[j].ShortID
-	})
 	items := make([]protocol.TabListItem, 0, len(snaps))
 	for _, sn := range snaps {
 		items = append(items, protocol.TabListItem{
-			Tab:   sn.ShortID,
+			Tab:   string(sn.TargetID),
 			Title: sn.Title,
 			URL:   sn.URL,
 		})
 	}
 	focus := s.tabs.Selected()
-	tabField := operationalTabShort(s.tabs, snaps)
+	tabField := operationalTab(s.tabs, snaps)
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.TabListResult{
-		Tab:   tabField,
+		Tab:   string(tabField),
 		Seq:   seq,
 		Tabs:  items,
-		Focus: focus,
+		Focus: string(focus),
 	})
 }
 
@@ -326,7 +315,7 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	snaps, err := s.enumerateTabs(ctx, conn)
+	snaps, err := s.enumerateAuthoritativeTabs(ctx, conn)
 	if err != nil {
 		s.logger.Error("tab_focus targets failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
@@ -343,15 +332,13 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		})
 		return
 	}
-	sort.Slice(snaps, func(i, j int) bool {
-		return snaps[i].ShortID < snaps[j].ShortID
-	})
 	s.syncRegistryFocusFromBrowser(ctx, conn, snaps)
 	focus := s.tabs.Selected()
-	tabField := operationalTabShort(s.tabs, snaps)
+	tabField := operationalTab(s.tabs, snaps)
+	pinTarget(ctx, tabField)
 	var title, url string
 	for _, sn := range snaps {
-		if sn.ShortID == tabField {
+		if sn.TargetID == tabField {
 			title = sn.Title
 			url = sn.URL
 			break
@@ -362,8 +349,8 @@ func (s *Server) handleTabFocus(ctx context.Context, w http.ResponseWriter, id j
 		return
 	}
 	s.rpcOK(ctx, w, id, protocol.TabFocusResult{
-		Tab:   tabField,
-		Focus: focus,
+		Tab:   string(tabField),
+		Focus: string(focus),
 		Title: title,
 		URL:   url,
 		Seq:   seq,
@@ -378,15 +365,15 @@ func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn,
 		return
 	}
 	type foregroundDetector interface {
-		DetectForegroundShort(snaps []state.TabSnapshot) (short string, ok bool)
+		DetectForegroundTarget(snaps []state.TabSnapshot) (id target.ID, ok bool)
 	}
 	type foregroundDetectorContext interface {
-		DetectForegroundShortContext(context.Context, []state.TabSnapshot) (short string, ok bool)
+		DetectForegroundTargetContext(context.Context, []state.TabSnapshot) (id target.ID, ok bool)
 	}
 	if d, ok := conn.(foregroundDetectorContext); ok {
-		sh, ok := d.DetectForegroundShortContext(ctx, snaps)
+		tid, ok := d.DetectForegroundTargetContext(ctx, snaps)
 		if ok {
-			_ = s.tabs.Select(sh)
+			_ = s.tabs.Select(tid)
 		}
 		return
 	}
@@ -394,26 +381,28 @@ func (s *Server) syncRegistryFocusFromBrowser(ctx context.Context, conn tabConn,
 	if !ok {
 		return
 	}
-	sh, ok := d.DetectForegroundShort(snaps)
+	tid, ok := d.DetectForegroundTarget(snaps)
 	if !ok {
 		return
 	}
-	_ = s.tabs.Select(sh)
+	_ = s.tabs.Select(tid)
 }
 
-func operationalTabShort(reg *state.TabRegistry, snaps []state.TabSnapshot) string {
+// operationalTab is the tab reported by calls that name none: the selected tab
+// when it is in snaps, else the first snapshot (snaps are ordered by target id).
+func operationalTab(reg *state.TabRegistry, snaps []state.TabSnapshot) target.ID {
 	if len(snaps) == 0 {
 		return ""
 	}
 	focus := reg.Selected()
 	if focus != "" {
 		for _, sn := range snaps {
-			if sn.ShortID == focus {
+			if sn.TargetID == focus {
 				return focus
 			}
 		}
 	}
-	return snaps[0].ShortID
+	return snaps[0].TargetID
 }
 
 func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id json.RawMessage, params json.RawMessage) {
@@ -422,7 +411,7 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -436,22 +425,27 @@ func (s *Server) handleTabSelect(ctx context.Context, w http.ResponseWriter, id 
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	_, err := s.enumerateTabs(ctx, conn)
-	if err != nil {
-		s.logger.Error("tab_select targets failed", "err", err)
-		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
-			Error: "failed to list targets",
-			Hint:  s.cdpHint(err),
-		})
+	// Selecting is an operation on the tab like any other: it takes the tab's
+	// operation lock, so it cannot succeed (and renew the idle clock) while an
+	// idle close of the same tab is in progress. The lock is held until the
+	// response, renewal included, is done.
+	unlock, locked := s.lockTab(ctx, tab)
+	if !locked {
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "request timed out", tabLockTimeoutData())
 		return
 	}
-
-	if !s.tabs.Select(tab) {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodTabSelect,
-		})
+	defer unlock()
+	tid, err := s.resolveEnumeratedTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodTabSelect, err)
+		return
+	}
+	if !s.tabs.Select(tid) {
+		if s.tabs.Suspended(tid) {
+			s.rpcResolveErr(ctx, w, id, protocol.MethodTabSelect, fmt.Errorf("%w: tab state pending verification", errTabLookup))
+		} else {
+			s.rpcResolveErr(ctx, w, id, protocol.MethodTabSelect, errTabCloseUnknownID)
+		}
 		return
 	}
 	seq, ok := s.nextSeq(ctx, w, id)
@@ -473,8 +467,15 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	initial := strings.TrimSpace(p.URL)
+	// Window before the request: the new target exists in the browser, and can
+	// be listed, closed and destroyed, before this handler sees the reply.
+	win := s.tabs.OpenWindow()
 	tid, err := createPageTarget(ctx, conn, initial, p.Silent)
+	if err == nil && tid == "" {
+		err = errors.New("Target.createTarget returned no target id")
+	}
 	if err != nil {
+		s.tabs.Abandon(win)
 		s.logger.Error("tab_new create target failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
 			Error: "failed to create tab",
@@ -482,19 +483,28 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		})
 		return
 	}
-	short := s.tabs.RegisterPageTarget(tid)
-	if meta := auditMetaFrom(ctx); meta != nil {
-		meta.target = string(tid)
+	pinTarget(ctx, tid)
+	if !s.commitCreatedTab(ctx, conn, win, tid) {
+		// The tab was reported gone while it was being created, or right after
+		// by the enumeration that settled contradicting evidence. Make sure of
+		// it: one bounded close of exactly this id, so no unmanaged tab is
+		// left behind silently.
+		cleanup := s.rollbackCreatedTab(ctx, conn, tid)
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "tab closed before tab_new completed", &protocol.ErrData{
+			Error:  "tab closed before tab_new completed",
+			Hint:   fmt.Sprintf("the new tab %s was closed (tab_close, idle cleanup, or in the browser) while it was being created; cleanup: %s; call tab_new again", tid, cleanup),
+			Method: protocol.MethodTabNew,
+		})
+		return
 	}
-	s.markTabManaged(tid, short, initial, p.Silent)
 	if !p.Silent {
-		s.tabs.Select(short)
+		s.tabs.Select(tid)
 	}
 	seq, ok := s.nextSeq(ctx, w, id)
 	if !ok {
 		return
 	}
-	s.rpcOK(ctx, w, id, protocol.TabNewResult{Tab: short, Seq: seq})
+	s.rpcOK(ctx, w, id, protocol.TabNewResult{Tab: string(tid), Seq: seq})
 }
 
 func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.RawMessage, params json.RawMessage) {
@@ -503,7 +513,7 @@ func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -532,16 +542,13 @@ func (s *Server) handleGoto(ctx context.Context, w http.ResponseWriter, id json.
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodGoto,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodGoto, err)
 		return
 	}
 	if err := navigate(ctx, conn, tid, urlStr); err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("goto navigate failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "navigation failed", &protocol.ErrData{
 			Error: "navigation failed",
@@ -562,7 +569,7 @@ func (s *Server) handleReload(ctx context.Context, w http.ResponseWriter, id jso
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -582,16 +589,13 @@ func (s *Server) handleReload(ctx context.Context, w http.ResponseWriter, id jso
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodReload,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodReload, err)
 		return
 	}
 	if err := reload(ctx, conn, tid); err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("reload failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "reload failed", &protocol.ErrData{
 			Error: "reload failed",
@@ -612,7 +616,7 @@ func (s *Server) handleTabClose(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -626,14 +630,10 @@ func (s *Server) handleTabClose(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
-	if err := s.closeTabByShort(ctx, tab); err != nil {
+	if err := s.closeTab(ctx, tab); err != nil {
 		switch {
-		case errors.Is(err, errTabCloseUnknownID):
-			s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-				Error:  "unknown tab id",
-				Hint:   "invalid or stale tab short id",
-				Method: protocol.MethodTabClose,
-			})
+		case errors.Is(err, errTabCloseUnknownID), errors.Is(err, errTabLookup):
+			s.rpcResolveErr(ctx, w, id, protocol.MethodTabClose, err)
 		case errors.Is(err, errTabCloseNoConn):
 			s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		case errors.Is(err, errTabLockTimeout):
@@ -660,7 +660,7 @@ func (s *Server) handleScreenshot(ctx context.Context, w http.ResponseWriter, id
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -679,17 +679,14 @@ func (s *Server) handleScreenshot(ctx context.Context, w http.ResponseWriter, id
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodScreenshot,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodScreenshot, err)
 		return
 	}
 	raw, mime, err := screenshot(ctx, conn, tid, p.Format)
 	if err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("screenshot failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "screenshot failed", &protocol.ErrData{
 			Error: "screenshot failed",
@@ -715,7 +712,7 @@ func (s *Server) handleEval(ctx context.Context, w http.ResponseWriter, id json.
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	script := strings.TrimSpace(p.Script)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -742,17 +739,14 @@ func (s *Server) handleEval(ctx context.Context, w http.ResponseWriter, id json.
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodEval,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodEval, err)
 		return
 	}
 	out, err := eval(ctx, conn, tid, script)
 	if err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("eval failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "eval failed", &protocol.ErrData{
 			Error: "eval failed",
@@ -773,7 +767,7 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
@@ -804,16 +798,13 @@ func (s *Server) handleClick(ctx context.Context, w http.ResponseWriter, id json
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodClick,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodClick, err)
 		return
 	}
 	if err := click(ctx, conn, tid, sel); err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("click failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "click failed", &protocol.ErrData{
 			Error: "click failed",
@@ -834,7 +825,7 @@ func (s *Server) handleFetch(ctx context.Context, w http.ResponseWriter, id json
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	rawURL := strings.TrimSpace(p.URL)
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
@@ -861,13 +852,9 @@ func (s *Server) handleFetch(ctx context.Context, w http.ResponseWriter, id json
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodFetch,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodFetch, err)
 		return
 	}
 	routing, ok := conn.(fetchConn)
@@ -880,6 +867,7 @@ func (s *Server) handleFetch(ctx context.Context, w http.ResponseWriter, id json
 	hdrs := []byte(strings.TrimSpace(p.Headers))
 	out, err := fetchPage(ctx, routing, tid, rawURL, p.Method, hdrs, p.Body)
 	if err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("fetch failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "fetch failed", &protocol.ErrData{
 			Error: "fetch failed",
@@ -911,7 +899,7 @@ func (s *Server) handleSnapshot(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{
 			Error:  "missing tab",
@@ -930,12 +918,9 @@ func (s *Server) handleSnapshot(ctx context.Context, w http.ResponseWriter, id j
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Method: protocol.MethodSnapshot,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodSnapshot, err)
 		return
 	}
 	snapper, ok := conn.(snapshotConn)
@@ -950,6 +935,7 @@ func (s *Server) handleSnapshot(ctx context.Context, w http.ResponseWriter, id j
 		SelectorScope:   strings.TrimSpace(p.SelectorScope),
 	})
 	if err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("snapshot failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "snapshot failed", &protocol.ErrData{
 			Error: "snapshot failed",
@@ -980,7 +966,7 @@ func (s *Server) handleNetworkRoute(ctx context.Context, w http.ResponseWriter, 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	pat := strings.TrimSpace(p.URLPattern)
 	if tab == "" || pat == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab or url_pattern", nil)
@@ -997,9 +983,9 @@ func (s *Server) handleNetworkRoute(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, "", err)
 		return
 	}
 	rc, ok := conn.(routeConn)
@@ -1015,6 +1001,7 @@ func (s *Server) handleNetworkRoute(ctx context.Context, w http.ResponseWriter, 
 		Status:      p.Status,
 	}
 	if err := appendNetworkRoute(ctx, rc, tid, rule); err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("network_route failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "network_route failed", &protocol.ErrData{Hint: s.cdpHint(err)})
 		return
@@ -1036,7 +1023,7 @@ func (s *Server) handleNetworkUnroute(ctx context.Context, w http.ResponseWriter
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1052,9 +1039,9 @@ func (s *Server) handleNetworkUnroute(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, "", err)
 		return
 	}
 	rc, ok := conn.(routeConn)
@@ -1063,6 +1050,7 @@ func (s *Server) handleNetworkUnroute(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	if err := removeNetworkRoutes(ctx, rc, tid, p.URLPattern); err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "network_unroute failed", &protocol.ErrData{Hint: s.cdpHint(err)})
 		return
 	}
@@ -1083,7 +1071,7 @@ func (s *Server) handleConsoleClear(ctx context.Context, w http.ResponseWriter, 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1099,9 +1087,9 @@ func (s *Server) handleConsoleClear(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, "", err)
 		return
 	}
 	if s.obsStore != nil {
@@ -1120,7 +1108,7 @@ func (s *Server) handleErrorsClear(ctx context.Context, w http.ResponseWriter, i
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1136,9 +1124,9 @@ func (s *Server) handleErrorsClear(ctx context.Context, w http.ResponseWriter, i
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, "", err)
 		return
 	}
 	if s.obsStore != nil {
@@ -1157,7 +1145,7 @@ func (s *Server) handleNetworkClear(ctx context.Context, w http.ResponseWriter, 
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", nil)
 		return
@@ -1173,9 +1161,9 @@ func (s *Server) handleNetworkClear(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", nil)
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, "", err)
 		return
 	}
 	if s.obsStore != nil {
@@ -1194,7 +1182,7 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	sel := strings.TrimSpace(p.Selector)
 	ref := strings.TrimSpace(p.Ref)
 	if ref != "" {
@@ -1225,16 +1213,13 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
-			Error:  "unknown tab id",
-			Hint:   "invalid or stale tab short id",
-			Method: protocol.MethodFill,
-		})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, protocol.MethodFill, err)
 		return
 	}
 	if err := fill(ctx, conn, tid, sel, p.Text); err != nil {
+		s.observeTargetError(conn, tid, err)
 		s.logger.Error("fill failed", "err", err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "fill failed", &protocol.ErrData{
 			Error: "fill failed",
@@ -1249,30 +1234,62 @@ func (s *Server) handleFill(ctx context.Context, w http.ResponseWriter, id json.
 	s.rpcOK(ctx, w, id, protocol.FillResult{Tab: tab, Seq: seq})
 }
 
-func (s *Server) resolveTab(ctx context.Context, conn tabConn, tab string) (target.ID, bool) {
-	tid, ok := s.tabs.Lookup(tab)
-	if ok {
-		return tid, true
+// resolveTab resolves the tab id of a request to a registered target and pins
+// it for the rest of the request. tab must be a complete CDP target id; when it
+// is not registered yet the registry is aligned with the browser and the same
+// id is looked up again. Nothing else is ever substituted for it.
+//
+// The error says why there is no target: errTabCloseUnknownID when the id still
+// does not resolve after the browser was asked successfully and the target is
+// not suspended pending verification, errTabLookup wrapping the cause when the
+// browser could not be asked or verification stayed inconclusive. A failed or
+// inconclusive enumeration proves nothing about the id and must not be reported
+// as an invalid one.
+func (s *Server) resolveTab(ctx context.Context, conn tabConn, tab string) (target.ID, error) {
+	if tid, ok := s.tabs.Lookup(tab); ok {
+		pinTarget(ctx, tid)
+		return tid, nil
 	}
-	if _, err := s.enumerateTabs(ctx, conn); err == nil {
-		if tid, ok := s.tabs.Lookup(tab); ok {
-			return tid, true
-		}
-	}
-	return tid, false
+	return s.resolveEnumeratedTab(ctx, conn, tab)
 }
 
-// resolveTabRegistration is resolveTab for callers that must be able to tell
-// later whether the tab they resolved is still the same registration.
-func (s *Server) resolveTabRegistration(ctx context.Context, conn tabConn, tab string) (state.TabRegistration, bool) {
-	reg, ok := s.tabs.Registration(tab)
-	if ok {
-		return reg, true
+func (s *Server) resolveEnumeratedTab(ctx context.Context, conn tabConn, tab string) (target.ID, error) {
+	for attempt := 0; ; attempt++ {
+		if _, err := s.enumerateTabs(ctx, conn); err != nil {
+			return "", fmt.Errorf("%w: %w", errTabLookup, err)
+		}
+		if tid, ok := s.tabs.Lookup(tab); ok {
+			pinTarget(ctx, tid)
+			return tid, nil
+		}
+		if !s.tabs.Suspended(target.ID(tab)) {
+			return "", errTabCloseUnknownID
+		}
+		if attempt >= maxSuspendedVerifyAttempts {
+			return "", fmt.Errorf("%w: tab state pending verification", errTabLookup)
+		}
 	}
-	if _, err := s.enumerateTabs(ctx, conn); err == nil {
-		return s.tabs.Registration(tab)
+}
+
+// rpcResolveErr answers a request whose tab id did not resolve (err is from
+// resolveTab): the explicit "unknown tab id" only for an id the browser does
+// not have, otherwise the failure of the lookup with its cause, on the same
+// path as a failed tab_list (a timeout names the operation budget).
+func (s *Server) rpcResolveErr(ctx context.Context, w http.ResponseWriter, id json.RawMessage, method string, err error) {
+	if errors.Is(err, errTabCloseUnknownID) {
+		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{
+			Error:  "unknown tab id",
+			Hint:   unknownTabHint,
+			Method: method,
+		})
+		return
 	}
-	return state.TabRegistration{}, false
+	s.logger.Error("resolve tab: list targets failed", "method", method, "err", err)
+	s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to list targets", &protocol.ErrData{
+		Error:  "failed to list targets",
+		Hint:   s.cdpHint(err),
+		Method: method,
+	})
 }
 
 func (s *Server) cdpHint(err error) string {

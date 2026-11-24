@@ -272,6 +272,12 @@ type Session struct {
 
 	targetEvents chan TargetEvent
 	targetDirty  atomic.Bool
+	// targetObserver, when set, is told about lifecycle events as they are read
+	// (see SetTargetObserver).
+	targetObserver atomic.Pointer[TargetObserver]
+	// discoverErr is why browser-level target discovery could not be enabled
+	// (nil when it was); written once by Connect.
+	discoverErr error
 }
 
 func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
@@ -287,6 +293,34 @@ func newSession(ctx context.Context, cancel context.CancelFunc) *Session {
 type TargetEvent struct {
 	Info      *target.Info
 	Destroyed target.ID
+	// Stamp is what the TargetObserver returned when the event was read from
+	// the browser connection (zero without an observer). The event waits in a
+	// queue; the stamp lets the consumer order it against its own state changes.
+	Stamp uint64
+}
+
+// TargetObserver is told about lifecycle events on the connection reader, in
+// connection order, before the consumer of TargetEvents can see them. Both
+// methods run on the reader and must not block.
+type TargetObserver interface {
+	// NoteEventRead is called for every lifecycle event as it is read, before
+	// it is queued. page is the target a created / info changed event reports
+	// as a page, destroyed the target of a Target.targetDestroyed
+	// notification; each is empty for other events. The result becomes the
+	// Stamp.
+	NoteEventRead(page, destroyed target.ID) uint64
+	// EventDropped is called when the queue was full and the event was not
+	// queued, before the overflow becomes visible through ConsumeTargetDirty.
+	EventDropped()
+}
+
+// ConnectOption configures Connect.
+type ConnectOption func(*Session)
+
+// WithTargetObserver installs o before the connection delivers its first
+// lifecycle event (see SetTargetObserver).
+func WithTargetObserver(o TargetObserver) ConnectOption {
+	return func(s *Session) { s.SetTargetObserver(o) }
 }
 
 type tabPoolEntry struct {
@@ -402,7 +436,11 @@ func connectFailureHint(err error) string {
 
 // Connect opens a CDP session to an already-running Chrome instance.
 // debuggerURL may be host:port, ws(s) URL, or http(s) URL (chromedp resolves to browser websocket).
-func Connect(parent context.Context, debuggerURL string) (*Session, error) {
+//
+// The returned session receives the browser's target lifecycle events: Connect
+// enables browser-level discovery on the connection itself (see
+// enableTargetDiscovery).
+func Connect(parent context.Context, debuggerURL string, opts ...ConnectOption) (*Session, error) {
 	if debuggerURL == "" {
 		return nil, fmt.Errorf("debugger URL is empty")
 	}
@@ -454,8 +492,47 @@ func Connect(parent context.Context, debuggerURL string) (*Session, error) {
 		allocCancel()
 	}
 	s := newSession(ctx, cancel)
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.listenTargetEvents()
+	s.discoverErr = s.enableTargetDiscovery(parent)
 	return s, nil
+}
+
+// targetDiscoveryTimeout bounds the one command that turns lifecycle events on.
+const targetDiscoveryTimeout = 15 * time.Second
+
+// enableTargetDiscovery sends Target.setDiscoverTargets on the browser session
+// (no sessionId). Without it Chrome reports target lifecycle only on the page
+// sessions chromedp attaches, and those notifications are routed to the page
+// executors: ListenBrowser, and with it TargetEvents, would stay silent. The
+// listener is registered first, so nothing the command triggers is missed.
+//
+// A failure is not fatal — a DevTools host may not implement discovery — but
+// then tab removal is only learned from enumerations; see TargetDiscoveryErr.
+func (s *Session) enableTargetDiscovery(parent context.Context) error {
+	ex := browserExecutor(s.ctx)
+	if ex == nil {
+		return fmt.Errorf("browser not available in context")
+	}
+	// The browser executor waits on this context only; it is not the chromedp
+	// context, so the deadline cannot tear the session down.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), targetDiscoveryTimeout)
+	defer cancel()
+	if err := target.SetDiscoverTargets(true).Do(cdp.WithExecutor(ctx, ex)); err != nil {
+		return wrapCDPError("Target.setDiscoverTargets", "", err)
+	}
+	return nil
+}
+
+// TargetDiscoveryErr reports why browser-level target discovery is not enabled
+// on this session, or nil when lifecycle events are being delivered.
+func (s *Session) TargetDiscoveryErr() error {
+	if s == nil {
+		return errNilSession()
+	}
+	return s.discoverErr
 }
 
 func (s *Session) listenTargetEvents() {
@@ -478,12 +555,44 @@ func (s *Session) listenTargetEvents() {
 	})
 }
 
+// SetTargetObserver installs the observer of the lifecycle event stream; nil
+// removes it. Install it before the first request whose reply names targets is
+// sent, so every event that can be ordered against such a reply was observed.
+func (s *Session) SetTargetObserver(o TargetObserver) {
+	if s == nil {
+		return
+	}
+	if o == nil {
+		s.targetObserver.Store(nil)
+		return
+	}
+	s.targetObserver.Store(&o)
+}
+
+// enqueueTargetEvent runs on the connection reader. The order is the contract:
+// the observer learns about the event first (a destroyed target is recorded as
+// gone before anything else can act on the event), a dropped event is reported
+// to the observer next, and only then is the overflow published to the
+// consumer. Whoever consumes the dirty flag therefore requests its enumeration
+// after everything the dropped event meant has been recorded.
 func (s *Session) enqueueTargetEvent(event TargetEvent) {
+	obs := s.targetObserver.Load()
+	if obs != nil {
+		var page target.ID
+		if info := event.Info; info != nil && (info.Type == "page" || info.Type == "tab") {
+			page = info.TargetID
+		}
+		event.Stamp = (*obs).NoteEventRead(page, event.Destroyed)
+	}
 	select {
 	case s.targetEvents <- event:
+		return
 	default:
-		s.targetDirty.Store(true)
 	}
+	if obs != nil {
+		(*obs).EventDropped()
+	}
+	s.targetDirty.Store(true)
 }
 
 func (s *Session) TargetEvents() <-chan TargetEvent {
@@ -508,21 +617,7 @@ func (s *Session) MarkTargetDirty() {
 // Obscura reports "No page" / "No page for session" via its catch-all -32601 wrapper;
 // real Chrome reports variants like "No target with given id" / "Target closed".
 func isStaleTargetErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	m := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(m, "no page"),
-		strings.Contains(m, "no target"),
-		strings.Contains(m, "target not found"),
-		strings.Contains(m, "target closed"),
-		strings.Contains(m, "no session with given id"),
-		strings.Contains(m, "no such target"):
-		return true
-	default:
-		return false
-	}
+	return err != nil && isTargetGoneMessage(strings.ToLower(err.Error()))
 }
 
 // Context returns the browser-level chromedp context (lifetime matches the session).
@@ -634,13 +729,17 @@ func (s *Session) Close() {
 	}
 }
 
-// ForgetTarget drops daemon-owned resources after Chrome has already removed a target.
+// ForgetTarget drops daemon-owned resources of a target the browser has
+// reported gone (close reply, destroyed notification, or absence from an
+// enumeration that is provably newer than the target). Cancelling a chromedp
+// child context makes chromedp send Target.closeTarget for its target unless
+// TargetID is cleared first, so this must never be called on weaker evidence:
+// a tab whose existence is merely in doubt keeps its attachment.
 // When it returns, every observer the target ever had on this session has
 // stopped recording for good and its child context is released; a call that
 // overlaps another release of the same target, or a Close retiring it, waits
-// for that one as well.
-// The children's CDP sessions are detached; the page itself is never closed
-// from here, since the target id may already name a replacement page.
+// for that one as well. The children's CDP sessions are detached; the page
+// itself is never closed from here.
 func (s *Session) ForgetTarget(id target.ID) {
 	if s == nil || id == "" {
 		return
@@ -771,14 +870,14 @@ func pageTargetsWithExecutor(ctx context.Context, ex cdp.Executor) ([]*target.In
 	return pages, nil
 }
 
-// DetectForegroundShort returns the short id of the unique page target whose
+// DetectForegroundTarget returns the target id of the unique page target whose
 // document.visibilityState is "visible". If zero or more than one target
 // qualifies (typical with multiple visible browser windows), it returns "", false.
-func (s *Session) DetectForegroundShort(snaps []state.TabSnapshot) (string, bool) {
-	return s.DetectForegroundShortContext(context.Background(), snaps)
+func (s *Session) DetectForegroundTarget(snaps []state.TabSnapshot) (target.ID, bool) {
+	return s.DetectForegroundTargetContext(context.Background(), snaps)
 }
 
-func (s *Session) DetectForegroundShortContext(ctx context.Context, snaps []state.TabSnapshot) (string, bool) {
+func (s *Session) DetectForegroundTargetContext(ctx context.Context, snaps []state.TabSnapshot) (target.ID, bool) {
 	if s == nil || len(snaps) == 0 {
 		return "", false
 	}
@@ -795,7 +894,7 @@ func (s *Session) DetectForegroundShortContext(ctx context.Context, snaps []stat
 
 type visibilityProbe func(context.Context, state.TabSnapshot) (bool, error)
 
-func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, concurrency int, perTab, total time.Duration, probe visibilityProbe) (string, bool) {
+func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, concurrency int, perTab, total time.Duration, probe visibilityProbe) (target.ID, bool) {
 	if len(snaps) == 0 || probe == nil {
 		return "", false
 	}
@@ -808,7 +907,7 @@ func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, 
 	overall, cancel := context.WithTimeout(ctx, total)
 	defer cancel()
 	type result struct {
-		short   string
+		id      target.ID
 		visible bool
 		ok      bool
 	}
@@ -835,10 +934,10 @@ func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, 
 				results <- result{}
 				return
 			}
-			results <- result{short: sn.ShortID, visible: visible, ok: true}
+			results <- result{id: sn.TargetID, visible: visible, ok: true}
 		}()
 	}
-	var picked string
+	var picked target.ID
 	complete := 0
 	for range len(snaps) {
 		var r result
@@ -856,7 +955,7 @@ func detectForegroundConcurrent(ctx context.Context, snaps []state.TabSnapshot, 
 		if picked != "" {
 			return "", false
 		}
-		picked = r.short
+		picked = r.id
 	}
 	if complete != len(snaps) || picked == "" {
 		return "", false
