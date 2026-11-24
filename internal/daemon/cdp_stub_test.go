@@ -39,15 +39,18 @@ type cdpStub struct {
 	discover bool // root-level discovery enabled by the client
 	// failDiscover makes the stub a DevTools host without target discovery:
 	// the root-level command is answered with an error.
-	failDiscover bool
-	discoverReq  int // root-level Target.setDiscoverTargets requests seen
-	pages        []target.ID
-	nextCreate   []target.ID
-	sessionSeq   int
-	closed       []target.ID
-	getTargets   int
-	holdTargets  []chan struct{} // one entry per upcoming Target.getTargets call
-	arrived      chan int        // call number of every Target.getTargets request
+	failDiscover  bool
+	discoverReq   int // root-level Target.setDiscoverTargets requests seen
+	pages         []target.ID
+	nextCreate    []target.ID
+	sessionSeq    int
+	closed        []target.ID
+	getTargets    int
+	holdTargets   []chan struct{} // one entry per upcoming Target.getTargets call
+	arrived       chan int        // call number of every Target.getTargets request
+	checkAttach   bool            // Target.attachToTarget requires targetId in st.pages
+	attachErrOnce string          // when non-empty, next Target.attachToTarget fails with this CDP error
+	evalExcOnce   string          // when non-empty, next Runtime.evaluate returns an exceptionDetails error
 }
 
 type cdpStubMessage struct {
@@ -128,12 +131,28 @@ func (st *cdpStub) closedTargets() []target.ID {
 func (st *cdpStub) hasPage(id target.ID) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	return st.hasPageLocked(id)
+}
+
+func (st *cdpStub) hasPageLocked(id target.ID) bool {
 	for _, p := range st.pages {
 		if p == id {
 			return true
 		}
 	}
 	return false
+}
+
+func (st *cdpStub) setAttachErrOnce(msg string) {
+	st.mu.Lock()
+	st.attachErrOnce = msg
+	st.mu.Unlock()
+}
+
+func (st *cdpStub) setEvalExcOnce(desc string) {
+	st.mu.Lock()
+	st.evalExcOnce = desc
+	st.mu.Unlock()
 }
 
 // addPage makes a page appear as if the user opened it, optionally announcing it.
@@ -314,10 +333,26 @@ func (st *cdpStub) handle(msg cdpStubMessage) {
 		st.mu.Unlock()
 		st.reply(msg, map[string]any{"targetId": string(id)})
 	case "Target.attachToTarget":
+		var p struct {
+			TargetID target.ID `json:"targetId"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
 		st.mu.Lock()
-		st.sessionSeq++
-		sid := fmt.Sprintf("stub-session-%d", st.sessionSeq)
+		errMsg := st.attachErrOnce
+		st.attachErrOnce = ""
+		if errMsg == "" && st.checkAttach && !st.hasPageLocked(p.TargetID) {
+			errMsg = "No target with given id found"
+		}
+		var sid string
+		if errMsg == "" {
+			st.sessionSeq++
+			sid = fmt.Sprintf("stub-session-%d", st.sessionSeq)
+		}
 		st.mu.Unlock()
+		if errMsg != "" {
+			st.write(map[string]any{"id": msg.ID, "error": map[string]any{"code": -32602, "message": errMsg}})
+			return
+		}
 		st.reply(msg, map[string]any{"sessionId": sid})
 	case "Target.closeTarget":
 		var p struct {
@@ -348,6 +383,30 @@ func (st *cdpStub) handle(msg cdpStubMessage) {
 			"localName": "", "nodeValue": "", "childNodeCount": 0, "frameId": "stub-frame",
 		}})
 	case "Runtime.evaluate":
+		var p struct {
+			Expression string `json:"expression"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
+		var exc string
+		if p.Expression != "self" {
+			st.mu.Lock()
+			exc = st.evalExcOnce
+			st.evalExcOnce = ""
+			st.mu.Unlock()
+		}
+		if exc != "" {
+			st.reply(msg, map[string]any{
+				"result": map[string]any{"type": "object", "subtype": "error", "description": exc},
+				"exceptionDetails": map[string]any{
+					"exceptionId":  1,
+					"text":         "Uncaught",
+					"lineNumber":   0,
+					"columnNumber": 0,
+					"exception":    map[string]any{"type": "object", "subtype": "error", "description": exc},
+				},
+			})
+			return
+		}
 		st.reply(msg, map[string]any{"result": map[string]any{"type": "number", "value": 1, "description": "1"}})
 	default:
 		st.reply(msg, map[string]any{})

@@ -291,7 +291,7 @@ func (r *TabRegistry) SyncPageTargets(infos []*target.Info) []TabSnapshot {
 func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapshot, []RemovedTab) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	tabs, removed, _ := r.applyLocked(r.openLocked(), infos)
+	tabs, removed, _, _ := r.applyLocked(r.openLocked(), infos)
 	return tabs, removed
 }
 
@@ -337,6 +337,16 @@ func (r *TabRegistry) SyncPageTargetsDetailed(infos []*target.Info) ([]TabSnapsh
 // enumeration: it is opened after every seen involved, so it settles what this
 // one could not. Applying a window that already ended changes nothing.
 func (r *TabRegistry) ApplyEnumeration(w *Window, infos []*target.Info) (tabs []TabSnapshot, removed []RemovedTab, verify bool) {
+	tabs, removed, verify, _ = r.ApplyEnumerationChecked(w, infos)
+	return tabs, removed, verify
+}
+
+// ApplyEnumerationChecked is ApplyEnumeration that also reports whether any
+// page target listed in infos was omitted from tabs because it is currently
+// suspended pending verification. Callers that expose tabs as an authoritative
+// view of the browser must verify again or fail rather than treating an omitted
+// live member as absent.
+func (r *TabRegistry) ApplyEnumerationChecked(w *Window, infos []*target.Info) (tabs []TabSnapshot, removed []RemovedTab, verify, omittedSuspended bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if w == nil {
@@ -345,7 +355,7 @@ func (r *TabRegistry) ApplyEnumeration(w *Window, infos []*target.Info) (tabs []
 	return r.applyLocked(w, infos)
 }
 
-func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapshot, []RemovedTab, bool) {
+func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapshot, []RemovedTab, bool, bool) {
 	live := r.endLocked(w)
 
 	present := make(map[target.ID]*target.Info, len(infos))
@@ -421,13 +431,18 @@ func (r *TabRegistry) applyLocked(w *Window, infos []*target.Info) ([]TabSnapsho
 	}
 
 	out := make([]TabSnapshot, 0, len(present))
+	omittedSuspended := false
 	for id, info := range present {
-		if k := r.targets[id]; k != nil && k.resolves() {
-			out = append(out, TabSnapshot{TargetID: id, Title: info.Title, URL: info.URL})
+		if k := r.targets[id]; k != nil {
+			if k.resolves() {
+				out = append(out, TabSnapshot{TargetID: id, Title: info.Title, URL: info.URL})
+			} else if k.suspended && !k.doomed {
+				omittedSuspended = true
+			}
 		}
 	}
 	slices.SortFunc(out, func(a, b TabSnapshot) int { return cmp.Compare(a.TargetID, b.TargetID) })
-	return out, removed, verify
+	return out, removed, verify, omittedSuspended
 }
 
 // narrow intersects w.listed with the page targets of an enumeration applied
@@ -731,6 +746,15 @@ func (r *TabRegistry) Known(id target.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.targets[id] != nil
+}
+
+// Suspended reports whether id is known and currently suspended awaiting a
+// fresh verification enumeration (not confirmed gone/doomed).
+func (r *TabRegistry) Suspended(id target.ID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := r.targets[id]
+	return k != nil && k.suspended && !k.doomed
 }
 
 // Lookup resolves a client-supplied tab id (INV-3). The id must be the complete

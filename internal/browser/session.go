@@ -465,21 +465,7 @@ func (s *Session) MarkTargetDirty() {
 // Obscura reports "No page" / "No page for session" via its catch-all -32601 wrapper;
 // real Chrome reports variants like "No target with given id" / "Target closed".
 func isStaleTargetErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	m := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(m, "no page"),
-		strings.Contains(m, "no target"),
-		strings.Contains(m, "target not found"),
-		strings.Contains(m, "target closed"),
-		strings.Contains(m, "no session with given id"),
-		strings.Contains(m, "no such target"):
-		return true
-	default:
-		return false
-	}
+	return err != nil && isTargetGoneMessage(strings.ToLower(err.Error()))
 }
 
 // Context returns the browser-level chromedp context (lifetime matches the session).

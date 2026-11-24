@@ -193,6 +193,11 @@ func (s *Server) logManagedPersistFailure(msg string, tid target.ID, err error) 
 	s.logger.Warn(msg, "tab", string(tid), "err", err)
 }
 
+// maxSuspendedVerifyAttempts bounds synchronous re-enumeration when an
+// authoritative listing or lookup encounters a target still suspended by an
+// overlapping snapshot conflict.
+const maxSuspendedVerifyAttempts = 2
+
 // enumerateTabs is the single request path for a full Target.getTargets
 // alignment: window first, browser round trip second, apply last. On error the
 // daemon state is left untouched.
@@ -206,6 +211,29 @@ func (s *Server) enumerateTabs(ctx context.Context, conn tabConn) ([]state.TabSn
 	return s.applyEnumeration(conn, w, targets), nil
 }
 
+// enumerateAuthoritativeTabs enumerates targets for calls (tab_list, tab_focus)
+// whose reply clients treat as authoritative for which tabs currently exist.
+// If the browser listed a target that stayed suspended due to an overlapping
+// snapshot conflict, it verifies with a fresh enumeration instead of omitting a
+// potentially live tab from a successful response.
+func (s *Server) enumerateAuthoritativeTabs(ctx context.Context, conn tabConn) ([]state.TabSnapshot, error) {
+	for attempt := 0; ; attempt++ {
+		w := s.tabs.OpenWindow()
+		targets, err := pageTargets(ctx, conn)
+		if err != nil {
+			s.tabs.Abandon(w)
+			return nil, err
+		}
+		snaps, omittedSuspended := s.applyEnumerationChecked(conn, w, targets)
+		if !omittedSuspended {
+			return snaps, nil
+		}
+		if attempt >= maxSuspendedVerifyAttempts {
+			return nil, errors.New("target list has members pending verification")
+		}
+	}
+}
+
 // applyEnumeration applies the reply (infos) to the enumeration w was opened
 // for. All target-scoped cleanup (idle tracking, observation buffers, Session
 // resources; keyed locks reclaim themselves) is driven only by the removals the
@@ -216,8 +244,13 @@ func (s *Server) enumerateTabs(ctx context.Context, conn tabConn) ([]state.TabSn
 // and a fresh enumeration is requested instead. conn is the connection the
 // reply came from.
 func (s *Server) applyEnumeration(conn any, w *state.Window, infos []*target.Info) []state.TabSnapshot {
+	snaps, _ := s.applyEnumerationChecked(conn, w, infos)
+	return snaps
+}
+
+func (s *Server) applyEnumerationChecked(conn any, w *state.Window, infos []*target.Info) ([]state.TabSnapshot, bool) {
 	s.lifeMu.Lock()
-	snaps, removed, verify := s.tabs.ApplyEnumeration(w, infos)
+	snaps, removed, verify, omittedSuspended := s.tabs.ApplyEnumerationChecked(w, infos)
 	for _, tab := range removed {
 		s.clearTargetStateLocked(tab.TargetID)
 	}
@@ -232,7 +265,7 @@ func (s *Server) applyEnumeration(conn any, w *state.Window, infos []*target.Inf
 	if verify || retry {
 		requestEnumeration(conn)
 	}
-	return snaps
+	return snaps, omittedSuspended
 }
 
 // clearTargetStateLocked drops the daemon state of a target that was just
@@ -252,6 +285,24 @@ func (s *Server) clearTargetStateLocked(tid target.ID) {
 // target.
 func (s *Server) removeTargetState(tid target.ID) {
 	s.dropTarget(s.tabConn(), tid, s.tabs.RemoveTarget)
+}
+
+// observeTargetError feeds explicit target-level absence reported by a
+// target-addressed CDP failure (such as Target.attachToTarget answering that no
+// target exists with that id) back into the lifecycle state so in-flight
+// creations and local caches cannot keep a dead target alive. Session-only or
+// unconfirmed target-gone errors only schedule an enumeration to verify.
+func (s *Server) observeTargetError(conn any, tid target.ID, err error) {
+	if err == nil || tid == "" {
+		return
+	}
+	if absentID, ok := browser.ConfirmedTargetAbsent(err); ok && absentID == tid {
+		s.removeTargetState(tid)
+		return
+	}
+	if browser.ErrorKindOf(err) == browser.ErrorTargetGone {
+		requestEnumeration(conn)
+	}
 }
 
 // removeEventTarget applies a queued lifecycle event reporting that tid is not

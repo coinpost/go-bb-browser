@@ -56,7 +56,7 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := requestTab(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{Error: "missing tab", Method: method})
 		return
@@ -79,6 +79,7 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 	}
 	if sess, ok := conn.(*browser.Session); ok && s.obsSink != nil {
 		if err := sess.EnsureObservation(ctx, tid, kind, s.obsSink, s.logger); err != nil {
+			s.observeTargetError(conn, tid, err)
 			s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to enable observation", &protocol.ErrData{Error: "failed to enable observation", Hint: s.cdpHint(err)})
 			return
 		}

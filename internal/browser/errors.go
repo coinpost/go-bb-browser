@@ -110,6 +110,35 @@ func ErrorKindOf(err error) ErrorKind {
 	}
 }
 
+// ConfirmedTargetAbsent reports whether err proves that the target itself
+// (identified by its complete target.ID on a target-ID-addressed CDP command)
+// no longer exists in the browser. Session-only errors and page-session
+// execution failures return ("", false) so they are never mistaken for target
+// destruction.
+func ConfirmedTargetAbsent(err error) (target.ID, bool) {
+	var typed *CDPError
+	if !errors.As(err, &typed) || typed.Kind != ErrorTargetGone || typed.Target == "" || typed.Err == nil {
+		return "", false
+	}
+	switch typed.Op {
+	case "Target.attachToTarget", "Target.attachObserver", "Target.closeTarget":
+	default:
+		return "", false
+	}
+	if errors.Is(typed.Err, context.Canceled) || errors.Is(typed.Err, context.DeadlineExceeded) {
+		return "", false
+	}
+	var exc *runtime.ExceptionDetails
+	if errors.As(typed.Err, &exc) {
+		return "", false
+	}
+	var perr *cdproto.Error
+	if errors.As(typed.Err, &perr) {
+		return typed.Target, isTargetAbsentMessage(strings.ToLower(perr.Message))
+	}
+	return typed.Target, isTargetAbsentMessage(strings.ToLower(typed.Err.Error()))
+}
+
 func isTransportError(err error) bool {
 	return errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
@@ -119,14 +148,18 @@ func isTransportError(err error) bool {
 		errors.Is(err, syscall.ECONNREFUSED)
 }
 
-func isTargetGoneMessage(msg string) bool {
+func isTargetAbsentMessage(msg string) bool {
 	return strings.Contains(msg, "no target") ||
 		strings.Contains(msg, "target not found") ||
 		strings.Contains(msg, "target closed") ||
 		strings.Contains(msg, "page has been closed") ||
 		strings.Contains(msg, "no page") ||
-		strings.Contains(msg, "no session with given id") ||
 		strings.Contains(msg, "no such target")
+}
+
+func isTargetGoneMessage(msg string) bool {
+	return isTargetAbsentMessage(msg) ||
+		strings.Contains(msg, "no session with given id")
 }
 
 func isTransportMessage(msg string) bool {
