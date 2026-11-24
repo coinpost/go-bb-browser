@@ -487,3 +487,11 @@ Codex独立只读审查origin/main@2be49f8...HEAD累计72文件，重点本次d4
 无安装、代码修改、提交或依赖变更；测试HOME/TMPDIR/缓存在本run，固定模块缓存、GOPROXY=off/GOSUMDB=off，仅回环stub。本轮未启动Chrome，仅检查父提交100份历史轨迹（95次生产root discovery），不称HEAD独立真实Chrome验收。两种零页面、上述合成错误自然可达性、其他宿主/Chrome、Go1.26、部署、跨会话唯一性未验。未操作用户窗口。
 证据保留本机review/evidence/FT28-d408b68/：REVIEW.md、reproduce.md、sources/、configured.log、regression.log、identity-race20.log、counts.txt、prior-probes-*.log、session-*.log、lookup-gap.log、focus-*.log、historical-chrome.log。额外诊断尚非永久回归。无链接issue/PR，不发GitHub评论。
 状态：review/ → ready/，round仍为9，等待owner/ship验收；本次仅review，未改代码、未合并main、未发布，不自动开始修复或其他任务。
+
+## factory · 2026-11-24 11:39
+
+owner 要求：交付掉（仅 FT28）。已将已审查 head d408b68c5133cc6c17048940f9518e3428eb2cdd 合入 main 并推送，merge: 0d7c792e89667c616c64e6eb343eb92db104189e（parents 2be49f8 + d408b68）。无合并冲突；相对当时 origin/main@2be49f8a70d6040937838426eea54bd65199067c 的 merge-tree 干净。标题与既有历史未改。未改代码，未启动 coder。
+
+测试（throwaway HOME，复用已锁定模块缓存，GOPROXY=off -mod=readonly，go.mod/go.sum 未改；Go 1.27.1 linux/amd64）：变更包 `go test -race ./cmd/bb-browser ./internal/browser ./internal/daemon ./internal/state ./internal/store ./pkg/daemonclient ./pkg/protocol` 通过（protocol 无测试文件）。累计配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0，11 个测试包通过、pkg/protocol 无测试包。本 ship 未运行 `-tags realchrome`，未启动 Chrome，不声称本次独立真实 Chrome 验收。保护路径无变更。工作树干净。
+
+按 ship=[merge,push] 未打 tag、未发布、未部署；无关联 issue/PR 需关闭，未删除代码分支 factory/FT28-daemon-full-target-id。原 review 的非阻断 P2/P3 及 owner 11:10 验收边界保留。ready/ → done/。
