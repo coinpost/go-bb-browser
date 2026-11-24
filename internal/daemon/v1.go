@@ -1306,10 +1306,11 @@ func (s *Server) cdpHint(err error) string {
 }
 
 // auditFailureMessage names what failed for an audit append error: the write
-// itself, or only the log maintenance after a record that was written.
+// itself, or only the log maintenance around a record that went to the open
+// log handle (which does not confirm that a restart reads it back).
 func auditFailureMessage(err error) string {
 	if store.RecordWritten(err) {
-		return "rpc log record written, but log maintenance after the write failed"
+		return "rpc log record written to the open log, but log maintenance failed; recoverability after a restart is not confirmed"
 	}
 	return "append rpc log failed"
 }

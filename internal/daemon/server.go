@@ -62,6 +62,11 @@ type Server struct {
 	// observation query between two of its steps (see obsStep*).
 	obsStepHook func(step string, tid target.ID)
 
+	// auditCloseHook is nil outside tests. It sees the result of the final
+	// store.Close (which has run) and returns what closeAudit reports, so a
+	// shutdown whose log could not be confirmed can be exercised.
+	auditCloseHook func(error) error
+
 	tabMuOps    sync.Mutex
 	tabCDPLocks map[string]*tabLockEntry
 
@@ -210,12 +215,22 @@ func newHTTPServer(handler http.Handler) *http.Server {
 }
 
 // ListenAndServe starts the HTTP server until ctx is cancelled or Listen fails.
-func (s *Server) ListenAndServe(ctx context.Context) error {
+//
+// The RPC log is closed last. Its close error (a state-dir sync still owed by
+// a rotation, or the file close itself) is part of the result: it is joined to
+// whatever ended the service, which stays first and intact, and an otherwise
+// clean shutdown returns it alone — the daemon must not exit silently with its
+// log unconfirmed.
+func (s *Server) ListenAndServe(ctx context.Context) (retErr error) {
 	runCtx, stopRun := context.WithCancel(ctx)
 	s.stopRun = stopRun
 	s.fatalCh = make(chan error, 1)
 
-	defer func() { _ = s.closeAudit() }()
+	defer func() {
+		if err := s.closeAudit(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close rpc log (its state on disk is not confirmed): %w", err))
+		}
+	}()
 	// shutdownHTTP drains handlers before the session and audit store are closed.
 	defer func() {
 		s.tabMu.Lock()
@@ -310,6 +325,9 @@ func (s *Server) closeAudit() error {
 	s.auditMu.Lock()
 	err := s.store.Close()
 	s.auditMu.Unlock()
+	if s.auditCloseHook != nil {
+		err = s.auditCloseHook(err)
+	}
 	return err
 }
 

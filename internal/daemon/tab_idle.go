@@ -182,18 +182,23 @@ func (s *Server) forgetUnregisteredManaged(tid target.ID) {
 }
 
 // Lifecycle persistence warnings. The "written" pair is for errors that
-// store.RecordWritten accepts: the record is in rpc.jsonl and only the log
-// maintenance after it (rotation, or the state-dir sync of a published
-// rotation) failed, so nothing about the tab's persisted state is lost.
+// store.RecordWritten accepts: the record went to the open log handle and the
+// log maintenance around the write (rotation, or the state-dir sync a published
+// rotation owes) failed. That is all it proves. Whether a restart reads the
+// record back is not known here — the directory entries may be unconfirmed, or
+// the name rpc.jsonl may no longer lead to the open log, in which case a
+// restart recovers an older generation — so these messages promise neither
+// persistence nor recovery.
 const (
 	msgManagedOpenNotPersisted   = "managed tab not persisted; it will not be restored for idle cleanup after a daemon restart"
-	msgManagedOpenWritten        = "managed tab persisted, but rpc log maintenance after the write failed; it is retried on the next append"
+	msgManagedOpenWritten        = "managed tab record written to the open rpc log, but rpc log maintenance failed; whether a daemon restart restores the tab is not confirmed (see err; retried on the next append)"
 	msgManagedRetireNotPersisted = "managed tab retirement not persisted; the stale entry stays in rpc.jsonl until rotation or the next restart reconciliation"
-	msgManagedRetireWritten      = "managed tab retirement persisted, but rpc log maintenance after the write failed; it is retried on the next append"
+	msgManagedRetireWritten      = "managed tab retirement written to the open rpc log, but rpc log maintenance failed; whether a daemon restart still sees the tab as managed is not confirmed (see err; retried on the next append)"
 )
 
 // logManagedPersistFailure reports a lifecycle write error: notWritten when the
-// record did not reach rpc.jsonl, written when it did (store.RecordWritten).
+// record was not written, written when it reached the open log handle
+// (store.RecordWritten) and only the maintenance around it failed.
 func (s *Server) logManagedPersistFailure(notWritten, written string, tid target.ID, err error) {
 	if s.logger == nil {
 		return
