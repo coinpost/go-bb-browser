@@ -20,15 +20,17 @@ import (
 // each). The existing single-daemon [Client] API is unchanged; Pool exposes the
 // same Health / Call / typed RPC surface and picks a backend per request.
 //
-// Tab IDs (Pool-only): callers see `<backendKey>:<daemonShortId>`. The default
+// Tab IDs (Pool-only): callers see `<backendKey>:<targetId>`, where targetId
+// is the daemon's tab id — the complete CDP target id, verbatim. The default
 // backend key is the 0-based constructor index as a decimal string ("0", "1",
 // …); [NewPoolBackends] can set a stable name instead. Pool strips the prefix
 // before talking to that daemon and prefixes TabNew, TabList, TabFocus, and
-// bound-method results. Cross-daemon native short-id collisions are therefore
-// distinct at this API. Malformed ids and unknown keys are rejected; routing
-// is derived from the prefix. An explicit tab map records tabs created via
-// TabNew or observed via TabList/TabFocus (for [Pool.ClientForTab],
-// [Pool.ForgetTab], and close/unbind).
+// bound-method results. A bare target id is never accepted: without the prefix
+// the pool would have to guess the backend. Pool ids are matched exactly (no
+// trimming, case folding, or partial match). Malformed ids and unknown keys are
+// rejected; routing is derived from the prefix. An explicit tab map records
+// tabs created via TabNew or observed via TabList/TabFocus (for
+// [Pool.ClientForTab], [Pool.ForgetTab], and close/unbind).
 //
 // Tab affinity (hard invariant): a tab lives on exactly one daemon. Later
 // tab-scoped RPCs (Eval, Goto, …) go only to the backend named by the prefix.
@@ -179,7 +181,7 @@ type tabBinding struct {
 var errTabListNoTabs = errors.New("daemonclient: tab_list result has no tabs array")
 
 // PoolBackend is one named member of a [Pool]. Key is the prefix in external
-// tab ids (`<key>:<daemonShortId>`). If Key is empty, [NewPoolBackends] uses
+// tab ids (`<key>:<targetId>`). If Key is empty, [NewPoolBackends] uses
 // the 0-based index as a decimal string. Keys must be unique and must not
 // contain ':'.
 type PoolBackend struct {
@@ -242,21 +244,22 @@ func NewPoolBackends(backends ...PoolBackend) (*Pool, error) {
 	}, nil
 }
 
-// FormatTabID builds a Pool-facing tab id: `<backendKey>:<daemonShortId>`.
-func FormatTabID(backendKey, daemonShortID string) string {
-	return backendKey + ":" + daemonShortID
+// FormatTabID builds a Pool-facing tab id: `<backendKey>:<targetId>`, where
+// targetID is the daemon's tab id (the complete CDP target id).
+func FormatTabID(backendKey, targetID string) string {
+	return backendKey + ":" + targetID
 }
 
 // SplitTabID parses a Pool-facing tab id. ok is false when tab is not
-// `<backendKey>:<daemonShortId>` with both sides non-empty. The key is the
-// substring before the first ':'; the rest is the daemon-native short id.
-func SplitTabID(tab string) (backendKey, daemonShortID string, ok bool) {
-	tab = strings.TrimSpace(tab)
-	key, short, found := strings.Cut(tab, ":")
-	if !found || key == "" || short == "" {
+// `<backendKey>:<targetId>` with both sides non-empty. The key is the
+// substring before the first ':'; the rest is the daemon's tab id, returned
+// verbatim. tab itself is taken verbatim too (no trimming).
+func SplitTabID(tab string) (backendKey, targetID string, ok bool) {
+	key, id, found := strings.Cut(tab, ":")
+	if !found || key == "" || id == "" {
 		return "", "", false
 	}
-	return key, short, true
+	return key, id, true
 }
 
 // Len returns the number of backends.
@@ -278,7 +281,7 @@ func (p *Pool) Clients() []*Client {
 }
 
 // ClientForTab returns the backend pinned to tab, if any. tab must be a
-// Pool-facing id (`<backendKey>:<daemonShortId>`) created via TabNew or
+// Pool-facing id (`<backendKey>:<targetId>`) created via TabNew or
 // observed via TabList / TabFocus, and not since closed, forgotten, or retired
 // by a later TabList of its backend.
 func (p *Pool) ClientForTab(tab string) (*Client, bool) {
@@ -424,28 +427,48 @@ func (p *Pool) callClose(ctx context.Context, tab, method string, params any, re
 }
 
 func (p *Pool) callBound(ctx context.Context, tab, method string, params any, result any) error {
-	idx, short, err := p.resolveTab(tab)
+	idx, native, err := p.resolveTab(tab)
 	if err != nil {
 		return err
 	}
-	stripped, err := replaceJSONTab(params, short)
+	stripped, err := replaceJSONTab(params, native)
 	if err != nil {
 		return err
 	}
 	hold := p.track(idx)
 	defer hold()
 	if result == nil {
-		return p.clients[idx].Call(ctx, method, stripped, nil)
+		return unknownTabFromBackend(tab, p.clients[idx].Call(ctx, method, stripped, nil))
 	}
 	var raw json.RawMessage
 	if err := p.clients[idx].Call(ctx, method, stripped, &raw); err != nil {
-		return err
+		return unknownTabFromBackend(tab, err)
 	}
 	if err := json.Unmarshal(setJSONTab(raw, tab), result); err != nil {
 		return fmt.Errorf("daemonclient: decode %s result: %w", method, err)
 	}
 	return nil
 }
+
+// unknownTabFromBackend gives the daemon's explicit "unknown tab id" answer for
+// a bound tab the Pool-level meaning it has: err is wrapped in an
+// [*UnknownTabError] for the Pool id, with the daemon's [*RPCError] still in
+// the chain. Every other error (and nil) is returned unchanged. The binding is
+// left to the pool's reconciliation rules.
+func unknownTabFromBackend(tab string, err error) error {
+	var rpcErr *RPCError
+	if err == nil || !errors.As(err, &rpcErr) {
+		return err
+	}
+	if rpcErr.Code != protocol.CodeInvalidParams || rpcErr.Message != unknownTabMessage {
+		return err
+	}
+	return &UnknownTabError{Tab: tab, Err: err}
+}
+
+// unknownTabMessage is the JSON-RPC error message of the daemon for a tab id
+// that names no open tab.
+const unknownTabMessage = "unknown tab id"
 
 func (p *Pool) callTabList(ctx context.Context, params any, result any) error {
 	observations := make([]backendObservation, len(p.clients))
@@ -795,7 +818,6 @@ func (p *Pool) order(rr *atomic.Uint64) []int {
 // backend does (defensive: prefixed ids make cross-daemon collisions
 // impossible at this layer).
 func (p *Pool) bind(tab string, idx int) error {
-	tab = strings.TrimSpace(tab)
 	if tab == "" {
 		return fmt.Errorf("daemonclient: empty tab id")
 	}
@@ -886,7 +908,7 @@ func (p *Pool) applyObservationLocked(idx int, started uint64, authoritative boo
 		return
 	}
 	for _, tab := range tabs {
-		tab = strings.TrimSpace(tab)
+		// Ids are opaque: bound exactly as reported, never trimmed.
 		if tab == "" {
 			continue
 		}
@@ -926,9 +948,8 @@ func (p *Pool) markRemovedLocked(idx int, tab string, at uint64) {
 
 // abandonCreated closes a tab on idx without touching the pool map (the id may
 // already belong to another backend). Best-effort: a cancelled caller context
-// must not skip cleanup. tab is the daemon-native short id.
+// must not skip cleanup. tab is the daemon's own tab id (no pool prefix).
 func (p *Pool) abandonCreated(ctx context.Context, idx int, tab string) {
-	tab = strings.TrimSpace(tab)
 	if tab == "" || idx < 0 || idx >= len(p.clients) {
 		return
 	}
@@ -938,7 +959,6 @@ func (p *Pool) abandonCreated(ctx context.Context, idx int, tab string) {
 }
 
 func (p *Pool) unbind(tab string) {
-	tab = strings.TrimSpace(tab)
 	if tab == "" {
 		return
 	}
@@ -962,7 +982,6 @@ func (p *Pool) unbind(tab string) {
 }
 
 func (p *Pool) lookupTab(tab string) (int, bool) {
-	tab = strings.TrimSpace(tab)
 	if tab == "" {
 		return 0, false
 	}
@@ -974,12 +993,13 @@ func (p *Pool) lookupTab(tab string) (int, bool) {
 
 // resolveTab parses a Pool-facing tab id, checks the prefix against this pool,
 // and requires the id to be in the created-tab map. The prefix selects the
-// backend (source of truth); the map is "created via this pool".
-func (p *Pool) resolveTab(tab string) (idx int, short string, err error) {
-	tab = strings.TrimSpace(tab)
-	key, short, ok := SplitTabID(tab)
+// backend (source of truth); the map is "created via this pool". The id is
+// matched exactly as given: an id the pool never handed out is unknown, and no
+// backend is asked about it.
+func (p *Pool) resolveTab(tab string) (idx int, native string, err error) {
+	key, native, ok := SplitTabID(tab)
 	if !ok {
-		return 0, "", &InvalidTabIDError{Tab: tab, Reason: "malformed; want <backendKey>:<daemonShortId>"}
+		return 0, "", &InvalidTabIDError{Tab: tab, Reason: "malformed; want <backendKey>:<targetId>"}
 	}
 	idx, ok = p.byKey[key]
 	if !ok {
@@ -991,9 +1011,9 @@ func (p *Pool) resolveTab(tab string) (idx int, short string, err error) {
 	}
 	if mapped != idx {
 		// Prefix wins if the map ever disagrees (should not happen).
-		return idx, short, nil
+		return idx, native, nil
 	}
-	return idx, short, nil
+	return idx, native, nil
 }
 
 func tabIDFromParams(params any) string {
@@ -1010,7 +1030,7 @@ func tabFromRawResult(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &peek); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(peek.Tab)
+	return peek.Tab
 }
 
 func jsonTabField(v any) string {
@@ -1027,9 +1047,9 @@ func jsonTabField(v any) string {
 // replaceJSONTab swaps only the tab field. Other values stay raw JSON so
 // integers above 2^53 (seq, since, cursor, nested event seqs) are not rounded
 // through float64.
-func replaceJSONTab(params any, short string) (any, error) {
+func replaceJSONTab(params any, tab string) (any, error) {
 	if params == nil {
-		return map[string]any{"tab": short}, nil
+		return map[string]any{"tab": tab}, nil
 	}
 	b, err := json.Marshal(params)
 	if err != nil {
@@ -1042,19 +1062,18 @@ func replaceJSONTab(params any, short string) (any, error) {
 	if m == nil {
 		m = map[string]json.RawMessage{}
 	}
-	m["tab"], err = json.Marshal(short)
+	m["tab"], err = json.Marshal(tab)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tab: %w", err)
 	}
 	return m, nil
 }
 
-func prefixPoolTab(backendKey, daemonShortID string) string {
-	daemonShortID = strings.TrimSpace(daemonShortID)
-	if daemonShortID == "" {
+func prefixPoolTab(backendKey, targetID string) string {
+	if targetID == "" {
 		return ""
 	}
-	return FormatTabID(backendKey, daemonShortID)
+	return FormatTabID(backendKey, targetID)
 }
 
 func prefixTabListResult(key string, r protocol.TabListResult) protocol.TabListResult {

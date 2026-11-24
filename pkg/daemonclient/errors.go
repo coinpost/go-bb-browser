@@ -22,21 +22,37 @@ var ErrUnusableTabNewResult = errors.New("daemonclient: tab_new result must be n
 
 // UnknownTabError is returned when a well-formed Pool tab id is not pinned in
 // this [Pool] (never created via TabNew, never observed via TabList/TabFocus,
-// already closed, or [Pool.ForgetTab]).
+// already closed, or [Pool.ForgetTab]), or when the daemon the id is pinned to
+// answers that it has no such tab (closed behind the pool's back). In the
+// second case Err is the daemon's reply, so errors.As also finds its
+// [*RPCError].
 type UnknownTabError struct {
 	Tab string
+	// Err is the backend error that reported the tab unknown; nil when the
+	// pool itself did not know the id.
+	Err error
+}
+
+func (e *UnknownTabError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 func (e *UnknownTabError) Error() string {
 	if e == nil {
 		return "daemonclient pool: unknown tab <nil>"
 	}
+	if e.Err != nil {
+		return fmt.Sprintf("daemonclient pool: unknown tab %q (its daemon no longer has it): %v", e.Tab, e.Err)
+	}
 	return fmt.Sprintf("daemonclient pool: unknown tab %q (not created via this pool, or already closed)", e.Tab)
 }
 
 // InvalidTabIDError is returned when a Pool tab id is malformed or its
 // backend key is not a member of this pool. Pool ids are
-// `<backendKey>:<daemonShortId>`.
+// `<backendKey>:<targetId>` (targetId: the complete CDP target id).
 type InvalidTabIDError struct {
 	Tab    string
 	Reason string
@@ -49,12 +65,12 @@ func (e *InvalidTabIDError) Error() string {
 	if e.Reason != "" {
 		return fmt.Sprintf("daemonclient pool: invalid tab id %q: %s", e.Tab, e.Reason)
 	}
-	return fmt.Sprintf("daemonclient pool: invalid tab id %q (want <backendKey>:<daemonShortId>)", e.Tab)
+	return fmt.Sprintf("daemonclient pool: invalid tab id %q (want <backendKey>:<targetId>)", e.Tab)
 }
 
 // TabCollisionError is returned if tab_new would bind an external tab id already
-// owned by a different backend. Prefixed Pool ids make cross-daemon native
-// short-id collisions distinct; this is belt-and-suspenders only.
+// owned by a different backend. Prefixed Pool ids keep equal target ids on
+// different daemons distinct; this is belt-and-suspenders only.
 type TabCollisionError struct {
 	Tab string
 }

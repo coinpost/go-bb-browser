@@ -63,21 +63,21 @@ func drainRPCLog(t *testing.T, srv *Server) {
 func TestExternalTargetRemovalClearsAllDaemonState(t *testing.T) {
 	srv := newIdleTestServer(&fakeConn{}, time.Minute)
 	tid := target.ID("ABCDEF123456")
-	short := srv.tabs.RegisterPageTarget(tid)
+	tab := registerTestTab(srv, tid)
 	srv.tabIdle.MarkManaged(tid)
 	seq, err := srv.store.NextSeq()
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv.obsStore.PushNetwork(tid, seq, json.RawMessage(`{"url":"https://example.com"}`))
-	unlock, ok := srv.lockTab(context.Background(), short)
+	unlock, ok := srv.lockTab(context.Background(), tab)
 	if !ok {
 		t.Fatal("lock failed")
 	}
 	unlock()
 
 	srv.removeTargetState(tid)
-	if _, ok := srv.tabs.Lookup(short); ok {
+	if _, ok := srv.tabs.Lookup(tab); ok {
 		t.Fatal("registry entry retained")
 	}
 	if _, ok := srv.tabIdle.Snapshot()[tid]; ok {
@@ -87,7 +87,7 @@ func TestExternalTargetRemovalClearsAllDaemonState(t *testing.T) {
 		t.Fatalf("observation events retained: %#v", events)
 	}
 	srv.tabMuOps.Lock()
-	_, lockRetained := srv.tabCDPLocks[short]
+	_, lockRetained := srv.tabCDPLocks[tab]
 	srv.tabMuOps.Unlock()
 	if lockRetained {
 		t.Fatal("keyed tab lock retained")
@@ -146,7 +146,7 @@ func TestTabIdleCloseTargetErrors(t *testing.T) {
 			var logs bytes.Buffer
 			srv.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			tid := target.ID("ABCDEF123456")
-			short := srv.tabs.RegisterPageTarget(tid)
+			tab := registerTestTab(srv, tid)
 			srv.tabIdle.MarkManagedAt(tid, time.Now().Add(-2*time.Minute))
 			seq, err := srv.store.NextSeq()
 			if err != nil {
@@ -166,7 +166,7 @@ func TestTabIdleCloseTargetErrors(t *testing.T) {
 				if got := bytes.Count(logs.Bytes(), []byte("level=WARN")); got != wantWarnings {
 					t.Fatalf("round %d: warnings = %d, want %d; logs: %s", round, got, wantWarnings, &logs)
 				}
-				if _, present := srv.tabs.Lookup(short); present == tc.gone {
+				if _, present := srv.tabs.Lookup(tab); present == tc.gone {
 					t.Fatalf("round %d: registry present = %v, target gone = %v", round, present, tc.gone)
 				}
 				expired := srv.tabIdle.Expired(time.Now(), time.Minute)
@@ -175,7 +175,7 @@ func TestTabIdleCloseTargetErrors(t *testing.T) {
 						t.Fatalf("round %d: removed target still tracked or expired: %v", round, expired)
 					}
 					srv.tabMuOps.Lock()
-					_, retained := srv.tabCDPLocks[short]
+					_, retained := srv.tabCDPLocks[tab]
 					srv.tabMuOps.Unlock()
 					if retained {
 						t.Fatal("removed target's keyed lock retained")
@@ -211,14 +211,14 @@ func TestTabCloseRPCErrorSemanticsUnchanged(t *testing.T) {
 		code       int
 		message    string
 	}{
-		{"unknown short id", false, protocol.CodeInvalidParams, "unknown tab id"},
+		{"unknown id", false, protocol.CodeInvalidParams, "unknown tab id"},
 		{"registered target gone", true, protocol.CodeServerError, "failed to close tab"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newIdleTestServer(&fakeConn{closeErr: errors.New("No target with given id found")}, time.Minute)
 			tab := "unknown"
 			if tc.registered {
-				tab = srv.tabs.RegisterPageTarget("ABCDEF123456")
+				tab = registerTestTab(srv, "ABCDEF123456")
 			}
 			rec := postRPC(t, srv, rpcReq(protocol.MethodTabClose, map[string]any{"tab": tab}, 1))
 			var env protocol.Response
@@ -319,10 +319,10 @@ func TestTabIdleRechecksExpiryAfterAcquiringTabLock(t *testing.T) {
 		{TargetID: tid, Type: "page", Title: "t", URL: "https://ex"},
 	}}
 	srv := newIdleTestServer(fc, time.Minute)
-	short := srv.tabs.RegisterPageTarget(tid)
+	tab := registerTestTab(srv, tid)
 	srv.tabIdle.MarkManagedAt(tid, time.Now().Add(-2*time.Minute))
 
-	unlock, ok := srv.lockTab(context.Background(), short)
+	unlock, ok := srv.lockTab(context.Background(), tab)
 	if !ok {
 		t.Fatal("failed to hold tab lock")
 	}
@@ -336,7 +336,7 @@ func TestTabIdleRechecksExpiryAfterAcquiringTabLock(t *testing.T) {
 	for {
 		srv.tabMuOps.Lock()
 		refs := 0
-		if ent := srv.tabCDPLocks[short]; ent != nil {
+		if ent := srv.tabCDPLocks[tab]; ent != nil {
 			refs = ent.refs
 		}
 		srv.tabMuOps.Unlock()
@@ -462,7 +462,6 @@ func TestTabIdleRestartGraceDelaysClose(t *testing.T) {
 	line, err := json.Marshal(store.LogRecord{
 		Action: store.ActionManagedTabOpen,
 		Body:   json.RawMessage(`{}`),
-		Tab:    "9999",
 		Target: string(tabID),
 		OK:     true,
 		Time:   expiredAt,
@@ -544,7 +543,7 @@ func TestEnumerationRemovalKeepsLog(t *testing.T) {
 
 	// A fresh empty enumeration removes the tab from memory (registry + idle
 	// tracking) but must not touch the persisted log.
-	srv.syncTabsFromTargets(srv.beginTargetEnumeration(), nil)
+	srv.applyEnumeration(nil, srv.tabs.OpenWindow(), nil)
 	if left := srv.tabIdle.Snapshot(); len(left) != 0 {
 		t.Fatalf("idle tracking retained removed tab: %v", left)
 	}

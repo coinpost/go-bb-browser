@@ -180,25 +180,28 @@ func removeNetworkRoutes(ctx context.Context, conn routeConn, id target.ID, patt
 	return conn.RemoveNetworkRoutes(id, pattern)
 }
 
-// lockTab serializes CDP operations per short tab id. The key comes straight
-// from the client and is locked before the tab is resolved, so an entry lives
-// only while a holder or waiter references it: the last reference to leave
-// deletes it, whether or not the tab ever existed. Every reference is taken
-// from the map under tabMuOps, so callers that overlap in time always share
-// one entry and a new entry can only appear once the previous one has drained.
-func (s *Server) lockTab(ctx context.Context, short string) (func(), bool) {
-	if short == "" {
+// lockTab serializes CDP operations per tab. The key is the tab id exactly as
+// the client sent it, which for every existing tab is its complete CDP target
+// id, so all requests for one target (and idle cleanup, which locks the same
+// id) share one entry. It is locked before the tab is resolved, so an entry
+// lives only while a holder or waiter references it: the last reference to
+// leave deletes it, whether or not the tab ever existed. Every reference is
+// taken from the map under tabMuOps, so callers that overlap in time always
+// share one entry and a new entry can only appear once the previous one has
+// drained.
+func (s *Server) lockTab(ctx context.Context, key string) (func(), bool) {
+	if key == "" {
 		return func() {}, true
 	}
 	s.tabMuOps.Lock()
 	if s.tabCDPLocks == nil {
 		s.tabCDPLocks = make(map[string]*tabLockEntry)
 	}
-	ent, ok := s.tabCDPLocks[short]
+	ent, ok := s.tabCDPLocks[key]
 	if !ok {
 		ent = &tabLockEntry{sem: make(chan struct{}, 1)}
 		ent.sem <- struct{}{}
-		s.tabCDPLocks[short] = ent
+		s.tabCDPLocks[key] = ent
 	}
 	ent.refs++
 	s.tabMuOps.Unlock()
@@ -206,10 +209,10 @@ func (s *Server) lockTab(ctx context.Context, short string) (func(), bool) {
 	case <-ent.sem:
 		return func() {
 			ent.sem <- struct{}{}
-			s.releaseTabLockRef(short, ent)
+			s.releaseTabLockRef(key, ent)
 		}, true
 	case <-ctx.Done():
-		s.releaseTabLockRef(short, ent)
+		s.releaseTabLockRef(key, ent)
 		return func() {}, false
 	}
 }
@@ -219,11 +222,11 @@ type tabLockEntry struct {
 	refs int
 }
 
-func (s *Server) releaseTabLockRef(short string, ent *tabLockEntry) {
+func (s *Server) releaseTabLockRef(key string, ent *tabLockEntry) {
 	s.tabMuOps.Lock()
 	defer s.tabMuOps.Unlock()
 	ent.refs--
-	if ent.refs == 0 && s.tabCDPLocks[short] == ent {
-		delete(s.tabCDPLocks, short)
+	if ent.refs == 0 && s.tabCDPLocks[key] == ent {
+		delete(s.tabCDPLocks, key)
 	}
 }

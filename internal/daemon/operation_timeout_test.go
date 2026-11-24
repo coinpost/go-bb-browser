@@ -60,7 +60,8 @@ func newBudgetServer(t *testing.T, conn *budgetEvalConn) (*Server, string) {
 	tid := target.ID("ABCDEF123456")
 	conn.fakeConn = &fakeConn{infos: []*target.Info{{TargetID: tid, Type: "page"}}}
 	srv.tabHook = conn
-	return srv, srv.tabs.RegisterPageTarget(tid)
+	srv.tabs.RegisterPageTarget(tid)
+	return srv, string(tid)
 }
 
 func decodeRPCError(t *testing.T, rec *httptest.ResponseRecorder) (string, protocol.ErrData) {

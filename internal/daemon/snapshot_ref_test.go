@@ -33,9 +33,9 @@ func TestV1ClickFillResolveRefWithSnapshotSelector(t *testing.T) {
 	conn := &selectorRecordingConn{fakeConn: &fakeConn{}}
 	srv := newIdleTestServer(conn.fakeConn, time.Minute)
 	srv.tabHook = conn
-	short := srv.tabs.RegisterPageTarget(target.ID("ABCDEF123456"))
+	tab := registerTestTab(srv, target.ID("ABCDEF123456"))
 
-	rec := postRPC(t, srv, rpcReq(protocol.MethodSnapshot, map[string]any{"tab": short}, 1))
+	rec := postRPC(t, srv, rpcReq(protocol.MethodSnapshot, map[string]any{"tab": tab}, 1))
 	var snap struct {
 		Result protocol.SnapshotResult `json:"result"`
 	}
@@ -51,8 +51,8 @@ func TestV1ClickFillResolveRefWithSnapshotSelector(t *testing.T) {
 		}
 		for _, form := range []string{ref, "@" + ref, " @" + ref + " "} {
 			conn.clicked, conn.filled = nil, nil
-			postRPC(t, srv, rpcReq(protocol.MethodClick, map[string]any{"tab": short, "ref": form}, 2))
-			postRPC(t, srv, rpcReq(protocol.MethodFill, map[string]any{"tab": short, "ref": form, "text": "x"}, 3))
+			postRPC(t, srv, rpcReq(protocol.MethodClick, map[string]any{"tab": tab, "ref": form}, 2))
+			postRPC(t, srv, rpcReq(protocol.MethodFill, map[string]any{"tab": tab, "ref": form, "text": "x"}, 3))
 			if len(conn.clicked) != 1 || conn.clicked[0] != want {
 				t.Errorf("click ref %q used selectors %q, want [%q]", form, conn.clicked, want)
 			}
@@ -64,7 +64,7 @@ func TestV1ClickFillResolveRefWithSnapshotSelector(t *testing.T) {
 
 	// A plain CSS selector is passed through untouched.
 	conn.clicked = nil
-	postRPC(t, srv, rpcReq(protocol.MethodClick, map[string]any{"tab": short, "selector": "#go"}, 4))
+	postRPC(t, srv, rpcReq(protocol.MethodClick, map[string]any{"tab": tab, "selector": "#go"}, 4))
 	if len(conn.clicked) != 1 || conn.clicked[0] != "#go" {
 		t.Errorf("click selector passed as %q", conn.clicked)
 	}

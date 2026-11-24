@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/browser"
@@ -57,7 +56,7 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "invalid params", nil)
 		return
 	}
-	tab := strings.TrimSpace(p.Tab)
+	tab := p.Tab
 	if tab == "" {
 		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "missing tab", &protocol.ErrData{Error: "missing tab", Method: method})
 		return
@@ -73,13 +72,14 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 		return
 	}
 	defer unlock()
-	tid, ok := s.resolveTab(ctx, conn, tab)
-	if !ok {
-		s.rpcErr(ctx, w, id, protocol.CodeInvalidParams, "unknown tab id", &protocol.ErrData{Error: "unknown tab id", Hint: "invalid or stale tab short id", Method: method})
+	tid, err := s.resolveTab(ctx, conn, tab)
+	if err != nil {
+		s.rpcResolveErr(ctx, w, id, method, err)
 		return
 	}
 	if sess, ok := conn.(*browser.Session); ok && s.obsSink != nil {
 		if err := sess.EnsureObservation(ctx, tid, kind, s.obsSink, s.logger); err != nil {
+			s.observeTargetError(conn, tid, err)
 			s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to enable observation", &protocol.ErrData{Error: "failed to enable observation", Hint: s.cdpHint(err)})
 			return
 		}

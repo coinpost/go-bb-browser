@@ -66,7 +66,7 @@ func mkdirMode(t *testing.T, path string, mode os.FileMode) {
 func managedOpenLine(t *testing.T, tab string) []byte {
 	t.Helper()
 	data, err := json.Marshal(LogRecord{
-		Action: ActionManagedTabOpen, Body: lifecycleBody, Tab: tab, Target: "target-" + tab, OK: true, Time: time.Now().UTC(),
+		Action: ActionManagedTabOpen, Body: lifecycleBody, Target: "target-" + tab, OK: true, Time: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestStatePermissionsHelper(t *testing.T) {
 		assertPerm(t, dir, 0o700)
 		assertPerm(t, filepath.Join(dir, rpcLogFile), 0o600)
 
-		if err := s.AppendRPC(LogRecord{Action: protocol.MethodTabNew, Body: permTabNewBody, Tab: "aa11", OK: true}); err != nil {
+		if err := s.AppendRPC(LogRecord{Action: protocol.MethodTabNew, Body: permTabNewBody, OK: true}); err != nil {
 			t.Fatal(err)
 		}
 		assertPerm(t, filepath.Join(dir, rpcLogFile), 0o600)
@@ -159,7 +159,7 @@ func TestStatePermissionsHelper(t *testing.T) {
 
 		// Tightening must not disturb replay of the existing log.
 		managed := s.ReplayManagedTabActivity()
-		if _, ok := managed["aa11"]; !ok || len(managed) != 1 {
+		if _, ok := managed["target-aa11"]; !ok || len(managed) != 1 {
 			t.Errorf("managed after tightening = %#v, want only aa11", managed)
 		}
 	})
@@ -186,13 +186,13 @@ func TestStatePermissionsHelper(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RegisterManagedTab("aa11", "target-aa11", time.Now().UTC()); err != nil {
+		if err := s.RegisterManagedTab("target-aa11", time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		gotoBody := json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://example.com/some/long/path"},"id":3}`)
 		// Enough rotations to fill every backup slot and drop the oldest.
 		for i := 0; i < 200; i++ {
-			if err := s.AppendRPC(LogRecord{Action: protocol.MethodGoto, Body: gotoBody, Tab: "aa11", Target: "target-aa11", OK: true}); err != nil {
+			if err := s.AppendRPC(LogRecord{Action: protocol.MethodGoto, Body: gotoBody, Target: "target-aa11", OK: true}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -210,7 +210,7 @@ func TestStatePermissionsHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer s2.Close()
-		if _, ok := s2.ReplayManagedTabActivity()["aa11"]; !ok {
+		if _, ok := s2.ReplayManagedTabActivity()["target-aa11"]; !ok {
 			t.Errorf("managed tab lost across rotation")
 		}
 		assertPerm(t, filepath.Join(dir, rpcLogFile), 0o600)
@@ -255,7 +255,7 @@ func TestInMemoryModeCreatesNoFiles(t *testing.T) {
 		if !s.InMemory() {
 			t.Errorf("StateDir %q: want in-memory store", stateDir)
 		}
-		if err := s.AppendRPC(LogRecord{Action: protocol.MethodTabNew, Body: permTabNewBody, Tab: "aa11", OK: true}); err != nil {
+		if err := s.AppendRPC(LogRecord{Action: protocol.MethodTabNew, Body: permTabNewBody, OK: true}); err != nil {
 			t.Fatal(err)
 		}
 		_ = s.Close()

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/chromedp/cdproto/target"
 )
 
 type auditMeta struct {
@@ -11,8 +13,11 @@ type auditMeta struct {
 	body     json.RawMessage
 	senderIP string
 	at       time.Time
-	// target is the full CDP target id the request acted on, when resolved.
-	target string
+
+	// target is the complete CDP target id the request was resolved to (see
+	// pinTarget). Empty until resolution succeeds. Only the handler goroutine
+	// of the request touches it.
+	target target.ID
 }
 
 type auditCtxKey struct{}

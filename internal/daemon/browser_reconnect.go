@@ -48,9 +48,15 @@ func isCDPSessionLost(err error) bool {
 
 // connectBrowserLocked attaches a new chromedp session. Caller must hold s.tabMu.
 func (s *Server) connectBrowserLocked(ctx context.Context) error {
-	sess, err := browser.Connect(context.WithoutCancel(ctx), s.cfg.DebuggerURL)
+	// The registry observes the connection reader from the first message on:
+	// lifecycle events are stamped, and destroyed notifications recorded, in
+	// connection order before any reply that names targets can be applied.
+	sess, err := browser.Connect(context.WithoutCancel(ctx), s.cfg.DebuggerURL, browser.WithTargetObserver(s.tabs))
 	if err != nil {
 		return err
+	}
+	if derr := sess.TargetDiscoveryErr(); derr != nil && s.logger != nil {
+		s.logger.Warn("browser target discovery not enabled: tabs closed in the browser are only noticed by the next target enumeration", "err", derr)
 	}
 	s.tabLive = sess
 	s.sessDone = sess.Close
@@ -62,21 +68,15 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
 	listCtx, cancel := context.WithTimeout(ctx, timeout.Operation)
-	// runTargetSync is already registering lifecycle events: take the token
+	// runTargetSync is already registering lifecycle events: open the window
 	// before the request so this snapshot cannot remove what they register.
-	// The managed retirement candidates are fixed at the same point, so the
-	// reply can only retire tabs that were already persisted when it was asked.
-	candidates := s.beginManagedReconcile()
-	tok := s.beginTargetEnumeration()
+	w := s.tabs.OpenWindow()
 	targets, terr := sess.PageTargetsContext(listCtx)
 	cancel()
-	snaps := s.syncInitialTargets(sess, tok, targets, terr)
-	// Perform the initial managed-tab recovery. If target enumeration failed,
-	// runTargetSync runs this reconciliation after its successful retry; it must
-	// not run on a failed enumeration, which would retire still-live tabs.
-	if terr == nil {
-		s.reconcileIdleFromLog(candidates, snaps)
-	}
+	// A successful reply also performs the initial managed-tab recovery. If the
+	// enumeration failed, runTargetSync retries it; recovery must not run on a
+	// failed enumeration, which would retire still-live tabs.
+	s.syncInitialTargets(sess, w, targets, terr)
 	go s.runCDPWatchdog(ctx, sess)
 	if s.logger != nil {
 		s.logger.Info("browser CDP session connected", "debugger", s.cfg.DebuggerURL)
@@ -84,24 +84,24 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	return nil
 }
 
-type targetDirtyMarker interface {
-	MarkTargetDirty()
-}
-
-func (s *Server) syncInitialTargets(marker targetDirtyMarker, tok state.EnumerationToken, targets []*target.Info, err error) []state.TabSnapshot {
+// syncInitialTargets applies the reply to the enumeration sent right after the
+// browser connected. conn is the session it was sent on.
+func (s *Server) syncInitialTargets(conn targetDirtyMarker, w *state.Window, targets []*target.Info, err error) []state.TabSnapshot {
 	if err == nil {
-		return s.syncTabsFromTargets(tok, targets)
+		return s.applyEnumeration(conn, w, targets)
 	}
+	s.tabs.Abandon(w)
 	if s.logger != nil {
 		s.logger.Warn("list targets after browser connect", "err", err)
 	}
 	// The session is connected, so treat an initial enumeration failure as
 	// transient and let runTargetSync retry it. Without this, persisted managed
 	// tabs would never re-enter idle tracking unless another target event arrived.
-	marker.MarkTargetDirty()
+	conn.MarkTargetDirty()
 	return nil
 }
 
+// runTargetSync is the only consumer of the session's lifecycle event queue.
 func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 	if sess == nil {
 		return
@@ -113,39 +113,63 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		case <-ctx.Done():
 			return
 		case ev := <-sess.TargetEvents():
-			if ev.Destroyed != "" {
-				s.removeTargetState(ev.Destroyed)
-			}
-			if info := ev.Info; info != nil {
-				if info.Type == "page" || info.Type == "tab" {
-					s.tabs.RegisterPageTarget(info.TargetID)
-				} else {
-					s.removeTargetState(info.TargetID)
+			s.applyTargetEvent(sess, ev)
+			// Handle what is already queued before looking at the dirty flag,
+			// so one resync answers a whole burst of events.
+		drain:
+			for range cap(sess.TargetEvents()) {
+				select {
+				case ev := <-sess.TargetEvents():
+					s.applyTargetEvent(sess, ev)
+				default:
+					break drain
 				}
 			}
 		case <-retry.C:
 		}
 		if sess.ConsumeTargetDirty() {
 			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
-			// Token and managed retirement candidates before the request: RPCs
-			// (tab_new) keep registering and persisting tabs while this resync is
-			// in flight and until its reply has been reconciled.
-			candidates := s.beginManagedReconcile()
-			tok := s.beginTargetEnumeration()
+			// Window before the request: RPCs keep registering and removing tabs
+			// while this resync is in flight.
+			w := s.tabs.OpenWindow()
 			infos, err := sess.PageTargetsContext(probe)
 			cancel()
 			if err == nil {
-				snaps := s.syncTabsFromTargets(tok, infos)
-				// Reconciliation is idempotent for tabs already tracked in memory and
-				// is required when the startup target enumeration failed.
-				s.reconcileIdleFromLog(candidates, snaps)
+				// Also settles managed tabs persisted by a previous process when
+				// the startup enumeration failed.
+				s.applyEnumeration(sess, w, infos)
 			} else {
+				s.tabs.Abandon(w)
 				sess.MarkTargetDirty()
 				s.triggerBrowserProbe()
 				if s.logger != nil {
 					s.logger.Warn("resync targets after lifecycle queue overflow", "err", err)
 				}
 			}
+		}
+	}
+}
+
+// applyTargetEvent applies one queued lifecycle event. "Gone" is always
+// applied: it stays true however late it is handled (and the registry already
+// stopped resolving the target when the notification was read). "Exists" is
+// evidence about the instant the event was read (TabRegistry.RegisterEvent):
+// it is applied with that instant, and not at all when something newer was
+// applied meanwhile, so an event that waited in the queue across a tab_close,
+// a resync or the read of the target's own destroyed notification cannot bring
+// a closed tab back, and a target registered meanwhile by something later
+// keeps the earlier instant. An event that did not settle the matter asks for
+// a fresh enumeration instead, which registers the target if it is really
+// there and cleans it up if the event proved it gone.
+func (s *Server) applyTargetEvent(conn any, ev browser.TargetEvent) {
+	if ev.Destroyed != "" {
+		s.dropTarget(conn, ev.Destroyed, func(id target.ID) bool { return s.tabs.RemoveDestroyedTarget(ev.Stamp, id) })
+	}
+	if info := ev.Info; info != nil && info.TargetID != "" {
+		if info.Type != "page" && info.Type != "tab" {
+			s.removeEventTarget(conn, info.TargetID)
+		} else if !s.tabs.RegisterEvent(ev.Stamp, info.TargetID) {
+			requestEnumeration(conn)
 		}
 	}
 }

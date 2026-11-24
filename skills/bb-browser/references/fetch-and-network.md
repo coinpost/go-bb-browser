@@ -23,7 +23,7 @@ bb-browser fetch URL --json                               # 原始 JSON-RPC
   "jsonrpc": "2.0",
   "method": "fetch",
   "params": {
-    "tab": "<短 id>",
+    "tab": "<完整 tab id>",
     "url": "https://... 或 /path",
     "method": "GET",
     "headers": "{\"Authorization\":\"...\"}",
