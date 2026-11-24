@@ -391,3 +391,15 @@ notes:
   - `test -z "$(gofmt -l .)"`、`go vet ./...`、`go vet -tags realchrome ./...`、`git diff --check origin/main` 均通过；受保护路径及 `internal/daemon/tab_idle_test.go` 均未变更。
   - `go test -race -count=1 ./...` 全量通过（11 个测试包全部通过，`pkg/protocol` 无测试文件）。
   - 定向 10 轮 `-race` 压测通过：`TestConcurrentObservationQueryWaitsForWriterRetirementBeforeClearingBucket`、`TestSuspendedLiveTabObservationVerifiesInsteadOfUnknownTabID` 及既有 daemon/browser 生命周期测试集全部 10/10 通过。
+
+
+## factory · review · 2026-11-25 00:05
+head: 9eeb0d1123b34c04663252013bbe7642ceb0b039
+verdict: pass
+notes:
+- Codex 独立只读复审 origin/main@0d7c792...HEAD，重点核验 04f8af7..9eeb0d1 与 FT28 合并精简后的 INV-6。遵守 owner 22:23/22:53 验收边界，未发现新的范围内 P0/P1；不把完整 ID 人为复用、明确另立任务的底层 P2 或 main 既有异步瞬态当作阻塞。
+- 上轮两项产品 P1 均已修复：提前清桶的旧实现 5/5 失败；挂起活页三域旧实现各 5/5 误报 unknown。相同永久回归在 HEAD 各 20/20 通过。独立真实 Session+本地回环 CDP 桩调度各 15/15 通过：在途 Record 与 detach 未完成时保留原桶且不提前应答，释放后三域和桶归零、迟到写入拒绝；挂起活页恢复沿用原会话/桶/事件，核验失败或耗尽返回 -32000，确认消失返回 -32602 并清桶。
+- Codex 执行配置命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过，11 个测试包、1 个无测试包；74 个生命周期测试 -race -count=15 与另 8 个 writer/FT28 衔接测试 -race -count=10 全通过。Go 1.27.4，隔离 HOME/XDG/TMPDIR/缓存，离线锁定依赖，无安装；私有 GOTMPDIR 无继承 ACL，原权限夹具通过。manager 核对诊断源码/报告与全量日志、diff --check、干净工作树及远端 head 未变，未另行重复全量测试。
+- 证据保留本机 review/evidence/FT7-9eeb0d1/：REPORT.md、reproduce.zsh、overlay/independent_test.go、parent-regressions.log、head-regressions.log、parent-independent.log、independent.log、configured.log、lifecycle-race.log、ft28-and-writer.log。overlay 为只读审查诊断，永久回归已在任务分支。
+- 未实测真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、运行中的 systemd 或 Go 1.26；未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
+- review/ → ready/，round=6 不变；本次仅复审，无代码修改、未合并 main、未发布，等待 owner ship。
