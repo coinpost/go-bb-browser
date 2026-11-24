@@ -403,3 +403,16 @@ notes:
 - 证据保留本机 review/evidence/FT7-9eeb0d1/：REPORT.md、reproduce.zsh、overlay/independent_test.go、parent-regressions.log、head-regressions.log、parent-independent.log、independent.log、configured.log、lifecycle-race.log、ft28-and-writer.log。overlay 为只读审查诊断，永久回归已在任务分支。
 - 未实测真实非 headless Chrome/CDP、真实 loadingFailed 流、Docker、运行中的 systemd 或 Go 1.26；未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
 - review/ → ready/，round=6 不变；本次仅复审，无代码修改、未合并 main、未发布，等待 owner ship。
+
+
+## factory · review · 2026-11-24 23:16
+head: 9eeb0d1123b34c04663252013bbe7642ceb0b039
+verdict: pass
+notes:
+- 本次独立 Codex 复审同一 head，遵守 owner 22:23/22:53 边界，未发现范围内 P0/P1。提交审查期间远端已有另一份 pass 并完成 review/ → ready/；重读后保留 ready/，不重复移动、不覆盖先前审查。
+- 上轮两项产品 P1 的永久回归 HEAD 各 10/10 通过，换回 04f8af7 查询实现各 5/5 失败；50 个生命周期/存储/权限相关测试各 -race -count=10 通过。Suspended 核验失败保留原桶/会话/事件的相邻调度 5/5 通过。
+- [P2] internal/daemon/rpc_observation.go:179: 独立 Session.Close 与首次已激活查询交错时，target 仍为活页，失败查询在 writer 的 RecordNetwork 完成前回滚首次桶。HEAD/04f8af7 各 5/5；可在 EnsureObservation 的 closed 分支锁外等待该 writer 退役后再返回错误。Close 本身仍等待 writer，最终无桶，无 race/死锁/迟到重建；正常 HTTP 停机先排空 handler。用户销毁、枚举确认移除、Close 与确认销毁重叠三组对照各 5/5 均先退役后清桶，故本项非阻塞，不将单独 Session.Close 诊断冒称 target 释放失败。
+- Codex 配置 gofmt/vet/go test -race ./... 全量通过；manager 独立重跑完整配置同样通过（11 个测试包、1 个无测试包），并独立重跑相邻诊断，结果一致。私有 GOTMPDIR 去除继承 ACL，未修改 owner 明确留在 main 处理的权限夹具。Go 1.27.4，隔离 HOME/XDG/工具缓存，离线 pin 模块；无安装，工作树干净，保护路径无变化。
+- 本次证据补充到本机 review/evidence/FT7-9eeb0d1/REVIEW.md 与 9eeb0d1.f2cSJe/，含 manager-configured.log、manager-adjacent.log、原实现对照及 overlay 源码。保留的 run.sh 使用本次临时 HOME；清理后复跑会从本地缓存重新预填，overlay 路径需按新证据位置重建。诊断非永久回归。
+- 未验证真实非 headless Chrome/CDP、loadingFailed、Docker、运行中的 systemd、Go 1.26；未启动 Chrome 或操作用户窗口。无链接 issue/PR，不发 GitHub 评论。无已知 TMPDIR 外写入。
+- 联系通知失败：指定 chat_id 与 chat 类型 contact_id 不匹配，通道拒绝，未擅自改路由。仅 review，ready/ 保持，未合并 main、未发布。
