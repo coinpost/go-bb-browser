@@ -438,3 +438,15 @@ ship：在隔离 worktree 对 origin/main 执行 git merge --no-ff --no-edit，�
 自然触发的发布：https://github.com/coinpost/go-bb-browser/actions/runs/45423134159 （workflow release，event=push，head_branch=v0.1.0，head_sha=e8ec86aa）于 2026-11-24 23:14:12 Asia/Shanghai 开始，23:18:01 完成，conclusion=failure。Checkout / Set up Go / QEMU / Buildx / Login to GHCR 成功；Run GoReleaser（goreleaser 2.20.3，args: release --clean）失败，exit code 1。日志：二进制与归档已构建（linux/darwin/windows 的 amd64 与 arm64），随后构建并推送镜像时失败：「docker images: failed to publish artifacts: failed to push ghcr.io/yiplee/go-bb-browser:0.1.0-arm64: exit status 1: error from registry: permission_denied: The requested installation does not exist.」未创建 GitHub Release（releases 仍为 0）。未修复、未改工作流或 goreleaser 配置、未重试发布、未手建 Release。tag v0.1.0 与 main 上的 merge 均保留。
 
 因新版本发布未核实成功，按授权不将 FT4 从 backlog 移入 new；FT2/FT3/FT6 仍 backlog，FT5 仍 stop。ready/ → done/，round=6 不变，标题与旧正文未改。无链接 issue/PR 可关闭。任务分支未删除。
+
+## factory · 2026-11-24 23:36
+本次完成 t24u 授权中此前未完成的发新版本：未重做 FT7 merge，未移动或覆盖已有 tag v0.1.0（仍指向 merge e8ec86aaa0c6333c8cac35c715ed48ed431a0879；其自然发布 https://github.com/coinpost/go-bb-browser/actions/runs/45423134159 仍为 failure，未创建 GitHub Release）。
+
+在已核验包含 FT7 merge 以及随后两项修正（.goreleaser.yaml 仅 linux/amd64 且无 Docker 镜像、模块路径 github.com/coinpost/go-bb-browser）的 origin/main@fb2c535b1273627cb7082bc59a9bb24c9e04b8ff 上，按最高语义版本 v0.1.0 加 patch，创建并普通推送注释 tag v0.1.1（tag 对象 ff189193ea8b3ddd9126c7af83c92f10862d9f86），说明为「v0.1.1: FT7 target释放与观测writer退役同步, linux/amd64 binaries only without Docker images, module github.com/coinpost/go-bb-browser」。未改工作流，未手建 Release，未部署到其他环境。
+
+自然触发：https://github.com/coinpost/go-bb-browser/actions/runs/45426997200 （workflow release，event=push，head_branch=v0.1.1，head_sha=fb2c535）于 2026-11-24 23:34:02 Asia/Shanghai 开始，23:35:08 完成，conclusion=success。残留的 Set up QEMU / Docker Buildx / Login to GHCR 步骤成功但未构建或推送镜像（日志无 building docker image / pushing image / ghcr.io/yiplee）。Run GoReleaser 仅构建 linux_amd64_v1 的 bb-browser 与 bb-daemon，归档并上传 Release 资产后成功（约 37s）。
+
+GitHub Release：https://github.com/coinpost/go-bb-browser/releases/tag/v0.1.1 （id 456965820，name v0.1.1，draft=false，prerelease=false，由 github-actions[bot] 发布于 23:34:57 Asia/Shanghai，target_commitish=main）。资产：
+- go-bb-browser_0.1.1_linux_amd64.tar.gz（7,625,111 字节，sha256:bec8edbecec5c9ad4324fecc312a4eb1c9dc006b3c8cbf1fbafa41d44b77ab81）
+- checksums.txt（105 字节，内容与上述 sha256 一致）
+无其他 OS/架构归档，无镜像资产。round=6 不变，标题与旧正文（含 v0.1.0 失败记录）未改。
