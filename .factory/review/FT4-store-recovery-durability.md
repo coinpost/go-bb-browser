@@ -1,6 +1,6 @@
 ---
 branch: factory/FT4-store-recovery-durability
-round: 1
+round: 2
 ---
 # 日志尾行、轮转恢复与安全可写探测
 
@@ -98,3 +98,26 @@ Codex 只读审查 origin/main...HEAD（base fb2c535），无代码提交，工�
 同一审查的第二条 P1（internal/store/store.go:619：活动日志被删除后再次轮转，先将可恢复 .1 顺移到 .2，活动路径缺失被当作可继续；若随后发布 rename 失败，启动只查 .1 并成功新建空日志，恢复集合丢失）仍为交付阻塞，须继续解决。其他已有问题（该审查 notes 中的 P2/P3，以及此前收窄范围内的轮转原子性、失败恢复/吞错、可写探测误删）仍按原记录处理。
 
 不改先前 review 正文与 verdict: fix；本项仍留在 new/，本 run 不启动 build/review/ship，不改代码。
+
+
+## factory · plan · 2026-11-25 00:28
+第 2 轮补充（保留原计划）：
+### Behaviour
+按 owner 单进程独占状态目录的前提处理，跨进程 P1 不增锁。活动路径缺失或不再指向打开的日志时，在写快照和备份顺移前拒绝轮转，保留 .1 和旧句柄，返回 ErrRotation；恢复同一活动文件后允许重试。发布后的目录同步失败独立返回 ErrDirSync，接管已发布句柄，后续追加不论大小以及 Close 重试目录同步。启动拒绝不可用的已有 .1，不默默新建空日志。告警区分记录已写和追加失败。
+### Scope
+修复仍有效的 P1 #2，处理目录 fsync、不可用 .1 和生命周期告警 notes；不恢复 FT21，不改完整 target ID，不处理多进程争用，不为 Windows 引入推测性兼容层。
+### Decisions
+缺失活动路径选择明确拒绝，而非猜测 .2/.3 或自动修复；普通追加不增加 fsync。Windows 轮转兼容问题以明确不支持和未原生验证记录，供 review 判断，不宣称修复。
+### Checking
+增加轮转后删除 active、注入发布 EIO 时备份不动且重启恢复、路径恢复后重试、路径替换、发布后目录同步失败与低阈值重试、不可用 .1 和告警永久回归；运行完整配置测试与重复 race 测试。
+
+## factory · 2026-11-25 00:28
+第 2 轮构建完成，new/ → review/。branch: factory/FT4-store-recovery-durability；head: 312af9c46d2d9a78a461373d224b2db6b658d9f8。
+
+活动路径预检查在任何快照/备份操作前拒绝缺失或替换；不再把缺失活动路径的 link 失败视作成功。发布后的目录同步失败采用 ErrDirSync 与待同步标记，后续追加及 Close 重试；已有但不可用 .1 明确拒绝；RecordWritten 帮助生命周期/audit 告警区分写入和维护失败。README、AGENTS 与 systemd 文档同步单进程边界、缺失路径处理与 Windows 限制。按 owner 不加跨进程锁。
+
+测试：Claude Code 完整配置命令通过，store race count=10、生命周期告警 race count=5、realchrome-tag vet 通过；经理独立复跑 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全部通过（隔离 HOME/XDG/GOCACHE，离线使用既有只读模块下载缓存）。无新增安装，使用已有 Go 1.27.4。新增回归未在旧提交上跑 red。起点 fb2c535；经理检查仅有本项两次提交，never 路径未变，main 已包含，无需合并。
+
+限制/审查重点：路径缺失期间追加仍进旧的无名句柄，这些新增记录可能随关闭丢失，重启只恢复 .1；预检查之后、link 之前的外部删除仍存在窗口，可能已经顺移备份。发布后 fsync 错误、再追加、再轮转组合与 RecordWritten 的准确语义请复查。Windows 轮转未修复，文档改为不支持，未原生验证。未做实际断电/kill -9、Linux、无硬链接文件系统、真实 Chrome 验收；无 UI 改动。未 ship、未发 tag、未发布、未启用任务、未移动后续 backlog。
+
+执行记录：coder 初期未隔离的 build/test 使用默认共享 Go build cache 与 Go telemetry，后续报告测试使用隔离 HOME；模块缓存使用既有内容。除规定刷新 build 锁外无新增可见 /tmp 路径、无其他报告的外部临时文件。本轮通知发送成功。
