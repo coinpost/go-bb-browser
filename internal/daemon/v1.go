@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/browser"
-	"github.com/yiplee/go-bb-browser/internal/state"
-	"github.com/yiplee/go-bb-browser/internal/store"
-	"github.com/yiplee/go-bb-browser/internal/timeout"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/internal/state"
+	"github.com/coinpost/go-bb-browser/internal/store"
+	"github.com/coinpost/go-bb-browser/internal/timeout"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 func (s *Server) handleV1(w http.ResponseWriter, r *http.Request) {

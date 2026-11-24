@@ -3,7 +3,7 @@ package daemonclient
 import (
 	"context"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 func (p *Pool) TabList(ctx context.Context, params protocol.TabListParams) (protocol.TabListResult, error) {

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/browser"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // These narrow capability interfaces keep handlers independent from the concrete

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yiplee/go-bb-browser/internal/browser"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // More barrier regressions with a real browser.Session, the daemon and the

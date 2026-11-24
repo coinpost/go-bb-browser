@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/browser"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // Concurrent observation query vs user close: when an already-attached query

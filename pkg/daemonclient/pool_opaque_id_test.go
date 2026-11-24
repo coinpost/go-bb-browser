@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // strictDaemon answers like bb-daemon for tab identity: it knows complete tab

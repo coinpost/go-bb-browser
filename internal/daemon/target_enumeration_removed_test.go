@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // Regressions for the mirror image of target_enumeration_test.go: a full

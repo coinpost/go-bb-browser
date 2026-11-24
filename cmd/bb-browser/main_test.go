@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 func TestCLIAPIToken(t *testing.T) {

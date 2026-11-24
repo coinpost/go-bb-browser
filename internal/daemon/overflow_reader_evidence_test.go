@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yiplee/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/internal/browser"
 )
 
 // ovfConnect attaches a real browser.Session to the stub the way

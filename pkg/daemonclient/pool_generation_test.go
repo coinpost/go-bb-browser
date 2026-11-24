@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // observeStep scripts one tab_list / tab_focus reply. With a gate the reply is

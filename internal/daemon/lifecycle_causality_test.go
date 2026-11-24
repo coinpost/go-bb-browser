@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/store"
+	"github.com/coinpost/go-bb-browser/internal/store"
 )
 
 // Regressions for the causal ordering of lifecycle evidence (review of round

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // tabNewRecord is the lifecycle record that registers tab as managed under the

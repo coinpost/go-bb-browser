@@ -4,15 +4,15 @@
 
 ## 适用场景
 
-- 需要类型安全地调用守护进程时，使用本包的封装方法，并导入 **`github.com/yiplee/go-bb-browser/pkg/protocol`** 获取 `Params` / `Result` 与方法名常量；该路径**可被模块外项目正常 `import`**。
+- 需要类型安全地调用守护进程时，使用本包的封装方法，并导入 **`github.com/coinpost/go-bb-browser/pkg/protocol`** 获取 `Params` / `Result` 与方法名常量；该路径**可被模块外项目正常 `import`**。
 - 若不想依赖 `protocol` 类型，仍可使用 `Call`，自行定义与 JSON 响应形状一致的 `result` 结构体，并把 `params` 设为 `map[string]any` 或可 `json.Marshal` 的任意值。
 
 ## 安装与导入
 
 ```go
 import (
-    "github.com/yiplee/go-bb-browser/pkg/daemonclient"
-    "github.com/yiplee/go-bb-browser/pkg/protocol"
+    "github.com/coinpost/go-bb-browser/pkg/daemonclient"
+    "github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 ```
 

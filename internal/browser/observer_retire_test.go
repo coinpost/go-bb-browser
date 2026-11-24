@@ -15,7 +15,7 @@ import (
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
-	"github.com/yiplee/go-bb-browser/internal/state"
+	"github.com/coinpost/go-bb-browser/internal/state"
 )
 
 // barrierRecorder forwards to a real observation store, optionally holding

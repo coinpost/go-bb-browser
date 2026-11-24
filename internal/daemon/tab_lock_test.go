@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // registerTestTab registers tid and returns the tab id clients address it by:

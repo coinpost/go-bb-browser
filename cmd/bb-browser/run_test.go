@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // runDaemon is a fake bb-daemon that records what `bb-browser run` sends.

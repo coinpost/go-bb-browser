@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // screenshotDaemon is a fake daemon answering screenshot with the given result

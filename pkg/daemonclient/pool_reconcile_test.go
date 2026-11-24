@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // scriptedDaemon is a JSON-RPC fake whose replies come from a per-test

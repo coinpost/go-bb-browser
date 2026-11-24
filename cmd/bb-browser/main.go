@@ -17,10 +17,10 @@ import (
 	"time"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/coinpost/go-bb-browser/internal/site"
+	"github.com/coinpost/go-bb-browser/internal/timeout"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 	"github.com/spf13/cobra"
-	"github.com/yiplee/go-bb-browser/internal/site"
-	"github.com/yiplee/go-bb-browser/internal/timeout"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
 )
 
 var (

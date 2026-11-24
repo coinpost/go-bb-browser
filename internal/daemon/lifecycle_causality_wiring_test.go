@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/browser"
-	"github.com/yiplee/go-bb-browser/internal/state"
+	"github.com/coinpost/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/internal/state"
 )
 
 // Wiring used by lifecycle_causality_test.go. It is kept apart from the

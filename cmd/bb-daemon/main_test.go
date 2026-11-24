@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yiplee/go-bb-browser/internal/daemon"
+	"github.com/coinpost/go-bb-browser/internal/daemon"
 )
 
 func TestAPITokenFlagsAndSources(t *testing.T) {

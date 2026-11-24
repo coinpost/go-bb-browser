@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yiplee/go-bb-browser/internal/timeout"
+	"github.com/coinpost/go-bb-browser/internal/timeout"
 )
 
 // deadlineTransport stands in for bb-daemon and records the context deadline of

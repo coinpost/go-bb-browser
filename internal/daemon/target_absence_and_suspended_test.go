@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/state"
-	"github.com/yiplee/go-bb-browser/pkg/daemonclient"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/internal/state"
+	"github.com/coinpost/go-bb-browser/pkg/daemonclient"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // FT28 round-9 regressions:

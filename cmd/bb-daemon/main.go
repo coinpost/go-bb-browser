@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yiplee/go-bb-browser/internal/daemon"
+	"github.com/coinpost/go-bb-browser/internal/daemon"
 )
 
 var (

@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/store"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/internal/store"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // Two complete CDP target ids sharing a suffix ("1234"): one is created by the

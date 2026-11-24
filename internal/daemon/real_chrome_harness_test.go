@@ -42,10 +42,10 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
+	"github.com/coinpost/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/internal/store"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	"github.com/yiplee/go-bb-browser/internal/browser"
-	"github.com/yiplee/go-bb-browser/internal/store"
 )
 
 const rcWait = 15 * time.Second

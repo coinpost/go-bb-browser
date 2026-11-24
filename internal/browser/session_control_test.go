@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/state"
+	"github.com/coinpost/go-bb-browser/internal/state"
 )
 
 type targetsExecutor struct {

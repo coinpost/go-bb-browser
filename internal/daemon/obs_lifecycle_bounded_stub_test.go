@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/state"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/internal/state"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // Regressions for the bounded contract of target release: within one daemon a

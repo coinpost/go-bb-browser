@@ -1,4 +1,4 @@
-module github.com/yiplee/go-bb-browser
+module github.com/coinpost/go-bb-browser
 
 go 1.26
 

@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/pkg/daemonclient"
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/daemonclient"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // These tests drive real daemon servers over HTTP through daemonclient, so the

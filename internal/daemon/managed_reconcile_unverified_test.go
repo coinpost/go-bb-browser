@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/chromedp/cdproto/target"
-	"github.com/yiplee/go-bb-browser/internal/browser"
-	"github.com/yiplee/go-bb-browser/internal/store"
+	"github.com/coinpost/go-bb-browser/internal/browser"
+	"github.com/coinpost/go-bb-browser/internal/store"
 )
 
 // Regressions for the managed recovery of an enumeration reply the registry

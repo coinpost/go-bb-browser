@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yiplee/go-bb-browser/pkg/protocol"
+	"github.com/coinpost/go-bb-browser/pkg/protocol"
 )
 
 // Regressions for the commit step of tab_list / tab_focus: everything between
