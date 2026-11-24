@@ -454,3 +454,19 @@ Codex独立只读审查origin/main@2be49f8...HEAD全69文件，重点第9轮23�
 审阅构建方100份Chrome轨迹：95次daemon连接各一次root discovery，新关闭调度5/5无中间枚举，P3控制eval前采样且eval不新增枚举。本次未独立启动Chrome，不把轨迹检查写成独立真实浏览器验收。两种零页面各5次SKIP；新发现真实Chrome调度、自然频率、其他宿主、Go1.26、部署、跨会话唯一性未验。
 证据保留本机review/evidence/FT28-0be4d9b/：REVIEW.md、reproduce.md、sources/、configured.log、diagnostic-*.log、counts.txt、head.log、identity.log、chrome-inspection.log、manager-diagnostics.log。诊断尚非永久回归。工作树/索引干净，无代码修改、提交、安装或依赖变更。Go1.27.4，隔离HOME/TMPDIR/缓存、固定模块、GOPROXY=off/GOSUMDB=off，仅回环stub；未操作用户窗口、不扩张FT7。无链接issue/PR，不发GitHub评论。
 round=9，超过max_rounds=3，owner仅授权本轮build；发现P1留在review/等owner决定，不自动追加修复。如需继续请追加说明并移至new/。未合并main、未发布、未改定时任务。
+
+
+## yiplee · 2026-11-24 11:10
+已在任务分支 `factory/FT28-daemon-full-target-id` 直接完成第 9 轮收敛修复与冗余清理，提交 `d408b68c5133cc6c17048940f9518e3428eb2cdd`（`d408b68`，已推送 `origin`），任务继续留在 `review/`：
+
+- **修复内容（对应第 9 轮 review 的 P1 与两条 P2）**：
+  - P1（`internal/browser/errors.go`、`internal/daemon/tab_idle.go`、`internal/daemon/v1.go`、`internal/daemon/rpc_observation.go`）：新增 `browser.ConfirmedTargetAbsent`，仅对 `Target.attachToTarget` / `Target.attachObserver` / `Target.closeTarget` 返回的明确目标不存在错误（排除仅 session 失效与页面 JS 异常）调用 `removeTargetState`，回流写入在途窗口 `removed` 并清理状态，约束迟到 `tab_new`；普通 `ErrorTargetGone`（如 `No session with given id`）仅触发重枚举核验。
+  - P2-1（`internal/state/tab_registry.go`、`internal/daemon/v1.go`）：新增 `TabRegistry.Suspended` 与 `resolveEnumeratedTab`，当 `resolveTab` 或 `tab_select` 遇到因交叠冲突被挂起（`suspended`）的存活目标时，在重试上限内新开窗口核验，仍无法确认则返回可重试服务端错误（`-32000 failed to list targets`），不再误报 `unknown tab id`。
+  - P2-2（`internal/state/tab_registry.go`、`internal/daemon/tab_idle.go`、`internal/daemon/v1.go`）：新增 `ApplyEnumerationChecked` 与 `enumerateAuthoritativeTabs`，`tab_list` / `tab_focus` 当浏览器列表包含被挂起成员时先重开窗口核验，重试仍被挂起或失败则返回服务端错误，避免丢弃存活成员导致 `daemonclient.Pool` 误删绑定；真实缺席仍正常返回剩余列表并退役。
+- **冗余代码清理**：移除冗余无操作包装 `requestTab`（16 处调用改为直接使用 `p.Tab`），合并 `handleTabSelect` 与 `resolveTab` 的枚举解析与错误映射（`resolveEnumeratedTab` + `rpcResolveErr`），以及让 `isStaleTargetErr` 复用 `isTargetGoneMessage` 去重错误关键字匹配。
+- **永久回归与验证**：新增 `TestConfirmedTargetAbsent` 与 `internal/daemon/target_absence_and_suspended_test.go`（`TestAttachTargetAbsentConstrainsInFlightCreate`、`TestSuspendedLiveTabVerifiesInsteadOfUnknownTabID`、`TestTabListDoesNotOmitSuspendedLiveMemberForPool`）。已通过 `test -z "$(gofmt -l .)"`、`go vet ./...`、`go vet -tags realchrome ./...`、`go test -race -count=20 ./internal/browser -run TestConfirmedTargetAbsent`、`go test -race -count=20 ./internal/daemon -run 'TestAttachTargetAbsent|TestSuspendedLiveTab|TestTabListDoesNotOmit'` 及全量 `go test -race -count=1 ./...`（11 个测试包通过，`pkg/protocol` 无测试文件）。
+
+### 验收边界（owner 拍板）
+1. **FT28 完成标准**：全链路仅使用完整 CDP target ID 精确寻址、移除短 ID 兼容、永不 fallback / 不串台到其他 tab、正常生命周期下关闭/销毁即失效（含生产 root 级 `Target.setDiscoverTargets`），以及本次修复的第 9 轮 P1 与两条 P2 无回归。
+2. **明确接受异步 CDP 模型下的最终一致边界**：在人为延迟/屏障扣留销毁事件或单条回复的受控时序下，若死目标在事件/下一次枚举到达前短暂滞留本地缓存（如纯内存 `*_clear` 短暂返回成功），只要**不发生跨 tab 串台、不误关存活 tab、不复用完整 ID、且事件或枚举到达后可自动收敛**，不再作为 FT28 的 P1 阻塞项（尤其是 `main` 既有问题）；如确需继续深化异步边界，另建独立任务处理。
+3. **后续 review 约束**：本任务保持留在 `review/`；下轮 review 聚焦核验本次修复（`d408b68`）、冗余清理及回归测试，不再以新构造的既有异步瞬态屏障时序新增 P1。
