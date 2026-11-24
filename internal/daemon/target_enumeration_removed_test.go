@@ -22,7 +22,8 @@ var obsClearMethods = []string{
 
 func enumPushAllObs(t *testing.T, srv *Server, tid target.ID) {
 	t.Helper()
-	for _, push := range []func(target.ID, uint64, json.RawMessage){
+	srv.obsStore.RegisterTarget(tid)
+	for _, push := range []func(target.ID, uint64, json.RawMessage) bool{
 		srv.obsStore.PushNetwork, srv.obsStore.PushConsole, srv.obsStore.PushError,
 	} {
 		seq, err := srv.store.NextSeq()

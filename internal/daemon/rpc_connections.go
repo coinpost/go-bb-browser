@@ -45,6 +45,14 @@ type observationStatsConn interface {
 
 var _ observationStatsConn = (*browser.Session)(nil)
 
+// targetForgetConn is optional. ForgetTarget must not return before the
+// target's observation writer has stopped recording.
+type targetForgetConn interface {
+	ForgetTarget(target.ID)
+}
+
+var _ targetForgetConn = (*browser.Session)(nil)
+
 type pageTargetsContextConn interface {
 	PageTargetsContext(context.Context) ([]*target.Info, error)
 }

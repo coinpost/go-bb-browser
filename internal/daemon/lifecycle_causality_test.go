@@ -515,7 +515,7 @@ func TestReverseSnapshotConflictRecoversWithoutRPC(t *testing.T) {
 // the daemon is told nothing, and a tab the user closes stays registered,
 // idle-tracked and persisted until some RPC happens to enumerate.
 //
-// connectBrowserLocked is the production connect path; the stub only sends
+// connectBrowser is the production connect path; the stub only sends
 // lifecycle notifications to a client that asked for them at the root level.
 func TestProductionConnectionLearnsOfClosedTabWithoutRPC(t *testing.T) {
 	dir := t.TempDir()
@@ -525,9 +525,7 @@ func TestProductionConnectionLearnsOfClosedTabWithoutRPC(t *testing.T) {
 	s.cfg.DebuggerURL = st.url()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	s.tabMu.Lock()
-	err := s.connectBrowserLocked(ctx)
-	s.tabMu.Unlock()
+	err := s.connectBrowser(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

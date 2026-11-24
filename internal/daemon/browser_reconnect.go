@@ -46,8 +46,13 @@ func isCDPSessionLost(err error) bool {
 	return browser.ErrorKindOf(err) == browser.ErrorTransport
 }
 
-// connectBrowserLocked attaches a new chromedp session. Caller must hold s.tabMu.
-func (s *Server) connectBrowserLocked(ctx context.Context) error {
+// connectBrowser attaches a new chromedp session, publishes it and aligns the
+// daemon with the browser's targets. The caller must not hold s.tabMu: the
+// lock covers only publishing the connection. The first enumeration can release
+// targets the lifecycle loop registered before it, and a release looks up the
+// published session (tabConn) to retire the observer writer before the buffers
+// are cleared, so it cannot run under the write lock.
+func (s *Server) connectBrowser(ctx context.Context) error {
 	// The registry observes the connection reader from the first message on:
 	// lifecycle events are stamped, and destroyed notifications recorded, in
 	// connection order before any reply that names targets can be applied.
@@ -58,11 +63,13 @@ func (s *Server) connectBrowserLocked(ctx context.Context) error {
 	if derr := sess.TargetDiscoveryErr(); derr != nil && s.logger != nil {
 		s.logger.Warn("browser target discovery not enabled: tabs closed in the browser are only noticed by the next target enumeration", "err", derr)
 	}
+	s.tabMu.Lock()
 	s.tabLive = sess
 	s.sessDone = sess.Close
 	s.browserState = sessionReady
 	s.browserFailures = 0
 	s.browserLastProbe = time.Now()
+	s.tabMu.Unlock()
 	s.watchCDPSession(sess)
 	go s.runTargetSync(ctx, sess)
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung

@@ -204,6 +204,8 @@ func enumPushNetwork(t *testing.T, srv *Server, tid target.ID) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Buffers exist only for registered targets, as after a first query.
+	srv.obsStore.RegisterTarget(tid)
 	srv.obsStore.PushNetwork(tid, seq, json.RawMessage(`{"url":"https://example.test/"}`))
 }
 
@@ -760,9 +762,7 @@ func TestStartupEnumerationKeepsTargetRegisteredMeanwhile(t *testing.T) {
 	gate := st.holdNextGetTargets()
 	done := make(chan error, 1)
 	go func() {
-		srv.tabMu.Lock()
-		defer srv.tabMu.Unlock()
-		done <- srv.connectBrowserLocked(ctx)
+		done <- srv.connectBrowser(ctx)
 	}()
 	awaitGetTargets(t, st, 1)
 

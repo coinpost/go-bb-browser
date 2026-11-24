@@ -248,36 +248,78 @@ func (s *Server) applyEnumeration(conn any, w *state.Window, infos []*target.Inf
 	return snaps
 }
 
+// targetRelease is the completion barrier of every release of one target id
+// that is currently running: done is closed when the last of them has finished.
+type targetRelease struct {
+	running int
+	done    chan struct{}
+}
+
+// beginTargetReleaseLocked announces a release of tid. The caller holds
+// lifeMu and makes the announcement in the same critical section as the
+// registry removal that causes it, so there is no moment at which the target is
+// gone from the registry while its release is not yet visible. From here until
+// endTargetRelease the id cannot start a new observation lifecycle: the old
+// buffers stay unreadable to it, and the old release cannot clear new ones.
+func (s *Server) beginTargetReleaseLocked(tid target.ID) {
+	if s.targetReleases == nil {
+		s.targetReleases = make(map[target.ID]*targetRelease)
+	}
+	r := s.targetReleases[tid]
+	if r == nil {
+		r = &targetRelease{done: make(chan struct{})}
+		s.targetReleases[tid] = r
+	}
+	r.running++
+}
+
+func (s *Server) endTargetRelease(tid target.ID) {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	r := s.targetReleases[tid]
+	if r == nil {
+		return
+	}
+	if r.running--; r.running == 0 {
+		delete(s.targetReleases, tid)
+		close(r.done)
+	}
+}
+
+// retireTargetObservation stops the producer before dropping its buffers:
+// ForgetTarget returns only once the target's observer writer can no longer
+// record, and ClearTarget then unregisters the target so any other late event
+// is rejected rather than rebuilding the rings (INV-6).
+func (s *Server) retireTargetObservation(conn any, tid target.ID) {
+	if conn == nil {
+		conn = s.tabConn()
+	}
+	if fc, ok := conn.(targetForgetConn); ok {
+		fc.ForgetTarget(tid)
+	}
+	if s.obsStore != nil {
+		s.obsStore.ClearTarget(tid)
+	}
+}
+
 func (s *Server) applyEnumerationChecked(conn any, w *state.Window, infos []*target.Info) ([]state.TabSnapshot, bool) {
 	s.lifeMu.Lock()
 	snaps, removed, verify, omittedSuspended := s.tabs.ApplyEnumerationChecked(w, infos)
 	for _, tab := range removed {
-		s.clearTargetStateLocked(tab.TargetID)
+		s.forgetTabManagedLocked(tab.TargetID)
+		s.beginTargetReleaseLocked(tab.TargetID)
 	}
 	retry := s.recoverManagedLocked(infos)
 	s.lifeMu.Unlock()
 
-	if sess, ok := conn.(*browser.Session); ok {
-		for _, tab := range removed {
-			sess.ForgetTarget(tab.TargetID)
-		}
+	for _, tab := range removed {
+		s.retireTargetObservation(conn, tab.TargetID)
+		s.endTargetRelease(tab.TargetID)
 	}
 	if verify || retry {
 		requestEnumeration(conn)
 	}
 	return snaps, omittedSuspended
-}
-
-// clearTargetStateLocked drops the daemon state of a target that was just
-// unregistered. Caller holds s.lifeMu. The keyed operation lock needs no
-// cleanup: lockTab reclaims its entry when the last reference exits. Session
-// resources are released by the caller outside the mutex (ForgetTarget is
-// idempotent per id and ids are not reused).
-func (s *Server) clearTargetStateLocked(tid target.ID) {
-	if s.obsStore != nil {
-		s.obsStore.ClearTarget(tid)
-	}
-	s.forgetTabManagedLocked(tid)
 }
 
 // removeTargetState applies the report, learned from a command reply, that tid
@@ -318,19 +360,20 @@ func (s *Server) dropTarget(conn any, tid target.ID, remove func(target.ID) bool
 	}
 	s.lifeMu.Lock()
 	known := remove(tid)
+	// Even an unknown target may have been persisted as managed by a previous
+	// daemon: gone is gone for it too.
+	s.forgetTabManagedLocked(tid)
 	if known {
-		s.clearTargetStateLocked(tid)
-	} else {
-		// Nothing hangs off an unknown target, except that a previous daemon
-		// may have persisted it as managed: gone is gone for it too.
-		s.forgetTabManagedLocked(tid)
+		s.beginTargetReleaseLocked(tid)
 	}
+	running := s.targetReleases[tid]
 	s.lifeMu.Unlock()
-	if !known {
-		return
+	if known {
+		s.retireTargetObservation(conn, tid)
+		s.endTargetRelease(tid)
 	}
-	if sess, ok := conn.(*browser.Session); ok {
-		sess.ForgetTarget(tid)
+	if running != nil {
+		<-running.done
 	}
 }
 

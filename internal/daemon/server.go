@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/target"
 	"github.com/yiplee/go-bb-browser/internal/state"
 	"github.com/yiplee/go-bb-browser/internal/store"
 	"github.com/yiplee/go-bb-browser/internal/timeout"
@@ -54,6 +55,12 @@ type Server struct {
 	// managedRecovered is set once the managed tabs persisted by a previous
 	// daemon process have been settled. Guarded by lifeMu.
 	managedRecovered bool
+	// targetReleases has an entry per target id for as long as any release of
+	// that id is still running (see beginTargetReleaseLocked). Guarded by lifeMu.
+	targetReleases map[target.ID]*targetRelease
+	// obsStepHook is nil outside tests. Lifecycle regressions set it to park an
+	// observation query between two of its steps (see obsStep*).
+	obsStepHook func(step string, tid target.ID)
 
 	tabMuOps    sync.Mutex
 	tabCDPLocks map[string]*tabLockEntry
@@ -221,12 +228,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}()
 
 	if !s.SkipBrowserAttach && s.tabHook == nil {
-		s.tabMu.Lock()
-		if err := s.connectBrowserLocked(runCtx); err != nil {
-			s.tabMu.Unlock()
+		if err := s.connectBrowser(runCtx); err != nil {
 			return fmt.Errorf("cdp attach: %w", err)
 		}
-		s.tabMu.Unlock()
 	}
 
 	ln, err := net.Listen("tcp", s.cfg.ListenAddr)

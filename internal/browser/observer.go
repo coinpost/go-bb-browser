@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,18 @@ type tabObserver struct {
 	ready   chan struct{}
 	initErr error
 
+	// sessionClosed (guarded by Session.obsMu) is set when Session.Close dropped
+	// this observer; an initializer still running then releases the child.
+	sessionClosed bool
+
+	// stop ends the writer without cancelling ctx, which would close a live tab.
+	stop chan struct{}
+	// recordMu serializes every Record call with retirement: retire returns only
+	// after an in-flight Record has finished, and none can start afterwards.
+	recordMu sync.Mutex
+	retired  atomic.Bool
+	stopOnce sync.Once
+
 	domainsDisabled bool
 
 	mu             sync.Mutex
@@ -79,15 +92,20 @@ func (s *Session) EnsureObservation(ctx context.Context, tid target.ID, kind Obs
 		ctx = context.Background()
 	}
 	s.obsMu.Lock()
+	if s.closed.Load() {
+		s.obsMu.Unlock()
+		return wrapCDPError("Target.attachObserver", tid, errSessionClosed)
+	}
 	if s.observers == nil {
 		s.observers = make(map[target.ID]*tabObserver)
 	}
 	obs := s.observers[tid]
 	if obs == nil {
-		tabCtx, cleanup := newAttachContext(s.ctx, tid)
+		tabCtx, cleanup := s.newAttachContext(tid)
 		obs = &tabObserver{
 			tid: tid, ctx: tabCtx, cleanup: cleanup, rec: rec, logger: lg,
 			queue: make(chan queuedObservation, observationQueueCapacity), ready: make(chan struct{}),
+			stop: make(chan struct{}),
 		}
 		s.observers[tid] = obs
 		go s.initializeObserver(obs)
@@ -101,10 +119,24 @@ func (s *Session) EnsureObservation(ctx context.Context, tid target.ID, kind Obs
 	case <-ctx.Done():
 		return wrapCDPError("Target.attachObserver", tid, ctx.Err())
 	}
-	if err := obs.disableUntilLeased(ctx); err != nil {
-		return err
+	err := obs.disableUntilLeased(ctx)
+	if err == nil {
+		err = obs.activate(ctx, kind)
 	}
-	return obs.activate(ctx, kind)
+	// Activation commits only while the observer is still installed. Close and
+	// ForgetTarget take it out of the table before they retire its writer, so a
+	// retirement that won the race is reported instead of a working observation.
+	s.obsMu.Lock()
+	installed, closed := s.observers[tid] == obs, obs.sessionClosed
+	s.obsMu.Unlock()
+	switch {
+	case installed:
+		return err
+	case closed:
+		return wrapCDPError("Target.attachObserver", tid, errSessionClosed)
+	default:
+		return &CDPError{Kind: ErrorTargetGone, Op: "Target.attachObserver", Target: tid, Err: fmt.Errorf("target removed while enabling observation")}
+	}
 }
 
 var disableObservationDomains = func(tabCtx, requestCtx context.Context) error {
@@ -114,14 +146,26 @@ var disableObservationDomains = func(tabCtx, requestCtx context.Context) error {
 func (s *Session) initializeObserver(o *tabObserver) {
 	// Bind chromedp's Target.run to the observer's long-lived context, never to a
 	// request timeout child. Cancelling the latter would otherwise kill the session.
-	err := chromedp.Run(o.ctx)
+	// The wait is bounded and the Run can be cut short by a release or by Close;
+	// neither cancels o.ctx while it is in flight.
+	err := o.cleanup.run(o.ctx)
+	s.obsMu.Lock()
+	current := s.observers[o.tid] == o
+	switch {
+	case err != nil:
+	case o.sessionClosed:
+		err = errSessionClosed
+	case !current:
+		err = &CDPError{Kind: ErrorTargetGone, Op: "Target.attachObserver", Target: o.tid, Err: fmt.Errorf("target removed while attaching")}
+	}
 	if err != nil {
-		s.obsMu.Lock()
 		o.initErr = wrapCDPError("Target.attachObserver", o.tid, err)
-		release := s.observers[o.tid] == o
-		if release {
+		if current {
 			delete(s.observers, o.tid) // retry with a fresh context on the next call
 		}
+		// ForgetTarget took the entry: its cancel owns the child from here on.
+		// Otherwise (plain failure, or Close, which never cancels) it is ours.
+		release := current || o.sessionClosed
 		s.obsMu.Unlock()
 		if o.logger != nil {
 			o.logger.Debug("observer target initialization ended", "target", o.tid, "err", o.initErr)
@@ -132,6 +176,9 @@ func (s *Session) initializeObserver(o *tabObserver) {
 		}
 		return
 	}
+	s.obsMu.Unlock()
+	// A release from here on retires the observer; the writer then exits at
+	// once without recording.
 	go o.runWriter()
 	close(o.ready)
 }
@@ -243,6 +290,9 @@ func (o *tabObserver) listen(ev any) {
 	default:
 		return
 	}
+	if o.retired.Load() {
+		return
+	}
 	seq, ok := o.rec.NextSeq()
 	if !ok {
 		return
@@ -264,26 +314,71 @@ func storeAtomicMax(dst *atomic.Uint64, value uint64) {
 	}
 }
 
+// retire permanently stops this observer from recording. Writing is disabled
+// at once; retire then waits for a Record call that is already in flight, so
+// once it returns the caller may clear the target's buffers knowing this
+// observer can never write to them again. Events still queued are discarded.
+// It is safe before the writer starts, and every call, including one that
+// overlaps another, returns only after that in-flight Record has finished.
+func (o *tabObserver) retire() {
+	o.retired.Store(true)
+	o.stopOnce.Do(func() {
+		if o.stop != nil {
+			close(o.stop)
+		}
+	})
+	// Nothing to do under the lock: acquiring it is the wait.
+	o.recordMu.Lock()
+	o.recordMu.Unlock()
+}
+
+func (o *tabObserver) stopped() bool {
+	select {
+	case <-o.stop:
+		return true
+	case <-o.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func (o *tabObserver) runWriter() {
 	for {
+		// A ready queue must not win over a stop request.
+		if o.stopped() {
+			return
+		}
 		select {
+		case <-o.stop:
+			return
 		case <-o.ctx.Done():
 			return
 		case item := <-o.queue:
-			data, err := json.Marshal(item.payload)
-			if err != nil {
-				o.dropped[item.kind].Add(1)
-				continue
-			}
-			switch item.kind {
-			case ObservationNetwork:
-				o.rec.RecordNetwork(o.tid, item.seq, data)
-			case ObservationConsole:
-				o.rec.RecordConsole(o.tid, item.seq, data)
-			case ObservationErrors:
-				o.rec.RecordError(o.tid, item.seq, data)
-			}
+			o.record(item)
 		}
+	}
+}
+
+// record persists one dequeued event unless the observer has been retired.
+func (o *tabObserver) record(item queuedObservation) {
+	data, err := json.Marshal(item.payload)
+	if err != nil {
+		o.dropped[item.kind].Add(1)
+		return
+	}
+	o.recordMu.Lock()
+	defer o.recordMu.Unlock()
+	if o.retired.Load() {
+		return
+	}
+	switch item.kind {
+	case ObservationNetwork:
+		o.rec.RecordNetwork(o.tid, item.seq, data)
+	case ObservationConsole:
+		o.rec.RecordConsole(o.tid, item.seq, data)
+	case ObservationErrors:
+		o.rec.RecordError(o.tid, item.seq, data)
 	}
 }
 

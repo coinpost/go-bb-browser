@@ -278,17 +278,21 @@ func (e *failedAttachExecutor) Execute(ctx context.Context, method string, param
 	return e.err
 }
 
+// releaseFailedAttach detaches the failed attach's session and never closes the
+// page. When that detach is refused the session id is not thrown away: the
+// child's Target is left to the cancel watcher, with the target id blanked, so
+// the watcher makes one more attempt to detach the same session.
 func TestReleaseFailedAttachOnlyDetaches(t *testing.T) {
-	for _, detachErr := range []error{nil, errors.New("browser disconnected")} {
-		name := "success"
+	for _, detachErr := range []error{nil, errors.New("browser busy")} {
+		name, wantDetaches := "success", 1
 		if detachErr != nil {
-			name = "detach_error"
+			name, wantDetaches = "detach_error", 2
 		}
 		t.Run(name, func(t *testing.T) {
 			parent, stop := chromedp.NewContext(context.Background())
 			t.Cleanup(stop)
 			// An inherited browser makes this a real child cancel watcher,
-			// which would try to close the user's tab if Target stayed non-nil.
+			// which would try to close the user's tab if the target id stayed.
 			chromedp.FromContext(parent).Browser = &chromedp.Browser{}
 			ctx, cancel := chromedp.NewContext(parent)
 			t.Cleanup(cancel)
@@ -296,12 +300,19 @@ func TestReleaseFailedAttachOnlyDetaches(t *testing.T) {
 			c.Target = &chromedp.Target{TargetID: "USER-TAB", SessionID: "SESSION"}
 			ex := &failedAttachExecutor{t: t, ctx: ctx, session: "SESSION", err: detachErr}
 			cancelled := 0
-			releaseFailedAttach(ctx, &attachCancellation{cancelChild: func() {
+			releaseFailedAttach(ctx, &attachCancellation{ctx: ctx, cancelChild: func() {
 				cancelled++
 				if c.Target != nil {
-					// Record the CloseTarget that chromedp's watcher would send,
-					// then clear Target so a mutation fails without a nil-browser panic.
-					_ = target.CloseTarget(c.Target.TargetID).Do(cdp.WithExecutor(context.Background(), ex))
+					// What chromedp's watcher would send for the Target it finds,
+					// then clear it so the real watcher has no nil browser to use.
+					watcher := &failedAttachExecutor{t: t, ctx: ctx, session: "SESSION"}
+					if id := c.Target.SessionID; id != "" {
+						_ = target.DetachFromTarget().WithSessionID(id).Do(cdp.WithExecutor(mustDeadline(t), watcher))
+					}
+					if id := c.Target.TargetID; id != "" {
+						_ = target.CloseTarget(id).Do(cdp.WithExecutor(context.Background(), watcher))
+					}
+					ex.calls = append(ex.calls, watcher.calls...)
 					c.Target = nil
 				}
 				cancel()
@@ -309,11 +320,22 @@ func TestReleaseFailedAttachOnlyDetaches(t *testing.T) {
 			if cancelled != 1 || ctx.Err() != context.Canceled || c.Target != nil {
 				t.Fatalf("cancel calls = %d, context error = %v, Target = %v", cancelled, ctx.Err(), c.Target)
 			}
-			if len(ex.calls) != 1 || ex.calls[0] != target.CommandDetachFromTarget {
-				t.Fatalf("commands = %v, want only Target.detachFromTarget", ex.calls)
+			if len(ex.calls) != wantDetaches {
+				t.Fatalf("commands = %v, want %d Target.detachFromTarget", ex.calls, wantDetaches)
+			}
+			for _, call := range ex.calls {
+				if call != target.CommandDetachFromTarget {
+					t.Fatalf("commands = %v, want only Target.detachFromTarget", ex.calls)
+				}
 			}
 		})
 	}
+}
+
+func mustDeadline(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 // An inert browser lets the real child cancel watcher read Target without
