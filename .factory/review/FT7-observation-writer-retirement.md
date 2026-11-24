@@ -335,3 +335,26 @@ Codex 独立只读审查 origin/main@2be49f8...HEAD；无可用 review-code skil
 上轮启动死锁、已登记页面的旧枚举回包、显式 target-gone 原始调度 HEAD 各3/3通过；不是复用已修复 finding。HEAD 工作树与干净 main 导出副本均通过配置 gofmt/vet/go test -race ./...（11个测试包、1个无测试包），browser/daemon/state整包 -race -count=5及选定屏障-count=10通过。实际延迟365秒的 attach 回包 HEAD/main 均通过。manager 核对诊断源码与配置日志，并独立复跑保留脚本：四项P1及相关调度在三版本各-race -count=3复现，原修复在HEAD通过；未另行重复全量。配置通过不覆盖新增诊断缺陷。
 证据保留本机 review run evidence/FT7-164fac8/：REVIEW.md、source/、reproduce.zsh、configured.log、configured-main.log、repeat.log、barriers.log、grace-*.log、manager-replay.log与manager-replay/。诊断为导出副本/overlay，非已提交永久回归。工作树干净，无代码变更、提交、安装或依赖清单变化。Go1.27.4，隔离HOME/TMPDIR/缓存，GOPROXY=off/GOSUMDB=off，仅本地回环CDP桩。未验真实非headless Chrome/CDP、loadingFailed、Go1.26、Docker、运行中systemd；未启动Chrome或操作用户窗口。无链接issue/PR，不发GitHub评论。
 round=6，已超过max_rounds=3；owner仅授权本次额外构建，不自动追加。发现P1，留在review/等owner决定；如需继续请追加说明并移至new/。仅review，未改代码、未合并main、未发布。
+
+## yiplee · 2026-11-24 22:23
+已在任务分支 `factory/FT7-observation-writer-retirement` 直接合并含 FT28 的最新 `origin/main`（`0d7c792`）并完成精简收敛，提交 `04f8af77ef717b85eab76ca18a8b3ab50f23aa77`（`04f8af7`，已推送 `origin`），任务继续留在 `review/`：
+
+- **合并与精简内容**：
+  - **消除第 6 轮 P1 与 P2-1**：FT28 已在 `main` 中全链路移除短 ID、启用 root 级 `Target.setDiscoverTargets` 并以请求窗口因果模型解决队列溢出旧事件恢复、迟到 `tab_new` 回包复活及未知 target 销毁记录；第 6 轮的四项 P1 与第一项 P2 已随合并自动消解。
+  - **丢弃被 FT28 替代的冗余实现**：将 `internal/state/tab_registry.go`、`internal/daemon/audit_ctx.go`、`internal/daemon/v1.go` 等恢复为 `origin/main` 实现，移除 `EnumerationToken` / `BeginEnumeration` / `TabRegistration` / `auditMeta.pinned` 与短 ID 兼容路径，以及 `obs_lifecycle_bounded_stub_test.go`、`obs_lifecycle_identity_stub_test.go` 中仅针对短 ID 碰撞或 `TabRegistration` 的 5 项过时测试（相对 `origin/main` 净缩减为 24 个文件，+3,803 / -146 行）。
+  - **保留并统一 FT7 核心 INV-6 防护**：
+    - `internal/state/obs_store.go`：显式 `RegisterTarget` / `RegisterBucket` 与 `ObsBucket` 句柄，`Push*` 拒绝未注册或已清空的 target。
+    - `internal/browser/observer.go` & `internal/browser/session.go`：writer 退役闸门、`attachCancellation`、共享 `obsRetiring` 屏障（`ForgetTarget` / `ForgetObservation` / `Close`）、并发 `Close` race 修复及 detach 被拒补救（保留 FT28 的 `TargetObserver` 与 root discovery）。
+    - `internal/daemon/server.go`、`internal/daemon/browser_reconnect.go`、`internal/daemon/tab_idle.go`、`internal/daemon/rpc_observation.go`：统一收口到 `Server.lifeMu` 与 `targetReleases` 并发释放屏障；释放路径严格先 `ForgetTarget`（`retireTargetObservation`）后 `ClearTarget`；保留 `connectBrowser` 仅在发布连接时持 `tabMu` 写锁的启动自锁修复；保留 FT28 的 `s.tabs.Known` 挂起态保护、`p.Tab` 原样寻址、`rpcResolveErr` 与 `observeTargetError`（`ConfirmedTargetAbsent`）反馈；更新 `AGENTS.md` 与永久回归测试适配完整 target ID。
+- **验证结果**：
+  - `test -z "$(gofmt -l .)"`、`go vet ./...`、`go vet -tags realchrome ./...`、`git diff --check origin/main` 均通过；受保护路径（`.github/workflows/`、`.factory/factory.toml`、`go.mod`、`go.sum`）均未变更。
+  - `go test -race -count=1 ./...` 全量通过（11 个测试包全部通过，`pkg/protocol` 无测试文件）。
+  - 定向 10 轮 `-race` 压测通过：`go test -race -count=10 ./internal/browser -run 'TestForgetTarget|TestSessionClose|TestAttach'` 与 `go test -race -count=10 ./internal/daemon -run 'TestTargetRelease|TestEnableObservation|TestObservation|TestTargetDestroyed|TestRepeatedForget|TestTabCloseWaits|TestFailedObservation|TestSessionClose|TestStale|TestTimedOutAttach|TestDistinctTargetChurn|TestFailedAttachCleanup|TestStartupEnumeration|TestExplicitCloseOfGoneTarget|TestLiveTabObservation'`。
+
+### 验收边界（owner 拍板）
+1. **FT7 完成标准（INV-6）**：在最新 `main`（全链路完整 CDP target ID + root 级 discovery + FT28 请求窗口因果模型）上，所有 target 释放路径（`tab_close`、空闲回收、浏览器关闭、枚举确认消失）均严格先退役 observer/writer 再清空观测桶；释放后 `network`/`console`/`errors` 均为空、store 无残留桶；在途 `Record`、迟到事件、失败 `attach`、并发 `ForgetTarget` 与 `Session.Close` 均无 data race、不自锁、不重建旧桶；启动首次枚举释放不死锁；活页三域观测与单域 `*_clear` 正常。
+2. **明确不阻塞 FT7 的范围外项**：
+   - 假设 daemon 生命周期内完整 CDP target ID 不复用（不为其增加跨 RPC 的代次/会话隔离）。
+   - 第 6 轮笔记中的两条 `browser.Session` 底层 P2（25ms 极端短超时重试未决 attach 协程增长、`Session.Close` 跨 attach 回包残留远端 session / `Network.enable`）不影响 daemon 正常退出且已保证 RPC 报错并回滚首次桶，如需继续打磨另建独立任务，不作为 FT7 的 P1 阻塞。
+   - 不再以 `main`/FT28 既有异步生命周期边界（如未决延迟事件前的瞬态窗口）新增 FT7 的 P1。
+3. **后续 review 约束**：任务继续留在 `review/`；下轮 review 聚焦核验本次基于 FT28 的合并收敛提交（`04f8af7`）、精简逻辑与 INV-6 永久回归。
