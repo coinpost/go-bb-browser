@@ -1,18 +1,18 @@
 go-bb-browser - factory board
 =============================
 Nothing at your gates | 1 with the agent | 21 done | 20 sent back
-Drawn Nov 25, 00:28 | https://github.com/coinpost/go-bb-browser
+Drawn Nov 25, 00:36 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (3)                                 never built
     FT2     3d  生命周期事件溢出重同步与优雅关停次序
     FT3     3d  创建在途关停收尾与唯一释放记账
     FT6     3d  run帮助布尔参数与选项终止符兼容
 
-NEW (0)                                     avg stay 4h
-    Nothing here
-
-REVIEW (1)                                  avg stay 3h
+NEW (1)                                     avg stay 4h
     FT4     1m  日志尾行、轮转恢复与安全可写探测 (round 2)
+
+REVIEW (0)                                  avg stay 2h
+    Nothing here
 
 READY (0)                                   avg stay 2h
     Nothing here
