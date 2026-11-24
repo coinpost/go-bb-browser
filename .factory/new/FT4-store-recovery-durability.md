@@ -121,3 +121,22 @@ Codex 只读审查 origin/main...HEAD（base fb2c535），无代码提交，工�
 限制/审查重点：路径缺失期间追加仍进旧的无名句柄，这些新增记录可能随关闭丢失，重启只恢复 .1；预检查之后、link 之前的外部删除仍存在窗口，可能已经顺移备份。发布后 fsync 错误、再追加、再轮转组合与 RecordWritten 的准确语义请复查。Windows 轮转未修复，文档改为不支持，未原生验证。未做实际断电/kill -9、Linux、无硬链接文件系统、真实 Chrome 验收；无 UI 改动。未 ship、未发 tag、未发布、未启用任务、未移动后续 backlog。
 
 执行记录：coder 初期未隔离的 build/test 使用默认共享 Go build cache 与 Go telemetry，后续报告测试使用隔离 HOME；模块缓存使用既有内容。除规定刷新 build 锁外无新增可见 /tmp 路径、无其他报告的外部临时文件。本轮通知发送成功。
+
+## factory · review · 2026-11-25 00:36
+head: 312af9c46d2d9a78a461373d224b2db6b658d9f8
+verdict: fix
+fix:
+- [P1] internal/store/store.go:714：先把 .1 顺移到 .2、再 link 新 .1，link 返回 ENOSPC 时会失去启动能发现的上一代。单进程完全串行复现 3/3：首次轮转成功 → 第二次轮转 link 注入 ENOSPC，追加返回 ErrRotation → 再删除 active → 再次追加被预检查拒绝 → Close/Open 成功却恢复 []，原 135 字节受管记录仍在 .2。先将 active 链接到私有暂存名并核验 inode；在能原子替换为新备份之前保留现有 .1 的可恢复名字，再准备更旧代并原子发布 .1，发布 active 前重验路径。增加硬链接失败后删除 active、快照 fsync 后删除/替换 active 的永久回归；仅增加一次 stat 不足以覆盖串行 ENOSPC 场景。
+notes:
+- [P2] internal/store/store.go:562：待处理目录 fsync 重试 EIO 后，若新快照创建又 ENOSPC，返回值只含 ErrRotation/ENOSPC，ErrDirSync 与 EIO 被掩盖；本次记录写失败又会完全跳过欠下同步。独立重试并保留仍未解决的错误，按本次记录写结果计算 RecordWritten，不能简单合并导致未写记录被误判已写。
+- [P2] internal/daemon/tab_idle.go:190：active 删除后写入无名句柄，RecordWritten=true，告警却称 managed tab persisted；实测关闭重启新 target 不恢复。区分写入句柄与重启可恢复，路径异常或目录同步未确认时不要承诺已持久化。
+- [P2] internal/daemon/server.go:218：生产入口丢弃 closeAudit 返回值。目录 fsync 持续 EIO，Close 已重试，服务正常取消仍返回 nil 且无关闭告警。保留原服务错误并合并最终关闭错误，或明确记录持久化未确认。
+- [P2] internal/store/store.go:317：悬空 active 符号链接加完整 .1 时，Open 创建空链接目标且成功恢复 []，3/3 复现；指向普通文件的 active 链接又会使每次轮转预检查失败。启动与轮转要求统一，明确拒绝非普通入口并保留目标和 .1。
+
+Codex 只读审查 origin/main...HEAD（base fb2c535），无提交且工作树干净。按 owner 单进程独占目录前提，多进程问题不作阻塞；原 P1「进入轮转前 active 已删除」的精确时序通过。新增 P1 不依赖多个 Store、并发文件操作或 Windows；经理核对临时复现源码、3 次输出及备份顺移控制流。快照 fsync 后删除/替换 active 的额外注入也各 3/3 暴露空恢复/错误接管外来文件。
+
+配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 隔离 HOME 全部通过；核心回归 race count=3 通过。诊断 overlay 的预期失败断言确认上述缺陷（非仓库原测试失败）。两条权限测试因继承 ACL skip，临时 overlay 仅清除夹具 ACL 后原断言执行通过；子进程 helper 按设计跳过。无新增安装，使用已有 Go 1.27.4。未做真实断电、kill -9、Linux、无硬链接文件系统或真实 Chrome 验收；Windows 按已声明不支持记录，不计阻塞。
+
+第 2/3 轮审查发现 P1，review/ → new/，下一轮在同分支修复 fix 列表。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。未合并、未打 tag、未发布、未启用任务、未移动后续 backlog。
+
+执行偏差：coder 首轮系统 mktemp 将隔离 HOME 建到系统临时目录，报告已将整树移回本 run TMPDIR，核验原路径消失，随后使用新的隔离构建缓存重跑全套通过；未新增可见 /tmp 路径，除此仅刷新授权 review 锁。未复用外部环境脚本。临时诊断及报告按流程在本轮结束清理。
