@@ -86,35 +86,37 @@ func TestStaticComposeUsesProvisionedStateDir(t *testing.T) {
 	}
 }
 
-// Static check: both GoReleaser image entries build this Dockerfile with just
-// the two binaries in their context (no extra_files).
-func TestStaticGoReleaserDockerContext(t *testing.T) {
-	var dockers []string
-	in := false
-	for _, l := range instructions(t, ".goreleaser.yaml") {
-		switch {
-		case l == "dockers:":
-			in = true
-		case l == "docker_manifests:":
-			in = false
-		case in:
-			dockers = append(dockers, l)
+// Static check: GoReleaser no longer builds or pushes Docker images, and
+// only builds linux/amd64 binaries for bb-browser and bb-daemon.
+func TestStaticGoReleaserLinuxAmd64BinariesOnly(t *testing.T) {
+	lines := instructions(t, ".goreleaser.yaml")
+	for _, forbidden := range []string{"dockers:", "docker_manifests:"} {
+		if slices.Contains(lines, forbidden) {
+			t.Errorf(".goreleaser.yaml still contains %q; Docker image release was removed", forbidden)
 		}
 	}
 	count := func(want string) (n int) {
-		for _, l := range dockers {
+		for _, l := range lines {
 			if l == want {
 				n++
 			}
 		}
 		return n
 	}
-	for _, want := range []string{"dockerfile: Dockerfile", "ids: [bb-browser, bb-daemon]"} {
-		if got := count(want); got != 2 {
-			t.Errorf("dockers entries with %q = %d, want 2 (amd64 + arm64)", want, got)
+	if got := count("goos: [linux]"); got != 2 {
+		t.Errorf("goos: [linux] appears %d times, want 2 (bb-browser and bb-daemon)", got)
+	}
+	if got := count("goarch: [amd64]"); got != 2 {
+		t.Errorf("goarch: [amd64] appears %d times, want 2 (bb-browser and bb-daemon)", got)
+	}
+	for _, leftover := range []string{"goos: [linux, darwin, windows]", "goarch: [amd64, arm64]"} {
+		if slices.Contains(lines, leftover) {
+			t.Errorf(".goreleaser.yaml still contains %q", leftover)
 		}
 	}
-	if slices.ContainsFunc(dockers, func(l string) bool { return strings.HasPrefix(l, "extra_files") }) {
-		t.Error("dockers extra_files changes the build context; update the Dockerfile COPY check with it")
+	for _, want := range []string{"- id: bb-browser", "- id: bb-daemon"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf(".goreleaser.yaml lacks %q", want)
+		}
 	}
 }
