@@ -358,3 +358,20 @@ round=6，已超过max_rounds=3；owner仅授权本次额外构建，不自动�
    - 第 6 轮笔记中的两条 `browser.Session` 底层 P2（25ms 极端短超时重试未决 attach 协程增长、`Session.Close` 跨 attach 回包残留远端 session / `Network.enable`）不影响 daemon 正常退出且已保证 RPC 报错并回滚首次桶，如需继续打磨另建独立任务，不作为 FT7 的 P1 阻塞。
    - 不再以 `main`/FT28 既有异步生命周期边界（如未决延迟事件前的瞬态窗口）新增 FT7 的 P1。
 3. **后续 review 约束**：任务继续留在 `review/`；下轮 review 聚焦核验本次基于 FT28 的合并收敛提交（`04f8af7`）、精简逻辑与 INV-6 永久回归。
+
+
+## factory · review · 2026-11-24 22:38
+head: 04f8af77ef717b85eab76ca18a8b3ab50f23aa77
+verdict: fix
+fix:
+- [P1] internal/daemon/rpc_observation.go:181: 用户关闭与已 attach 的查询并发时，stale 查询先 ReleaseBucket，再 ForgetObservation；真实 writer 停在 RecordNetwork 时桶已被删除，违反本轮明确要求的先退役 writer 后清桶。HEAD 5/5，主释放无并发查询对照 5/5 保持正确顺序；main 也提前清桶且迟到写入重建。HEAD 最终未重建，不声称发现数据泄漏。复用已开始的释放屏障，或在锁外完成孤立 observer 退役后再按桶句柄回收，补永久回归。
+- [P1] internal/daemon/rpc_observation.go:202: 活页观测已解析后，旧枚举使其进入 Suspended，registerObservation 用 Has=false 误判为已释放，network/console/errors 各 5/5 返回 unknown tab id；main 相同调度三域各 5/5 成功。此为本分支新增的活页观测回归，不是把 main 既有异步窗口升级。区分挂起与确认移除，lifeMu 外复用有界核验后重试，核验失败保留查找错误。
+- [P1] internal/daemon/tab_idle_test.go:516: 配置测试在本机继承 macOS factory ACL 的临时目录中失败，chmod 0555 仍允许创建文件，TestUnwritableStateDirErrors 在 HEAD/main 各 5/5 失败。此为基线测试环境/夹具问题，非 FT7 产品新缺陷；夹具应核实不可写前置条件，或明确采用无额外 ACL 的私有测试目录。
+notes:
+- Codex 只读审查 origin/main@0d7c792...HEAD，遵守 owner 2026-11-24 22:23 边界，聚焦 FT28 合并精简和 INV-6；未沿用人为同完整 ID 复用、明确另立任务的底层 P2 或 main 既有未决事件窗口作为阻塞。未找到 review-code skill，无代码变更/提交/安装，保护路径、依赖清单及工作树无变化。
+- 原配置命令在继承 ACL 时仅权限夹具失败；对新建私有 GOTMPDIR 去除继承 ACL 后，gofmt、go vet ./...、go test -race ./... 全量通过，11 个测试包、1 个无测试包。47 个生命周期相关测试 -race -count=10 通过，diff --check 通过。Go 1.27.4，离线 pin 缓存与隔离 HOME/XDG/工具缓存。
+- manager 独立复跑保留脚本，HEAD/main 各 -race -count=5 复现两项产品诊断及权限夹具对照，并在私有无 ACL GOTMPDIR 独立完整配置测试通过。第一项 HEAD 最终三环/桶归零，失败只证明规定清理顺序被查询支路绕开；第二项 main 通过、HEAD 三域失败。配置通过不覆盖新增调度。
+- 证据保留本机 review run evidence/FT7-04f8af7/：REVIEW.txt、factory_review_test.go、overlay.py、reproduce.zsh、configured-inherited-acl.log、configured-noacl.log、barriers.log、manager-replay.log、manager-head-diagnostic.log、manager-base-diagnostic.log。本地真实 Session+daemon+CDP 协议桩和 overlay，尚非永久回归。
+- 无安装。首次临时 HOME 意外落在系统临时目录，coder 已移入本次 TMPDIR 并在正确位置重新执行全量及诊断；manager 未删除系统临时目录。工作树索引正常刷新，无暂存差异。未验证真实非 headless Chrome/CDP、loadingFailed、Docker、运行中 systemd、Go 1.26；未启动浏览器、未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
+- round=6 超过 max_rounds=3，留在 review/ 等 owner 决定，不自动追加构建。若继续修复请追加说明并移至 new/。未合并 main、未发布。
+- 联系通知未送达：指定通知 chat_id 与 chat 类型 contact_id 不匹配，通道拒绝发送；遵守指定路由，未擅自换到其他聊天。
