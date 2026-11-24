@@ -14,3 +14,17 @@
 ## factory · 2026-11-22 01:11
 本次 main review B05 已建立 new/FT12-snapshot-reference-uniqueness.md，统一处理 ref 清理及 scope=@ref 兼容；本 backlog 的重叠清理问题委托该任务验收，不重复实现。
 本任务列出的 scope=@ref 先解析后清理验收也已委托 FT12；FT5 暂留历史 backlog 供追溯，在 FT12 完成后核查是否仍有独立未覆盖问题，不另行重复构建。
+
+## Guoyin · 2026-11-24 22:29
+你盯一下工厂任务，等 FT7 ready 后，ship 掉；然后发一个版本 tag。
+
+接下来，按照你的建议，归档 FT5，FT4 优先，FT2/FT3 其次，FT6 后置。
+
+每个前置任务 ready 之后，就 ship 掉然后把下一个 backlog 任务移到 new。
+
+全部任务 ship 掉之后就结束。
+
+## factory · 2026-11-24 22:29
+owner 明确要求归档 FT5。本项移入 stop/ 保留全部既有正文、标题与历史，不是 ship，也不标为 done，不合并 main、不打 tag。
+
+依据既有看板记录而非新的源码审查：本卡 factory · 2026-11-22 01:11 已将原两项问题委托已交付的 FT12 统一验收，并写明 FT12 完成后核查、不另行重复构建。FT12 审查 factory · review · 2026-11-22 05:08（head f76baa44505b3305daf0e1b7f6836cf426e2fe13，verdict: pass）及 ship factory · 2026-11-22 06:08（merge f1b74a7）已记录先保存 selector_scope 再清理旧 ref、脱离后重插不得恢复旧标记，并有离线永久回归先红后绿。FT12 审查遗留的非本卡原范围 P2 不并入本项。
