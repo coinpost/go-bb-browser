@@ -470,3 +470,20 @@ round=9，超过max_rounds=3，owner仅授权本轮build；发现P1留在review/
 1. **FT28 完成标准**：全链路仅使用完整 CDP target ID 精确寻址、移除短 ID 兼容、永不 fallback / 不串台到其他 tab、正常生命周期下关闭/销毁即失效（含生产 root 级 `Target.setDiscoverTargets`），以及本次修复的第 9 轮 P1 与两条 P2 无回归。
 2. **明确接受异步 CDP 模型下的最终一致边界**：在人为延迟/屏障扣留销毁事件或单条回复的受控时序下，若死目标在事件/下一次枚举到达前短暂滞留本地缓存（如纯内存 `*_clear` 短暂返回成功），只要**不发生跨 tab 串台、不误关存活 tab、不复用完整 ID、且事件或枚举到达后可自动收敛**，不再作为 FT28 的 P1 阻塞项（尤其是 `main` 既有问题）；如确需继续深化异步边界，另建独立任务处理。
 3. **后续 review 约束**：本任务保持留在 `review/`；下轮 review 聚焦核验本次修复（`d408b68`）、冗余清理及回归测试，不再以新构造的既有异步瞬态屏障时序新增 P1。
+
+
+## factory · review · 2026-11-24 11:23
+head: d408b68c5133cc6c17048940f9518e3428eb2cdd
+verdict: pass
+notes:
+- [P2] internal/browser/errors.go:137: 观测附着成功后的 Network.disable 错误被整段包装为 Target.attachObserver，合成 No page for session 回复会被误认完整目标缺席；只读 network 查询由此触发资源取消并发出 closeTarget(A)。HEAD 5/5，父提交保留A。应保留实际失败命令/阶段，仅向完整ID发出的明确缺席回复可退役，其余重枚举。该错误在原生Chrome对应命令上的可达性未验证，按条件性兼容边界列P2，不声称正常Chrome已误关。
+- [P2] internal/daemon/v1.go:1265: Lookup 与 Suspended 分次加锁，后台核验恰在两次读取间恢复A，可对存活且已可解析A返回unknown tab id；插桩5/5。应在同一registry锁下一次返回可解析/暂停/缺失状态，tab_select同型读取一并处理。未观察跨tab或误关。
+- [P2] internal/daemon/tab_idle.go:427: close/idle仍按宽泛ErrorTargetGone清理；合成根级closeTarget返回No session with given id且保留A时，释放附着会再次关A，HEAD/父提交各5/5。应共用明确完整目标缺席判据，session失效重枚举；回滚第136行同理。未验证原生Chrome根级close会返回该session错误，不冒称正常路径可达。
+- [P3] internal/daemon/target_absence_and_suspended_test.go:300: 当前tab_focus权威枚举接线正确，但现有列表永久测试检测不到仅回退focus接线；加入focus遇挂起成员且核验失败应返回服务端错误的永久断言。
+- [P3] README.md:122: 暂停解析仍被描述为直接unknown tab id；应说明先核验，失败/重试用尽返回-32000 failed to list targets，列表不能用部分结果表达权威缺席。
+
+Codex独立只读审查origin/main@2be49f8...HEAD累计72文件，重点本次d408b68相对0be4d9b的9文件，遵守owner 11:10验收边界，不以既有异步瞬态新屏障无限扩张P1。第9轮原P1与两项P2原始探针HEAD各-race-count=5通过，父提交失败；存活附着控制通过；Pool列表保留A绑定，后续Eval确实发出1次HTTP请求。完整ID、18定向方法、无短ID兼容/无fallback、同后缀隔离、CLI/Client/Pool、锁/idle/审计/恢复回归通过，未发现P0/P1。
+配置test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...全部通过（Go1.27.4，11测试包、protocol无测试）；go vet -tags realchrome ./...及相关永久回归各-race-count=20通过。manager核对源码、配置日志、诊断计数和干净工作树，未另行重复全量/新诊断。coder报告文字称fix但仅列P2/P3；按factory规则无P0/P1应为pass，由manager据此记录本节，不把非阻塞notes误写为fix。
+无安装、代码修改、提交或依赖变更；测试HOME/TMPDIR/缓存在本run，固定模块缓存、GOPROXY=off/GOSUMDB=off，仅回环stub。本轮未启动Chrome，仅检查父提交100份历史轨迹（95次生产root discovery），不称HEAD独立真实Chrome验收。两种零页面、上述合成错误自然可达性、其他宿主/Chrome、Go1.26、部署、跨会话唯一性未验。未操作用户窗口。
+证据保留本机review/evidence/FT28-d408b68/：REVIEW.md、reproduce.md、sources/、configured.log、regression.log、identity-race20.log、counts.txt、prior-probes-*.log、session-*.log、lookup-gap.log、focus-*.log、historical-chrome.log。额外诊断尚非永久回归。无链接issue/PR，不发GitHub评论。
+状态：review/ → ready/，round仍为9，等待owner/ship验收；本次仅review，未改代码、未合并main、未发布，不自动开始修复或其他任务。
