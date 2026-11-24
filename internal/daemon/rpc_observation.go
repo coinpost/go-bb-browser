@@ -81,6 +81,10 @@ func (s *Server) handleObsQuery(ctx context.Context, w http.ResponseWriter, id j
 			s.rpcResolveErr(ctx, w, id, method, errTabCloseUnknownID)
 			return
 		}
+		if errors.Is(err, errTabLookup) {
+			s.rpcResolveErr(ctx, w, id, method, err)
+			return
+		}
 		s.observeTargetError(conn, tid, err)
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to enable observation", &protocol.ErrData{Error: "failed to enable observation", Hint: s.cdpHint(err)})
 		return
@@ -141,14 +145,15 @@ var errObservationTargetGone = errors.New("target released while enabling observ
 // attaches the observer. The caller holds the tab's keyed lock.
 //
 // Target removal does not take the keyed tab lock, so it can run concurrently.
-// Registration first waits for any release of tid that is still running; after
-// EnsureObservation returns, s.lifeMu confirms tid is still known and still owns
-// bucket. A failed first attach takes back only the bucket this call created.
-// A stale call (tid was released while attaching) gives up its own bucket and
-// retires any orphaned observer it installed via ForgetObservation (leaving tab
-// pool entries and routes alone).
+// Registration first waits for any release of tid that is still running (and
+// re-verifies suspended live tabs before giving up); after EnsureObservation
+// returns, s.lifeMu confirms tid is still known and still owns bucket. A failed
+// first attach takes back only the bucket this call created. A stale call (tid
+// was released while attaching) retires any orphaned observer via
+// ForgetObservation before releasing its own bucket (leaving tab pool entries
+// and routes alone).
 func (s *Server) enableObservation(ctx context.Context, conn tabConn, tid target.ID, kind browser.ObservationKind) (state.ObsBucket, error) {
-	bucket, created, err := s.registerObservation(ctx, tid)
+	bucket, created, err := s.registerObservation(ctx, conn, tid)
 	if err != nil {
 		return state.ObsBucket{}, err
 	}
@@ -176,32 +181,56 @@ func (s *Server) enableObservation(ctx context.Context, conn tabConn, tid target
 		s.lifeMu.Unlock()
 		return bucket, err
 	}
-	orphaned := false
-	if s.obsStore != nil {
-		s.obsStore.ReleaseBucket(bucket)
-		orphaned = !s.obsStore.HasTarget(tid)
-	}
-	if orphaned {
+	stillOwns := s.obsStore != nil && s.obsStore.OwnsBucket(bucket)
+	orphaned := sess != nil && (s.obsStore == nil || stillOwns || !s.obsStore.HasTarget(tid))
+	var waitRelease chan struct{}
+	switch {
+	case orphaned:
 		s.beginTargetReleaseLocked(tid)
+	case stillOwns:
+		if r := s.targetReleases[tid]; r != nil {
+			waitRelease = r.done
+		}
 	}
 	s.lifeMu.Unlock()
 	if orphaned {
-		if sess != nil {
-			sess.ForgetObservation(tid)
+		sess.ForgetObservation(tid)
+		if s.obsStore != nil {
+			s.obsStore.ReleaseBucket(bucket)
 		}
 		s.endTargetRelease(tid)
+	} else if waitRelease != nil {
+		<-waitRelease
+		if s.obsStore != nil {
+			s.obsStore.ReleaseBucket(bucket)
+		}
+	} else if stillOwns && s.obsStore != nil {
+		s.obsStore.ReleaseBucket(bucket)
 	}
 	return state.ObsBucket{}, errObservationTargetGone
 }
 
 // registerObservation registers the buffers of tid once no release of that
-// target id is running, and reports whether it created them.
-func (s *Server) registerObservation(ctx context.Context, tid target.ID) (bucket state.ObsBucket, created bool, err error) {
+// target id is running, and reports whether it created them. A target that is
+// suspended awaiting verification triggers a bounded re-enumeration first.
+func (s *Server) registerObservation(ctx context.Context, conn tabConn, tid target.ID) (bucket state.ObsBucket, created bool, err error) {
+	verifyAttempts := 0
 	for {
 		s.lifeMu.Lock()
 		if !s.tabs.Has(tid) {
+			suspended := s.tabs.Suspended(tid)
 			s.lifeMu.Unlock()
-			return state.ObsBucket{}, false, errObservationTargetGone
+			if !suspended {
+				return state.ObsBucket{}, false, errObservationTargetGone
+			}
+			if verifyAttempts >= maxSuspendedVerifyAttempts {
+				return state.ObsBucket{}, false, fmt.Errorf("%w: tab state pending verification", errTabLookup)
+			}
+			verifyAttempts++
+			if _, err := s.enumerateTabs(ctx, conn); err != nil {
+				return state.ObsBucket{}, false, fmt.Errorf("%w: %w", errTabLookup, err)
+			}
+			continue
 		}
 		running := s.targetReleases[tid]
 		if running == nil {
