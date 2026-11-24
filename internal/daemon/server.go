@@ -317,7 +317,7 @@ func (s *Server) runAuditWriter() {
 	defer close(s.auditDone)
 	for rec := range s.auditCh {
 		if err := s.store.AppendRPC(rec); err != nil && s.logger != nil {
-			s.logger.Warn("append rpc log failed", "err", err, "action", rec.Action)
+			s.logger.Warn(auditFailureMessage(err), "err", err, "action", rec.Action)
 		}
 		s.auditWG.Done()
 	}

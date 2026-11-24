@@ -204,7 +204,7 @@ func (s *Server) enqueueAudit(rec store.LogRecord) {
 
 func (s *Server) appendAudit(rec store.LogRecord) {
 	if err := s.store.AppendRPC(rec); err != nil && s.logger != nil {
-		s.logger.Warn("append rpc log failed", "err", err, "action", rec.Action)
+		s.logger.Warn(auditFailureMessage(err), "err", err, "action", rec.Action)
 	}
 }
 
@@ -1303,4 +1303,13 @@ func (s *Server) cdpHint(err error) string {
 		return fmt.Sprintf("%v (one RPC is limited to %ds; split longer work into several calls)", err, timeout.OperationSeconds)
 	}
 	return err.Error()
+}
+
+// auditFailureMessage names what failed for an audit append error: the write
+// itself, or only the log maintenance after a record that was written.
+func auditFailureMessage(err error) string {
+	if store.RecordWritten(err) {
+		return "rpc log record written, but log maintenance after the write failed"
+	}
+	return "append rpc log failed"
 }

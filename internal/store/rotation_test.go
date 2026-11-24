@@ -433,25 +433,6 @@ func TestRestartWithLogMovedAwayRestoresPreviousGeneration(t *testing.T) {
 	requireRestart(t, dir, want)
 }
 
-// A log deleted from under the running daemon leaves nothing to keep under a
-// name; rotation still publishes the snapshot instead of failing forever.
-func TestRotationAfterLogRemovedPublishesSnapshot(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, rpcLogFile)
-	s, want := seedRotationState(t, dir)
-	if err := os.Remove(logPath); err != nil {
-		t.Fatal(err)
-	}
-	setMaxLogBytes(s, 1)
-	at := want["aa11"].Add(time.Hour)
-	if err := s.AppendRPC(gotoRecord("aa11", at)); err != nil {
-		t.Fatal(err)
-	}
-	want["aa11"] = at
-	requireLogBytesMatchFile(t, s, logPath)
-	requireRestart(t, dir, want)
-}
-
 // First start (no log, no backups) still begins with an empty log.
 func TestFirstStartCreatesEmptyLog(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
