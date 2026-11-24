@@ -1,6 +1,6 @@
 ---
 branch: factory/FT4-store-recovery-durability
-round: 2
+round: 3
 ---
 # 日志尾行、轮转恢复与安全可写探测
 
@@ -140,3 +140,22 @@ Codex 只读审查 origin/main...HEAD（base fb2c535），无提交且工作树�
 第 2/3 轮审查发现 P1，review/ → new/，下一轮在同分支修复 fix 列表。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。未合并、未打 tag、未发布、未启用任务、未移动后续 backlog。
 
 执行偏差：coder 首轮系统 mktemp 将隔离 HOME 建到系统临时目录，报告已将整树移回本 run TMPDIR，核验原路径消失，随后使用新的隔离构建缓存重跑全套通过；未新增可见 /tmp 路径，除此仅刷新授权 review 锁。未复用外部环境脚本。临时诊断及报告按流程在本轮结束清理。
+
+
+## factory · plan · 2026-11-25 00:53
+第 3 轮补充计划：
+Behaviour: 在任何备份顺移前，将 active 硬链接到私有暂存名并核对 inode，保证 ENOSPC/link 失败保留旧 .1；以原子替换发布新 .1，发布 active 前再次确认仍是打开的日志。启动明确拒绝非普通 active（含悬空符号链接），不得创建链接目标或丢失 .1。欠下的目录同步独立重试，不因追加/轮转失败掩盖错误；RecordWritten 只反映本次记录写入结果。生命周期告警不承诺可恢复/持久化；生产退出报告最终 closeAudit 错误且保留原服务错误。
+Scope: 修复最新 review 的 P1 和四条 P2，保留单进程独占前提，不加跨进程锁。FT18、FT21、完整 target ID、Windows 不支持边界不变。
+Decisions: 使用同目录暂存硬链接与 rename 的简单事务，不引入恢复猜测。较旧代备份允许按既有保留策略处理，但当前 .1 可恢复名字在新 .1 可发布前不可失去；重试不得持续挤掉历史。未确认目录同步或路径异常一律保守告警；普通追加仍不承诺 fsync。
+Checking: 永久回归 link ENOSPC 后删除 active 并重启；快照 fsync 后删除/替换 active；sync EIO 与追加失败/轮转 ENOSPC 组合、RecordWritten 正反例；生产退出 closeAudit 错误；active 普通/悬空符号链接不触碰目标/.1。完整配置测试，store 重复 race；无实际断电或原生 Linux/Windows 验证，不宣称做过。
+
+## factory · 2026-11-25 00:53
+第 3 轮构建完成，new/ → review/。branch: factory/FT4-store-recovery-durability；head: b9f94f6a33b7b5814345e115e57cfe4518ae153b。
+
+Claude Code 修复最新 review 的 P1 和四条 P2：备份顺移前先暂存 active 硬链接并校验 inode，保留旧 .1 至原子替换；发布 active 前复验路径，连续失败重试保留备份。欠下目录同步在写失败时也重试，并保留与写入/轮转错误的组合；RecordWritten 使用本次完整写入的类型标记，不由哨兵推断。启动拒绝非普通 active（含悬空链接）；生命周期/audit 告警不再把写入句柄称为持久化；服务退出合并 closeAudit 错误并保留原错误。README/AGENTS/systemd 文档同步。
+
+提交：d362345（store/文档）、b9f94f6（daemon/测试）；前一提交的旧 daemon 断言在后一提交修正，按 head 一起审查。新增事务/组合故障/符号链接/关闭错误永久回归。配置测试 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` coder 通过、经理独立隔离 HOME/XDG/GOCACHE 离线复跑通过；coder store race count=10、daemon 相关 count=5、realchrome-tag vet、Linux 静态 vet、Windows 交叉编译通过。coder 报告五处修复变异检查均使对应回归失败；未在旧提交直接跑 red（新符号无法编译）。无安装，使用既有 Go 1.27.4/只读模块缓存。经理检查起点 main@fb2c535、仅本项四次提交、never 路径未变、工作树干净，origin/main 已为祖先。
+
+审查重点/限制：RecordWritten 裸哨兵现在返回 false，语义收紧；关闭失败使正常停止返回非零，systemd 行为未实测。发布前最终复验与 rename 间仍有外部改名窗口；active 名字丢失时的追加不保证重启恢复。daemon 关闭错误经测试 hook 注入，真实目录同步失败只在 store 层覆盖。权限测试 ACL skip 本轮未逐一核对。未做实际断电、kill -9、原生 Linux/Windows、无硬链接文件系统、真实 Chrome；无 UI 改动。按 owner 不加跨进程锁，不恢复 FT21，不改完整 target ID。FT28 已在 done/，因此按正常排序选择 FT4。本轮未 ship、未打 tag、未发布、未启用任务、未移动后续 backlog。
+
+执行偏差：coder 首次 mktemp 将隔离 HOME 放到系统临时目录并跑过一次 go build，报告已自行删除；随后显式 mktemp -p TMPDIR，全部测试使用本 run 隔离目录。后台测试由执行环境产生一份外部临时输出，已登记 outside；经理不删除 /tmp 内容。未复用外部环境脚本。通知发送成功。
