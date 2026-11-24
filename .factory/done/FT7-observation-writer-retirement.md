@@ -416,3 +416,25 @@ notes:
 - 本次证据补充到本机 review/evidence/FT7-9eeb0d1/REVIEW.md 与 9eeb0d1.f2cSJe/，含 manager-configured.log、manager-adjacent.log、原实现对照及 overlay 源码。保留的 run.sh 使用本次临时 HOME；清理后复跑会从本地缓存重新预填，overlay 路径需按新证据位置重建。诊断非永久回归。
 - 未验证真实非 headless Chrome/CDP、loadingFailed、Docker、运行中的 systemd、Go 1.26；未启动 Chrome 或操作用户窗口。无链接 issue/PR，不发 GitHub 评论。无已知 TMPDIR 外写入。
 - 联系通知失败：指定 chat_id 与 chat 类型 contact_id 不匹配，通道拒绝，未擅自改路由。仅 review，ready/ 保持，未合并 main、未发布。
+
+## Guoyin · 2026-11-24 23:19
+FT7 的 Codex 复审已通过，审查提交 9eeb0d1，已从 review → ready 并推送看板。
+
+先 ship FT7，然后发新版本。
+
+最后按建议去处理 backlog 里面的 5 项任务
+
+## factory · 2026-11-24 23:19
+此次 owner 明确授权经理 ship 仅 FT7，并授权发新版本（允许现有 .github/workflows/release.yml 在 v* tag 上自然触发 goreleaser）。未改 factory.toml（ship 仍为 ["merge","push"]），未改工作流或发布配置，未删除任务分支，未部署到其他环境，未手建 GitHub Release。
+
+9eeb0d1 核验：完整提交 9eeb0d1123b34c04663252013bbe7642ceb0b039 是代码分支 factory/FT7-observation-writer-retirement 的远端 tip，也是 factory · review · 2026-11-25 00:05 与补充独立审查 factory · review · 2026-11-24 23:16 的 head（均为 verdict: pass）。它不是看板提交（当时将任务移入 ready 的 origin/factory_board 为 65463a7401ce2c23092789c344a116b431fc185e；补充审查看板为 9a98d61c127928ef74fbd6b689465a5be70ae466）。最新审查后无后续 owner 节。never 路径（.github/workflows/、.factory/factory.toml）相对 origin/main 无变更；origin/main@0d7c792e89667c616c64e6eb343eb92db104189e 已是该分支祖先，merge-tree 无冲突。
+
+ship：在隔离 worktree 对 origin/main 执行 git merge --no-ff --no-edit，得到 merge e8ec86aaa0c6333c8cac35c715ed48ed431a0879（双亲 0d7c792e89667c616c64e6eb343eb92db104189e 与已审查 head 9eeb0d1123b34c04663252013bbe7642ceb0b039），已普通推送 origin/main。独立核验远端 main 即为该 merge，且含精确已审查 head。
+
+测试（临时 HOME，Go 1.27.1 linux/amd64，先 go mod download 再 GOPROXY=off -mod=readonly；未使用 -tags realchrome）：变更包 go test -race ./internal/browser ./internal/daemon ./internal/state 通过；配置命令 test -z "$(gofmt -l .)" && go vet ./... && go test -race ./... 通过（11 个测试包 ok，pkg/protocol 无测试文件）。go.mod/go.sum 未改。
+
+版本 tag：推送前远端无任何 tag。按最高 vMAJOR.MINOR.PATCH 加 patch、无则 v0.1.0 的规则，创建注释 tag v0.1.0（tag 对象 bf4b7d0c4bc62361073c4b925ba26bc4ed9e8e17），指向 merge e8ec86aaa0c6333c8cac35c715ed48ed431a0879，说明为「v0.1.0: FT7 target释放与观测writer退役同步」。已普通推送 refs/tags/v0.1.0，独立核验远端剥离开的提交仍为 e8ec86aa，未移动或覆盖既有 tag。
+
+自然触发的发布：https://github.com/coinpost/go-bb-browser/actions/runs/45423134159 （workflow release，event=push，head_branch=v0.1.0，head_sha=e8ec86aa）于 2026-11-24 23:14:12 Asia/Shanghai 开始，23:18:01 完成，conclusion=failure。Checkout / Set up Go / QEMU / Buildx / Login to GHCR 成功；Run GoReleaser（goreleaser 2.20.3，args: release --clean）失败，exit code 1。日志：二进制与归档已构建（linux/darwin/windows 的 amd64 与 arm64），随后构建并推送镜像时失败：「docker images: failed to publish artifacts: failed to push ghcr.io/yiplee/go-bb-browser:0.1.0-arm64: exit status 1: error from registry: permission_denied: The requested installation does not exist.」未创建 GitHub Release（releases 仍为 0）。未修复、未改工作流或 goreleaser 配置、未重试发布、未手建 Release。tag v0.1.0 与 main 上的 merge 均保留。
+
+因新版本发布未核实成功，按授权不将 FT4 从 backlog 移入 new；FT2/FT3/FT6 仍 backlog，FT5 仍 stop。ready/ → done/，round=6 不变，标题与旧正文未改。无链接 issue/PR 可关闭。任务分支未删除。
