@@ -159,3 +159,18 @@ Claude Code 修复最新 review 的 P1 和四条 P2：备份顺移前先暂存 a
 审查重点/限制：RecordWritten 裸哨兵现在返回 false，语义收紧；关闭失败使正常停止返回非零，systemd 行为未实测。发布前最终复验与 rename 间仍有外部改名窗口；active 名字丢失时的追加不保证重启恢复。daemon 关闭错误经测试 hook 注入，真实目录同步失败只在 store 层覆盖。权限测试 ACL skip 本轮未逐一核对。未做实际断电、kill -9、原生 Linux/Windows、无硬链接文件系统、真实 Chrome；无 UI 改动。按 owner 不加跨进程锁，不恢复 FT21，不改完整 target ID。FT28 已在 done/，因此按正常排序选择 FT4。本轮未 ship、未打 tag、未发布、未启用任务、未移动后续 backlog。
 
 执行偏差：coder 首次 mktemp 将隔离 HOME 放到系统临时目录并跑过一次 go build，报告已自行删除；随后显式 mktemp -p TMPDIR，全部测试使用本 run 隔离目录。后台测试由执行环境产生一份外部临时输出，已登记 outside；经理不删除 /tmp 内容。未复用外部环境脚本。通知发送成功。
+
+## factory · review · 2026-11-25 01:00
+head: b9f94f6a33b7b5814345e115e57cfe4518ae153b
+verdict: fix
+fix:
+- [P1] internal/store/store.go:235：启动在拒绝非普通 active 之前先删除 .tmp/.keep。旧布局 rpc.jsonl 符号链接指向含受管记录的 rpc.jsonl.tmp 或 rpc.jsonl.keep 时，一次 Open 就删除唯一日志，再返回非普通文件错误；真实文件系统无并发复现各 3/3。先验证 active（以及需要恢复时的 .1），再进行暂存清理或备份权限修改；拒绝时保留链接目标，增加重叠文件名永久回归。
+notes:
+- [P2] internal/store/store.go:820：已有可读符号链接 .1 时，轮转先将其移至 .2，再发布新 .1；对后者注入 EIO，关闭并删除 active 后，启动成功创建 0 字节日志且恢复为空，完整上一代仍可经 .2 读取，3/3 复现。发布成功前保留 .1，或在备份顺移前明确拒绝非普通 .1；增加失败发布→移除 active→重启回归。
+- [P3] README.md:139：active 名字丢失后追加是否随关闭丢失取决于 .1 是否已指向打开的日志；发布 .1 后的追加可由它恢复。区分两个事务时点，并修正 store.go:642 最终复验仍称 backups left untouched 的误导错误文本；外来路径保护也须注明最终复验与 rename 并非原子操作。
+
+Codex 只读审查 origin/main...HEAD，base/merge-base fb2c535，无代码改动、提交或安装，工作树和索引干净。经理核对诊断源码、3 次复现输出及对应清理/备份控制流。P1 为单进程、固定目录布局、一次启动即删除唯一日志，不依赖并发、多进程或 Windows；按 owner 不要求跨进程锁，Windows 轮转仍按明确不支持边界处理。
+
+配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 在隔离 HOME/XDG/工具缓存、Go 1.27.4 下完整通过；修正首轮 PATH 遗漏 Node 后清空私有测试结果缓存重跑，adapter 测试启用，11 个有测试包全部通过。store/daemon 核心回归 race count=3 通过；两条因继承 ACL skip 的不可写测试在去除夹具 ACL 的隔离目录中原断言执行通过。临时缺陷诊断的预期正确性断言失败不等同仓库测试失败。真实 store 目录同步 EIO 经生产关闭链路传播的独立集成诊断通过（正常取消报告关闭错误；监听失败保留 EADDRINUSE 与关闭错误）。上一轮常规 .1 的 ENOSPC P1、目录同步组合错误、RecordWritten 正反例、告警及退出错误修复均通过。
+
+第 3/3 轮仍有 P1，达到 max_rounds，本项留在 review/ 等 owner 决定，不自动移回 new/。若继续修复，请 owner 添加说明并移至 new/。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。无新增可见 /tmp 路径；coder 报告 TMPDIR 外仅授权锁心跳。未做真实断电、kill -9、原生 Linux/Windows、无硬链接文件系统、真实 Chrome 或 systemd 部署验收；无 UI 改动。未合并、未打 tag、未发布、未启用任务、未移动后续 backlog 项。
