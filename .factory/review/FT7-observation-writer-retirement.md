@@ -375,3 +375,19 @@ notes:
 - 无安装。首次临时 HOME 意外落在系统临时目录，coder 已移入本次 TMPDIR 并在正确位置重新执行全量及诊断；manager 未删除系统临时目录。工作树索引正常刷新，无暂存差异。未验证真实非 headless Chrome/CDP、loadingFailed、Docker、运行中 systemd、Go 1.26；未启动浏览器、未操作用户窗口。无链接 issue/PR，不发 GitHub 评论。
 - round=6 超过 max_rounds=3，留在 review/ 等 owner 决定，不自动追加构建。若继续修复请追加说明并移至 new/。未合并 main、未发布。
 - 联系通知未送达：指定通知 chat_id 与 chat 类型 contact_id 不匹配，通道拒绝发送；遵守指定路由，未擅自换到其他聊天。
+
+
+## yiplee · 2026-11-24 22:53
+已采纳 Codex 审查发现的两项产品 P1 并直接在任务分支 `factory/FT7-observation-writer-retirement` 完成修复与永久回归，提交 `9eeb0d1123b34c04663252013bbe7642ceb0b039`（`9eeb0d1`，已推送 `origin`），任务继续留在 `review/` 等待复审：
+
+- **修复内容（`internal/daemon/rpc_observation.go`）**：
+  - **严格先停 writer 后清桶**：在 `enableObservation` 的 `!owned` 路径中不再于 `lifeMu` 内提前调用 `ReleaseBucket(bucket)`；存在孤立 observer 时先 `beginTargetReleaseLocked(tid)`，锁外严格按 `ForgetObservation(tid)` → `ReleaseBucket(bucket)` → `endTargetRelease(tid)` 顺序执行（复用共享 `obsRetiring` 屏障等待在途 `Record*` 与既有释放完成），无 `*browser.Session` 仅在持有旧桶且有释放进行中时先等待 `running.done` 再清桶。
+  - **兼容 FT28 挂起核验态**：`registerObservation` 接收 `conn`，当 `!Has(tid)` 且 `Suspended(tid)` 时释放 `lifeMu`，按 `maxSuspendedVerifyAttempts` 做有界 `enumerateTabs(ctx, conn)` 核验后重试；核验失败或耗尽尝试次数包装 `errTabLookup` 返回，由 `handleObsQuery` 经 `rpcResolveErr` 报告 `-32000 failed to list targets`，仅确认移除/doomed 时返回 `unknown tab id`。
+- **永久回归（`internal/daemon/obs_lifecycle_round7_stub_test.go`）**：
+  - `TestConcurrentObservationQueryWaitsForWriterRetirementBeforeClearingBucket`：在真实 `Session` writer 阻塞于 `RecordNetwork` 期间触发用户关闭与并发观测查询，验证查询在 writer 退役完成前绝不提前清桶，退役完成后再返回 `unknown tab id` 且迟到事件不重建桶。
+  - `TestSuspendedLiveTabObservationVerifiesInsteadOfUnknownTabID`：覆盖活页挂起核验态下 `network`/`console`/`errors` 三域恢复成功、核验失败报 `failed to list targets` 以及核验确认消失报 `unknown tab id`。
+- **基线夹具说明**：`TestUnwritableStateDirErrors`（`internal/daemon/tab_idle_test.go:516`）在 macOS 继承 ACL 目录下失败属 `main` 既有环境/夹具问题，按 owner 决策不在 FT7 分支修改，后续在 `main` 单独处理。
+- **验证结果**：
+  - `test -z "$(gofmt -l .)"`、`go vet ./...`、`go vet -tags realchrome ./...`、`git diff --check origin/main` 均通过；受保护路径及 `internal/daemon/tab_idle_test.go` 均未变更。
+  - `go test -race -count=1 ./...` 全量通过（11 个测试包全部通过，`pkg/protocol` 无测试文件）。
+  - 定向 10 轮 `-race` 压测通过：`TestConcurrentObservationQueryWaitsForWriterRetirementBeforeClearingBucket`、`TestSuspendedLiveTabObservationVerifiesInsteadOfUnknownTabID` 及既有 daemon/browser 生命周期测试集全部 10/10 通过。
