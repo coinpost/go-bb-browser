@@ -1,3 +1,7 @@
+---
+branch: factory/FT4-store-recovery-durability
+round: 1
+---
 # 日志尾行、轮转恢复与安全可写探测
 
 ## factory · 2026-11-21 23:23
@@ -43,3 +47,26 @@ FT7 的 Codex 复审已通过，审查提交 9eeb0d1，已从 review → ready �
 前置 FT7 已交付（merge e8ec86aaa0c6333c8cac35c715ed48ed431a0879，审查 head 9eeb0d1123b34c04663252013bbe7642ceb0b039），且新版本 v0.1.1 发布成功（tag 指向 origin/main@fb2c535b1273627cb7082bc59a9bb24c9e04b8ff，Release https://github.com/coinpost/go-bb-browser/releases/tag/v0.1.1 ，Actions https://github.com/coinpost/go-bb-browser/actions/runs/45426997200 conclusion=success）。按 owner 顺序将本项 backlog → new，本 run 不启动 build。
 
 收窄范围保持不变：去掉已被 FT18 覆盖的「完整 JSON 尾行缺换行」；保留轮转原子性、轮转失败恢复/吞错、可写探测误删。其后顺序仍为本项交付后才将 FT2 → new，再 FT3，再 FT6。t25u 要求全部四项都 ship 后再发一次补丁，不在本次发布。
+
+## factory · plan · 2026-11-25 00:00
+### Behaviour
+启动探测只操作独占创建的临时文件；轮转先完成私有快照，再原子发布并保留上一代。准备/写入/发布失败保留旧日志与写句柄，向追加方传错且可重试；重启恢复受管集合与活动时间。空集合和首次启动保持明确定义。
+### Scope
+只处理轮转原子性、失败恢复/吞错及探测误删，增加永久回归和必要文档；FT18 尾行修复不重复，FT21 不恢复，完整 target ID 不变。
+### Decisions
+采用同目录快照和硬链接上一代、rename 发布，临时句柄直接接管，消除发布后重开失败窗口。支持硬链接为必要条件；不支持则轮转报错、旧日志继续可写。普通追加不新增 fsync 承诺。
+### Checking
+覆盖快照创建/写入/短写/fsync、备份顺移/链接、发布失败、构造中断状态重启、空集合、retired/activity、多目标、探测文件保留及重试；执行配置完整测试，保留 FT18/权限回归。
+
+## factory · 2026-11-25 00:00
+构建完成，new/ → review/。branch: factory/FT4-store-recovery-durability；head: 7f7cbf5。
+
+实现独占临时可写探测；完整快照写入并 fsync 后硬链接上一代、原子 rename 发布，原句柄保留到发布成功。轮转失败以 ErrRotation 返回（触发记录已写入），后续追加重试；启动在活动日志缺失而 .1 存在时链接恢复，忽略未发布临时快照。README/AGENTS/systemd 文档同步。
+
+测试：coder 完整配置命令通过；经理独立复跑 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过。另 store race count=3 和 realchrome-tag vet 通过。无新增安装。起点 origin/main@fb2c535，仅一个本项提交，无 never 路径变更；未合并 main、未发 tag、未发布、未启用任何任务。
+
+限制/审查重点：硬链接文件系统兼容性；目录 fsync 失败当前仅 warn（发布已发生），普通追加不 fsync；旧实现已留下空/半截 active 加完整 .1 的歧义状态未自动恢复。未做实际断电/kill -9、Linux/Windows/无硬链接文件系统及真实 Chrome 验收。ACL 导致不可写目录测试 skip；既有 daemon 测试新增实际创建探测后的 ACL skip，需审查该测试调整。
+
+执行偏差：coder 曾在系统临时目录生成两个 HOME 与编辑脚本，并误 source 外部遗留 env.sh，导致一次测试写到旧 FT28 临时目录；coder 报告新建内容均已清理（经理未额外删除外部路径），旧临时目录父目录 mtime 改变。后续验证未 source 该文件；经理独立设置隔离 HOME 重跑全套通过。不得在后续运行复用此类外部环境脚本。
+
+通知失败：按本次 cron 元数据指定 contact_id 与 chat_id 发送 Build started，渠道拒绝（chat_id 与群目标不匹配）；未擅自改路由，Built/Summary 留在运行输出。
