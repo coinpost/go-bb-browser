@@ -70,3 +70,21 @@ FT7 的 Codex 复审已通过，审查提交 9eeb0d1，已从 review → ready �
 执行偏差：coder 曾在系统临时目录生成两个 HOME 与编辑脚本，并误 source 外部遗留 env.sh，导致一次测试写到旧 FT28 临时目录；coder 报告新建内容均已清理（经理未额外删除外部路径），旧临时目录父目录 mtime 改变。后续验证未 source 该文件；经理独立设置隔离 HOME 重跑全套通过。不得在后续运行复用此类外部环境脚本。
 
 通知失败：按本次 cron 元数据指定 contact_id 与 chat_id 发送 Build started，渠道拒绝（chat_id 与群目标不匹配）；未擅自改路由，Built/Summary 留在运行输出。
+
+## factory · review · 2026-11-25 00:07
+head: 7f7cbf5245ea98c6d68b724a64ab311d2874bce2
+verdict: fix
+fix:
+- [P1] internal/store/store.go:546：两个 Store/daemon 共用状态目录时，固定 rpc.jsonl.tmp 可被另一个实例删除并重建，先完成者随后会发布对方尚未写入的快照。受控交错复现：A 追加返回 nil，活动日志 0 字节，上一代 373 字节，重启丢失受管集合。增加跨进程单写者保护，在启动清理临时文件之前取得并持有至 Close，或提供等价的明确拒绝机制；增加双实例永久回归，不能只依赖各 Store 的 mutex。
+- [P1] internal/store/store.go:619：活动日志被删除后再次轮转，先将可恢复 .1 顺移到 .2，而 link 活动路径缺失被当作可继续；若随后发布 rename 失败，启动只查 .1，便成功新建空日志。复现：先成功轮转，删除活动日志，再对发布注入 EIO，重启前仅剩含 persisted 的 rpc.jsonl.2，恢复集合为 []。备份顺移前处理活动路径缺失，确保新快照发布成功前仍有启动能恢复的上一代，并增加组合失败回归。
+notes:
+- [P2] internal/store/store.go:583：轮转发布后的目录 fsync 失败仅 warn，触发追加返回 nil，随后低于阈值的追加也不重试同步。注入 EIO 复现目录同步仅调用一次。建议保留已发布句柄，明确传播“记录已写、发布成功但目录同步失败”，并单独重试目录同步；不扩大普通追加 fsync 承诺。
+- [P2] internal/store/store.go:296：旧版将符号链接活动日志移至 .1 后中断，.1 仍可读出受管记录，restorePreviousLog 却将非普通文件当作不存在，成功创建空日志。至少对已存在但不支持的备份类型明确报错。
+- [P2] internal/store/store.go:576：Windows 的 os.OpenFile 共享标志不含 FILE_SHARE_DELETE，发布时新旧句柄仍打开，rename 替换预计会持续共享冲突。仅静态核对 Go Windows 实现，未做原生实测；需原生平台验证并采用兼容发布策略。
+- [P3] internal/daemon/tab_idle.go:70,169：ErrRotation 表示触发记录已写入，但生命周期告警仍声称注册不会恢复或退役未持久化；实测重新打开的受管数分别为 1、0。建议 errors.Is(err, store.ErrRotation) 区分轮转与追加失败。
+
+Codex 只读审查 origin/main...HEAD（base fb2c535），无代码提交，工作树干净。配置测试 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全部通过；上述两条 P1 由临时测试覆盖层确定性交错/故障注入复现，经理核对复现输出与对应控制流。三代备份已满时连续三次失败后重试保留原 .1/.2；既有 .write-test 保护通过。继承 ACL 允许创建时，两条不可写目录测试的 skip 合理；移除隔离测试目录的继承 ACL 后原测试均执行通过。
+
+第 1/3 轮审查发现 P1，review/ → new/，下一次 build 在同一分支修复 fix 列表。无新增安装；无新增可见 /tmp 路径，TMPDIR 外仅按要求刷新本 run 锁。未做真实断电、kill -9、Linux、Windows、无硬链接文件系统或真实 Chrome 验收。未合并、未发 tag、未发布，未移动后续 backlog 项。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。
+
+通知失败：Review started 按 cron 指定 contact_id 与 chat_id 发送，被渠道拒绝（chat_id 与群目标不匹配）；未擅自替换路由，后续结果与 Summary 留在运行输出。
