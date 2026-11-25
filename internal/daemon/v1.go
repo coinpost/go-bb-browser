@@ -466,30 +466,99 @@ func (s *Server) handleTabNew(ctx context.Context, w http.ResponseWriter, id jso
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "browser session not ready", nil)
 		return
 	}
+	// Shutdown lets the creations in flight settle and sends no new one.
+	if !s.creates.begin() {
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "daemon shutting down", &protocol.ErrData{
+			Error:  "daemon shutting down",
+			Hint:   "no tab was requested from the browser",
+			Method: protocol.MethodTabNew,
+		})
+		return
+	}
+	defer s.creates.end()
 	initial := strings.TrimSpace(p.URL)
+	// Only a creation that was sent has anything to settle: a request that is
+	// already over asks the browser for nothing.
+	if ended, over := s.creationEnded(ctx); over {
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
+			Error:  "failed to create tab",
+			Hint:   ended + " before Target.createTarget was sent; no tab was requested from the browser",
+			Method: protocol.MethodTabNew,
+		})
+		return
+	}
 	// Window before the request: the new target exists in the browser, and can
 	// be listed, closed and destroyed, before this handler sees the reply.
 	win := s.tabs.OpenWindow()
-	tid, err := createPageTarget(ctx, conn, initial, p.Silent)
+	reply, answered := s.requestCreatedTarget(ctx, conn, initial, p.Silent)
+	if !answered {
+		// The request ended and the reply did not come within the settlement:
+		// whether a tab exists is not known and no id identifies it.
+		s.tabs.Abandon(win)
+		ended, _ := s.creationEnded(ctx)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			s.triggerBrowserProbe()
+		}
+		s.logger.Warn("tab_new ended before Target.createTarget answered; a tab may have been created, its id is not known, it is not managed and was not closed", "reason", ended)
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
+			Error:  "failed to create tab",
+			Hint:   fmt.Sprintf("%s before Target.createTarget answered, and no reply followed within the cleanup wait; if the browser did create a tab, its id is not known: it is unmanaged, was not closed and shows up in tab_list", ended),
+			Method: protocol.MethodTabNew,
+		})
+		return
+	}
+	tid, err := reply.tid, reply.err
 	if err == nil && tid == "" {
 		err = errors.New("Target.createTarget returned no target id")
 	}
 	if err != nil {
 		s.tabs.Abandon(win)
-		s.logger.Error("tab_new create target failed", "err", err)
+		hint := s.cdpHint(err)
+		if createOutcomeUnknown(err) {
+			// Not a refusal: the round trip ended without the browser's
+			// answer (connection lost, deadline). The command may have been
+			// executed.
+			s.logger.Warn("tab_new lost its Target.createTarget round trip before the browser answered; a tab may have been created, its id is not known, it is not managed and was not closed", "err", err)
+			hint += "; the browser did not answer Target.createTarget, so whether it created a tab is not known: if it did, the tab's id is not known, it is unmanaged, was not closed and shows up in tab_list"
+		} else {
+			s.logger.Error("tab_new create target failed", "err", err)
+		}
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "failed to create tab", &protocol.ErrData{
 			Error: "failed to create tab",
-			Hint:  s.cdpHint(err),
+			Hint:  hint,
 		})
 		return
 	}
 	pinTarget(ctx, tid)
-	if !s.commitCreatedTab(ctx, conn, win, tid) {
+	committed, ended := s.commitCreatedTab(ctx, conn, win, tid)
+	if ended != "" {
+		// The request ended before the creation was committed: nobody can be
+		// given this id any more. Roll back exactly the tab the reply names
+		// instead of leaving it open and unmanaged.
+		cleanup, closed := s.rollbackCreatedTab(ctx, conn, tid)
+		hint := fmt.Sprintf("%s before the new tab %s was committed; it is not registered as managed; cleanup: %s", ended, tid, cleanup)
+		if closed {
+			s.logger.Warn("tab_new ended before its tab was committed; the created tab was rolled back", "tab", string(tid), "reason", ended, "cleanup", cleanup)
+		} else {
+			s.logger.Warn("tab_new ended before its tab was committed and the rollback failed; the tab may still be open and is not managed", "tab", string(tid), "reason", ended, "cleanup", cleanup)
+			hint += "; the tab may still be open: it shows up in tab_list and can be closed with tab_close"
+		}
+		s.rpcErr(ctx, w, id, protocol.CodeServerError, "tab_new interrupted before completion", &protocol.ErrData{
+			Error:  "tab_new interrupted before completion",
+			Hint:   hint,
+			Method: protocol.MethodTabNew,
+		})
+		return
+	}
+	if !committed {
 		// The tab was reported gone while it was being created, or right after
 		// by the enumeration that settled contradicting evidence. Make sure of
 		// it: one bounded close of exactly this id, so no unmanaged tab is
 		// left behind silently.
-		cleanup := s.rollbackCreatedTab(ctx, conn, tid)
+		cleanup, closed := s.rollbackCreatedTab(ctx, conn, tid)
+		if !closed {
+			s.logger.Warn("tab_new rollback failed; the tab may still be open and is not managed", "tab", string(tid), "cleanup", cleanup)
+		}
 		s.rpcErr(ctx, w, id, protocol.CodeServerError, "tab closed before tab_new completed", &protocol.ErrData{
 			Error:  "tab closed before tab_new completed",
 			Hint:   fmt.Sprintf("the new tab %s was closed (tab_close, idle cleanup, or in the browser) while it was being created; cleanup: %s; call tab_new again", tid, cleanup),
