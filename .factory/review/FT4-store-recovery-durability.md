@@ -1,6 +1,6 @@
 ---
 branch: factory/FT4-store-recovery-durability
-round: 4
+round: 5
 ---
 # 日志尾行、轮转恢复与安全可写探测
 
@@ -245,3 +245,26 @@ factory · review · 2026-11-25 08:52 的 P1（internal/store/store.go:731：快
 按 owner 此次说明，将本项从 review/ 移回 new/，等待外部工厂 build。本 run 只做卡片移动与记录，不启动开发、build、review 或 ship，不改代码与配置。保留 branch 与 round: 4，不重置轮次或 max_rounds。
 
 不修改先前 review 正文与历史 fix（含 factory · review · 2026-11-25 08:52 的 verdict: fix，head: a983fc3a6e79d34d11d623db2b60a0950c457a83）。保留此前三项 owner 边界：单进程独占状态目录（Guoyin / factory · 2026-11-25 00:17）、日志不配置成符号链接（Guoyin / factory · 2026-11-25 08:27）、本机文件系统且不支持 NFS 等网络文件系统（Guoyin / factory · 2026-11-25 09:35）。未移动 FT2/FT3/FT6。
+
+
+## factory · plan · 2026-11-25 10:00
+第 5 轮补充计划：
+### Behaviour
+顺移备份前将 .2/.3 检查的非 ENOENT 错误原样传播，.keep 检查失败不误报身份替换。发布后保留新句柄，旧句柄 Close 错误与目录同步错误合并为维护错误返回，RecordWritten 仍只代表本次完整写入。独占可写探测实际写一字节，检查写入、短写、关闭并仅清理自身文件。已有普通 active 先确认可读写打开，再清理暂存和收紧备份权限。
+### Scope
+修复 08:52 review 三条 P2 与两条 P3，补永久回归和精确文档；沿用单进程独占、非符号链接日志、本机文件系统三项 owner 边界，不新增跨进程锁、NFS 结果核验或 Windows 兼容层，不恢复 FT21。
+### Decisions
+沿用维护错误和窄测试注入点；发布后旧句柄关闭失败只报告一次，不误标为未发布或目录同步失败。收窄“拒绝启动不改任何文件”保证，明确目录收权限、恢复链接、打开后的清理仍可能发生；普通追加不增加 fsync。
+### Checking
+永久回归备份检查 EIO 与失败重试不丢历史、.keep 原始错误、发布后 Close/目录同步组合及恢复、探测写/短写/关闭错误和清理、0400 active 拒绝时暂存/备份不动。完整配置测试及 store 重复 race；故障注入不宣称真实磁盘故障。
+
+## factory · 2026-11-25 10:00
+第 5 轮 Claude Code 构建完成，new/ → review/。branch: factory/FT4-store-recovery-durability；head: 9b2f1c2（代码 91120bb、文档 9b2f1c2）。round 保留历史累增至 5，未重置 max_rounds。
+
+完成补充计划中的三条 P2、两条 P3：备份槽检查错误先返回而不顺移；.keep 检查保留原始错误；发布后先接管新句柄，旧句柄关闭错误合并返回；可写探测实际写一字节并保留写/短写/关闭/清理错误；普通 active 打开提前于暂存清理与备份权限修改。README/AGENTS/systemd 文档补充本机文件系统、不支持 NFS 和准确启动失败保证。新增六组永久回归；旧代码仅接入三个测试注入点的副本上验证 red（.1 检查子用例原本通过）。不将旧 review 自动改为 pass；其 P1 按 owner 09:35 记录不作为当前阻塞，未新增网络文件系统机制。
+
+测试：coder 完整配置命令通过，store race count=10 通过；经理独立隔离 HOME/XDG/GOCACHE/GOPATH/GOMODCACHE、只读复制既有模块下载缓存、离线复跑 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全部通过，11 个有测试包通过，Node 在 PATH，adapter 启用。coder Linux 静态 vet、Windows 交叉编译/store vet、realchrome-tag daemon vet 通过。store 不可写夹具清除继承 ACL 后实际执行，新增 0400 回归非 root 下不允许 skip；daemon 既有不可写目录测试仍因继承 ACL skip，两个子进程 helper 按设计 skip。无新增安装，使用已有 Go 1.27.4。经理核验仅本项七个提交、origin/main@fb2c535 已为祖先、never 路径未变、工作树干净，分支已推送。
+
+限制/审查重点：首次启动先创建 active，后续备份 chmod 失败可留下空文件，文档明确不承诺所有失败无副作用；旧句柄关闭失败只报一次，不重试。daemon 对新关闭错误沿用通用告警路径，未新增该路径专项测试。未做真实磁盘满/EIO、RLIMIT_FSIZE 子进程、断电/kill -9、NFS、无硬链接文件系统、原生 Linux/Windows、真实 Chrome 或 systemd 部署；无 UI 改动。
+
+FT28 已 done，按正常排序选择唯一 new 项 FT4；FT21 保持 stop，完整 target ID 未改。未 ship、未打 tag、未发布、未启用任务、未移动 FT2/FT3/FT6。临时写入均在工作树与本 run TMPDIR，外部主动写入仅授权锁心跳，无新增可见 /tmp 路径；coder 报告一次 TMPDIR 未传承后的只读系统临时目录枚举，未读取/source 外部 env.sh。按流程结束清理本轮 TMPDIR。通知发送成功。
