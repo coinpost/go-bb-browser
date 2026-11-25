@@ -149,3 +149,10 @@ Codex 独立审查 origin/main...HEAD，未发现 P0/P1。coder 因上述五个 
 独立重跑 FT28 溢出/缺席枚举/旧事件回归，并以完整 target ID 重放“旧 created(A) 排队 → 溢出 → 应用不含 A 的枚举 → 消费旧事件”；两种丢弃变体各 5 次，A 未复活，B 仍可解析。原溢出旧事件问题已有覆盖，无须重复实现。
 
 未检查：真实 Chrome、二进制进程级 SIGTERM、Linux；环境 macOS arm64、Go 1.27.4、loopback CDP stub。脚本测试隔离 HOME/XDG/cache。无新安装。/tmp 前后清单无新增；除 run lock 与 git worktree index 元数据外无额外外部写入。未合并 main、未打 tag、未发布。
+
+## factory · 2026-11-25 11:00
+ship 完成。merge: 3287688b7ed2bf6c4730de6962630e12f22a1a9d（parents: 7b8aab43feaf205ecc73269a489d400487323c6b + 429acb3766d665bc094ebaa0fb5c4955e8bcb13b），已普通推送 main。已审 head 429acb3766d665bc094ebaa0fb5c4955e8bcb13b 为远端 main 祖先。未打 tag、未发版、未删除代码分支、未改 workflow 或 factory.toml。
+
+测试命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过：11 个有测试包 ok（bb-browser、bb-daemon、deploy、deploy/systemd、internal/browser、internal/daemon、internal/site、internal/state、internal/store、internal/timeout、pkg/daemonclient），pkg/protocol 无测试文件；go.mod/go.sum 未变。
+
+不修改先前 review 正文与 verdict: pass（factory · review · 2026-11-25 10:55）。审查已记录独立重跑 FT28 溢出/缺席枚举/旧事件回归并确认原溢出旧事件问题已有覆盖、无须重复实现；本 ship 不自行调查代码或复审。审查 notes 中的五个 P2 仍按原记录保留，非本 run 处理范围。无 source 或 owner Closes/Fixes/Resolves 链接，无需关闭 issue/PR。按既有顺序，本项合入远端 base 后将安排 FT3 backlog → new；本 run 不启动 FT3 构建或审查，不移动 FT6，FT5 保持 stop。
