@@ -1,13 +1,13 @@
 go-bb-browser - factory board
 =============================
-Nothing at your gates | 0 with the agent | 24 done | 24 sent back
-Drawn Nov 25, 14:15 | https://github.com/coinpost/go-bb-browser
+Nothing at your gates | 1 with the agent | 24 done | 24 sent back
+Drawn Nov 25, 14:16 | https://github.com/coinpost/go-bb-browser
 
-BACKLOG (1)                                 never built
-    FT6     3d  run帮助布尔参数与选项终止符兼容
-
-NEW (0)                                     avg stay 3h
+BACKLOG (0)                                 never built
     Nothing here
+
+NEW (1)                                     avg stay 3h
+    FT6     1m  run帮助布尔参数与选项终止符兼容
 
 REVIEW (0)                                  avg stay 2h
     Nothing here
