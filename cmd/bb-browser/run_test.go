@@ -434,6 +434,40 @@ func TestParseRunArgs(t *testing.T) {
 			tokens: []string{"x.js", "--n", "1", "--n=2", "--n", "3"},
 			want:   runArgs{script: "x.js", named: map[string]string{"n": "3"}},
 		},
+		{
+			name:   "help bool values keep order",
+			tokens: []string{"--help=false", "x.js", "-h=true", "--help=0", "-h=", "--help=maybe"},
+			want:   runArgs{script: "x.js", globals: g("help", "false", "help", "true", "help", "0", "help", "", "help", "maybe")},
+		},
+		{
+			name:   "bool help does not consume next token",
+			tokens: []string{"x.js", "--help", "false", "-h", "true"},
+			want:   runArgs{script: "x.js", positional: []string{"false", "true"}, globals: g("help", "true", "help", "true")},
+		},
+		{
+			name:   "double dash script after separator",
+			tokens: []string{"--tab", "t1", "--", "--foo.js", "a", "--count", "20", "--help=true", "-h=true"},
+			want: runArgs{script: "--foo.js", positional: []string{"a", "-h=true"},
+				named: map[string]string{"count": "20", "help": "true"}, globals: g("tab", "t1")},
+		},
+		{
+			name:   "script after separator is verbatim",
+			tokens: []string{"--", "--help=true", "--url", "u"},
+			want:   runArgs{script: "--help=true", named: map[string]string{"url": "u"}},
+		},
+		{name: "reserved name as script after separator", tokens: []string{"--", "--json"}, want: runArgs{script: "--json"}},
+		{name: "short help as script after separator", tokens: []string{"--", "-h"}, want: runArgs{script: "-h"}},
+		{name: "separator token as script after separator", tokens: []string{"--", "--"}, want: runArgs{script: "--"}},
+		{
+			name:   "empty script after separator stays the script",
+			tokens: []string{"--", "", "x.js"},
+			want:   runArgs{script: "", positional: []string{"x.js"}},
+		},
+		{
+			name:    "separator after script does not relax positionals",
+			tokens:  []string{"x.js", "--", "--foo.js"},
+			wantErr: "flag --foo.js needs a value",
+		},
 		{name: "named missing value at end", tokens: []string{"x.js", "--count"}, wantErr: "flag --count needs a value"},
 		{name: "named followed by flag", tokens: []string{"x.js", "--count", "--n", "1"}, wantErr: "flag --count needs a value"},
 		{name: "named followed by separator", tokens: []string{"x.js", "--count", "--", "1"}, wantErr: "flag --count needs a value"},
@@ -458,6 +492,223 @@ func TestParseRunArgs(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("parseRunArgs(%q)\n got %+v\nwant %+v", tc.tokens, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunHelpBool: before the first "--" the help flag follows pflag's bool rules. Whenever it
+// ends up true the command prints help and sends nothing, even with no or a missing script.
+func TestRunHelpBool(t *testing.T) {
+	t.Setenv("BB_BROWSER_API_TOKEN", "help-secret")
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"--help=true after script", []string{"--url", "URL", "run", "SCRIPT", "--help=true"}},
+		{"--help=true before script", []string{"--url", "URL", "run", "--help=true", "SCRIPT", "hello"}},
+		{"--help=1", []string{"--url", "URL", "run", "SCRIPT", "hello", "--help=1"}},
+		{"--help=T", []string{"--url", "URL", "run", "SCRIPT", "--help=T"}},
+		{"-h=true after script", []string{"--url", "URL", "run", "SCRIPT", "hello", "-h=true"}},
+		{"-h=true before script", []string{"--url", "URL", "run", "-h=true", "SCRIPT"}},
+		{"-h=1", []string{"--url", "URL", "run", "SCRIPT", "-h=1"}},
+		{"last value true wins", []string{"--url", "URL", "run", "SCRIPT", "--help=false", "-h=false", "--help=true"}},
+		{"last value true wins short", []string{"--url", "URL", "run", "--help=false", "SCRIPT", "-h"}},
+		{"help without script", []string{"--url", "URL", "run", "--help=true"}},
+		{"short help without script", []string{"--url", "URL", "run", "-h=true"}},
+		{"help with missing script file", []string{"--url", "URL", "run", "SCRIPT.missing", "--help=true"}},
+		{"help before separator and double dash script", []string{"--url", "URL", "run", "-h=true", "--", "--foo.js"}},
+		{"help with adapter flag missing value later is still an error-free help", []string{"--url", "URL", "run", "SCRIPT", "--help=true", "--count", "20"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newRunDaemon(t)
+			stdout, cobraOut, err := execCLI(t, expand(tc.args, d.URL, runAdapterFile(t))...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := stdout + cobraOut
+			for _, w := range []string{"run SCRIPT.js", "--name value", "--api-token", "--tab"} {
+				if !strings.Contains(out, w) {
+					t.Errorf("output missing %q:\n%s", w, out)
+				}
+			}
+			if strings.Contains(out, "help-secret") {
+				t.Error("help exposed the API token")
+			}
+			if n := d.requestCount(); n != 0 {
+				t.Fatalf("daemon received %d requests, want 0", n)
+			}
+		})
+	}
+}
+
+// TestRunHelpFalseExecutes: an explicit false is not a help request — the adapter runs, and
+// neither the flag nor its value reaches the adapter arguments.
+func TestRunHelpFalseExecutes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantArgs map[string]string
+	}{
+		{"--help=false after script", []string{"--url", "URL", "--tab", "t1", "run", "SCRIPT", "hello", "--help=false"},
+			map[string]string{"query": "hello", "arg1": "hello"}},
+		{"--help=false before script", []string{"--url", "URL", "--tab", "t1", "run", "--help=false", "SCRIPT", "hello", "--count", "20"},
+			map[string]string{"query": "hello", "arg1": "hello", "count": "20"}},
+		{"--help=0", []string{"--url", "URL", "--tab", "t1", "run", "SCRIPT", "--help=0"}, map[string]string{}},
+		{"-h=false after script", []string{"--url", "URL", "--tab", "t1", "run", "SCRIPT", "hello", "-h=false"},
+			map[string]string{"query": "hello", "arg1": "hello"}},
+		{"-h=false before script", []string{"--url", "URL", "--tab", "t1", "run", "-h=false", "SCRIPT", "hello"},
+			map[string]string{"query": "hello", "arg1": "hello"}},
+		{"-h=0", []string{"--url", "URL", "--tab", "t1", "run", "SCRIPT", "-h=0"}, map[string]string{}},
+		{"last value false wins", []string{"--url", "URL", "--tab", "t1", "run", "--help", "SCRIPT", "-h", "-h=true", "hello", "--help=false"},
+			map[string]string{"query": "hello", "arg1": "hello"}},
+		{"last value false wins short", []string{"--url", "URL", "--tab", "t1", "run", "SCRIPT", "--help=true", "-h=false"},
+			map[string]string{}},
+		{"help names after separator belong to the adapter", []string{"--url", "URL", "--tab", "t1", "run", "SCRIPT", "--", "-h", "--help=true", "-h=true"},
+			map[string]string{"query": "-h", "arg1": "-h", "arg2": "-h=true", "help": "true"}},
+		{"help names after separator and script after it", []string{"--url", "URL", "--tab", "t1", "run", "--", "SCRIPT", "--help", "me", "-h"},
+			map[string]string{"query": "-h", "arg1": "-h", "help": "me"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BB_BROWSER_API_TOKEN", "")
+			d := newRunDaemon(t)
+			stdout, cobraOut, err := execCLI(t, expand(tc.args, d.URL, runAdapterFile(t))...)
+			if err != nil {
+				t.Fatalf("run failed: %v", err)
+			}
+			tab, _, args := d.evalCall(t)
+			if tab != "t1" {
+				t.Errorf("eval tab = %q, want t1", tab)
+			}
+			if !reflect.DeepEqual(args, tc.wantArgs) {
+				t.Errorf("adapter args = %v, want %v", args, tc.wantArgs)
+			}
+			if n := d.requestCount(); n != 1 {
+				t.Errorf("daemon received %d requests, want 1 (eval)", n)
+			}
+			if strings.TrimSpace(stdout) != "{\n  \"ok\": true\n}" {
+				t.Errorf("stdout = %q, want pretty adapter result", stdout)
+			}
+			if strings.Contains(stdout+cobraOut, "run SCRIPT.js") {
+				t.Errorf("help was printed:\n%s%s", stdout, cobraOut)
+			}
+		})
+	}
+}
+
+// TestRunHelpInvalidBeforeRequest: an invalid help value, and everything that is still wrong
+// once help is explicitly off, fails locally without a request.
+func TestRunHelpInvalidBeforeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"--help=maybe", []string{"--url", "URL", "run", "SCRIPT", "--help=maybe"}, `invalid argument "maybe" for "-h, --help" flag`},
+		{"--help= empty", []string{"--url", "URL", "run", "SCRIPT", "--help="}, `invalid argument "" for "-h, --help" flag`},
+		{"-h=maybe", []string{"--url", "URL", "run", "SCRIPT", "-h=maybe"}, `invalid argument "maybe" for "-h, --help" flag`},
+		{"-h= empty", []string{"--url", "URL", "run", "SCRIPT", "-h="}, `invalid argument "" for "-h, --help" flag`},
+		{"invalid value before a valid true", []string{"--url", "URL", "run", "SCRIPT", "--help=maybe", "--help=true"}, `invalid argument "maybe" for "-h, --help" flag`},
+		{"invalid value after a valid true", []string{"--url", "URL", "run", "SCRIPT", "-h", "-h=maybe"}, `invalid argument "maybe" for "-h, --help" flag`},
+		{"help off without script", []string{"--url", "URL", "run", "--help=false"}, "missing script path"},
+		{"short help off without script", []string{"--url", "URL", "run", "-h=false"}, "missing script path"},
+		{"help off with blank script", []string{"--url", "URL", "run", "--help=false", "--", " "}, "missing script path"},
+		{"help off with missing script file", []string{"--url", "URL", "run", "SCRIPT.missing", "-h=false"}, "SCRIPT.missing"},
+		{"help off with adapter flag missing value", []string{"--url", "URL", "run", "SCRIPT", "--help=false", "--count"}, "flag --count needs a value"},
+		{"help on with adapter flag missing value", []string{"--url", "URL", "run", "SCRIPT", "--help=true", "--count"}, "flag --count needs a value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BB_BROWSER_API_TOKEN", "")
+			d := newRunDaemon(t)
+			script := runAdapterFile(t)
+			stdout, _, err := execCLI(t, expand(tc.args, d.URL, script)...)
+			want := strings.ReplaceAll(tc.wantErr, "SCRIPT", script)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want containing %q", err, want)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if n := d.requestCount(); n != 0 {
+				t.Fatalf("daemon received %d requests, want 0", n)
+			}
+		})
+	}
+}
+
+// TestRunDoubleDashScriptAfterSeparator: the first "--" ends the CLI flags, so the token after
+// it is the script path even when the file name itself starts with "--".
+func TestRunDoubleDashScriptAfterSeparator(t *testing.T) {
+	dir := t.TempDir()
+	src := `/* @meta {"name":"dd","args":{"query":{"required":true}}} */
+async function(args) { return args; }
+`
+	for _, name := range []string{"--foo.js", "--help", "--json=true.js", "-h"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantArgs map[string]string
+	}{
+		{"script only", []string{"--url", "URL", "--tab", "t1", "run", "--", "--foo.js"}, map[string]string{}},
+		{"with adapter arguments", []string{"--url", "URL", "run", "--tab", "t1", "--", "--foo.js", "hello", "--count", "20", "--tab=x"},
+			map[string]string{"query": "hello", "arg1": "hello", "count": "20", "tab": "x"}},
+		{"adapter flag before the separator, script after it", []string{"--url", "URL", "--tab", "t1", "run", "--foo.js=x", "--", "--foo.js"},
+			map[string]string{"foo.js": "x"}},
+		{"file named like the help flag", []string{"--url", "URL", "--tab", "t1", "run", "--", "--help", "hello"},
+			map[string]string{"query": "hello", "arg1": "hello"}},
+		{"file named like a bool flag with value", []string{"--url", "URL", "--tab", "t1", "run", "--", "--json=true.js"}, map[string]string{}},
+		{"file named like the short help flag", []string{"--url", "URL", "--tab", "t1", "run", "--", "-h", "--help", "me"},
+			map[string]string{"help": "me"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BB_BROWSER_API_TOKEN", "")
+			d := newRunDaemon(t)
+			stdout, cobraOut, err := execCLI(t, expand(tc.args, d.URL, "")...)
+			if err != nil {
+				t.Fatalf("run failed: %v", err)
+			}
+			tab, _, args := d.evalCall(t)
+			if tab != "t1" {
+				t.Errorf("eval tab = %q, want t1", tab)
+			}
+			if !reflect.DeepEqual(args, tc.wantArgs) {
+				t.Errorf("adapter args = %v, want %v", args, tc.wantArgs)
+			}
+			if strings.TrimSpace(stdout) != "{\n  \"ok\": true\n}" {
+				t.Errorf("stdout = %q, want pretty adapter result (not raw JSON, not help)", stdout)
+			}
+			if cobraOut != "" {
+				t.Errorf("unexpected Cobra output:\n%s", cobraOut)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"missing double dash file", []string{"--url", "URL", "run", "--", "--absent.js"}, "--absent.js"},
+		{"without separator it is an adapter flag", []string{"--url", "URL", "run", "--foo.js"}, "flag --foo.js needs a value"},
+		{"separator after the script keeps the adapter rules", []string{"--url", "URL", "run", "./--foo.js", "--", "--foo.js"}, "flag --foo.js needs a value"},
+		{"second double dash token is not a positional", []string{"--url", "URL", "run", "--", "--foo.js", "--foo.js"}, "flag --foo.js needs a value"},
+		{"separator pair names no script file", []string{"--url", "URL", "run", "--", "--"}, "--"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BB_BROWSER_API_TOKEN", "")
+			d := newRunDaemon(t)
+			_, _, err := execCLI(t, expand(tc.args, d.URL, "")...)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
+			}
+			if n := d.requestCount(); n != 0 {
+				t.Fatalf("daemon received %d requests, want 0", n)
 			}
 		})
 	}

@@ -376,6 +376,7 @@ Daemon 已实现但 **CLI 未封装** 的 JSON-RPC 方法：`tab_focus`（返回
 bb-browser run ./x.js hello --count 20        # args = { query: "hello", arg1: "hello", count: "20" }
 bb-browser run ./x.js hello --count=20 --json # 同上，并输出原始 JSON-RPC
 bb-browser run ./x.js --tab "$TAB" -- hello --tab x   # 全局 tab=$TAB（完整 tab id）；脚本得到 args.tab = "x"
+bb-browser run --tab "$TAB" -- --foo.js hello  # 脚本文件名以 -- 开头：放在分隔符之后
 ```
 
 参数规则（`run` 自行解析参数，不交给 Cobra，因此未知的 `--name` 不会被拒绝）：
@@ -383,14 +384,16 @@ bb-browser run ./x.js --tab "$TAB" -- hello --tab x   # 全局 tab=$TAB（完整
 | 写法 | 结果 |
 |------|------|
 | `--url` / `--api-token` / `--json` / `--tab` / `--help`（`-h`） | 保留名，始终是全局选项；可写在 `run` 之前、之后或与脚本参数穿插，支持 `--json=false`、`--tab=ID` |
-| `--`（第一个） | 分隔符：其后的 `--name` 全部归脚本，包括上述保留名；本身不传给脚本 |
+| `--help`、`-h`、`--help=BOOL`、`-h=BOOL` | 帮助是布尔选项（取值同 Go `strconv.ParseBool`，与 `--json=BOOL` 一致）：最终为真时只打印帮助，不读脚本、不发任何请求；`--help=false` / `-h=false` 照常执行；写多次时最后一次生效；非法取值（如 `--help=maybe`）本地报错。`--help false` 不取下一个 token（`false` 是位置参数） |
+| `--`（第一个） | 分隔符：其后的 `--name` 全部归脚本，包括上述保留名（`-h`、`-h=…` 此后也是普通值）；本身不传给脚本 |
+| `-- --foo.js`（`--` 之前没有脚本路径） | 紧跟 `--` 的那个 token 原样作为脚本路径，可以以 `--` 开头；仅此一个 token 放宽，之后仍按命名参数规则解析 |
 | `--name=`、`--name ""` | 空字符串 |
 | `--name=a=b` | 只在第一个 `=` 处切分，值为 `a=b` |
 | 同名多次 | 保留最后一次的值 |
 | `-5`、`--offset -3` | 单横线开头的 token 是普通值（位置参数或命名参数的值） |
 | `--name` 后无值，或下一个 token 以 `--` 开头 | 报错 `flag --name needs a value`；值以 `--` 开头时请写 `--name=--x` |
 
-不支持无值布尔开关和以 `--` 开头的位置参数。缺少脚本路径、命名参数缺值、全局选项取值非法（如 `--json=maybe`）都会在向 daemon 发请求之前报错。
+不支持脚本的无值布尔开关；除上面 `--` 之后的脚本路径外，不支持以 `--` 开头的位置参数（脚本路径已在 `--` 之前给出时，`--` 之后以 `--` 开头的 token 仍是命名参数；也可以把路径写成 `./--foo.js`）。缺少脚本路径、命名参数缺值、全局选项取值非法（如 `--json=maybe`、`--help=maybe`）都会在向 daemon 发请求之前报错；参数本身有错（如命名参数缺值）时即使同时请求了帮助也报错。
 
 ---
 

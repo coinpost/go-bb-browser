@@ -972,6 +972,10 @@ use --name value or --name=value for named flags (see references/script-system.m
 
 Global flags (--url, --api-token, --json, --tab, --help) keep their meaning anywhere before
 a bare "--"; after "--" every --name belongs to the script, including those names.
+Help is a bool flag: --help, -h, --help=true, -h=true print this help and send nothing;
+--help=false / -h=false run the script; the last one given wins.
+When no script path precedes the "--", the token right after it is the script path
+verbatim, so a file whose name starts with "--" can be run: run -- --foo.js [args...].
 Values are passed verbatim as strings: --name= is an empty string, --name=a=b is "a=b",
 a repeated name keeps the last value, single-dash tokens such as -5 are plain values.
 "--name value" needs a value that does not start with "--" (use --name=--x), otherwise
