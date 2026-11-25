@@ -57,3 +57,20 @@ Checking：新增可控 CDP 调度回归，覆盖创建已执行但回复暂扣�
 未检查：未运行真实非 headless Chrome、realchrome 套件和 Linux；强制关停用缩短预算而非生产 15s+60s；未固定 5s 收尾之后才回包、进程中途崩溃、提交与应答之间取消的调度。未改变非 tab_new handler 强制关停行为。UI 未改动。
 
 临时文件偏差：coder 报告 macOS mktemp 曾写入用户系统临时目录并自行移除，未提供精确路径；harness 另留临时输出，具体文件未确认。/tmp 前后扫描没有新增顶层条目，不能据此断言已有目录内无新增。审查请重点确认取消/回包/提交边界及收尾时限，不将未知身份情形宣称为保证清理成功。
+
+## factory · review · 2026-11-25 11:33
+head: a34fc3b4fdbbb5fcac9a255af3a00dcf7713f379
+verdict: fix
+fix:
+- [P1] internal/daemon/tab_create.go:177: 创建往返虽脱离请求取消，但生产 Session.CreatePageTargetContext 仍以 timeout.Operation（60s）截断它，因此没有承诺的 RPC 超时后额外 5s 收尾。真实 Session + 本地 CDP stub 在第 61s 释放完整 target id，页面仍打开、没有 close 命令，失败审计 target 为空。让创建往返存活到独立的有界收尾期限，同时保持 RPC 的 60s 提交上限；加入使用生产 Session 的永久回归。
+notes:
+- [P2] internal/daemon/tab_create.go:180: HTTP/1.1 同连接已有下一请求时，强停连接未必及时取消当前 handler ctx。生产 15s+60s 时限诊断在 75.004s 观察到强停后释放创建回复，仍成功提交、audit ok=true、重放受管。强停须显式通知在途创建进入收尾，提交前检查该信号；缩短预算也连续复现 3 次。
+- [P2] internal/daemon/v1.go:514: ctx.Err 检查发生在 commitCreatedTab 获取 lifeMu 之前。固定回复到达后等待 lifeMu、此时取消再放锁，仍产生 managed_tab_open 与成功 tab_new。取消判定需与提交边界串行化，在持锁修改 registry 前检查；已提交后取消则保留受管状态。
+- [P2] internal/daemon/tab_create.go:173: 入口已取消仍发送创建命令，扣留回复超过 5s 会产生原本不应创建的未受管页；派发前检查取消，只有已发出的请求才进入收尾。
+- [P2] internal/daemon/tab_create.go:194: 回复已缓冲且 aborted 就绪时最后 select 随机丢弃已知完整 ID；固定调度 32 次中 15 次误报无回复。放弃等待前优先消费已缓冲回复，保证精确回滚与审计。
+- [P3] internal/daemon/v1.go:504: 创建已执行但回复前断线只提示 Target.createTarget: context canceled，未提示结果未知及页面可能未受管；区分明确拒绝与连接丢失，后者说明保证边界。
+- [P3] internal/daemon/v1.go:521: 回滚失败 browser busy 时告警正文仍宣称 was rolled back，与 cleanup=not closed 矛盾；正文应反映实际结果。
+
+Codex 只读审查；工作树干净，无提交、无安装。配置检查 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0（11 个包通过、1 个无测试）。上述失败是额外诊断发现的必需行为验收缺口，不是配置检查失败；P1 来自生产 60s 超时截断收尾，不因诊断测试失败自动提升等级。诊断在隔离副本中执行，使用 throwaway HOME/XDG/cache 和本地锁定依赖，无外网测试。FT28 唯一成功关闭/失败创建审计回归通过。补验提交后响应前取消会保留受管状态；取消后超过 5s 的回复不猜测关闭且窗口释放。
+
+未检查真实非 headless Chrome、Linux、进程中途崩溃。UI 未改动。临时文件均在本 run TMPDIR 内（另触碰本 run 锁和 git 索引），/tmp 顶层前后无新增；不据此保证既有目录无新增。第 1/3 轮，review/ → new/，下一轮修复 fix 列表并保留 notes 供后续检查；未合并 main、未打 tag、未发布。
