@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,6 +21,15 @@ import (
 
 const (
 	rpcLogFile = "rpc.jsonl"
+
+	// rotateTmpSuffix names the private file a rotation writes its snapshot to
+	// before publishing it as rpc.jsonl. It is never replayed.
+	rotateTmpSuffix = ".tmp"
+
+	// rotateKeepSuffix names the private hard link a rotation gives the active
+	// log before any backup slot changes; it is renamed over rpc.jsonl.1. A
+	// leftover is only a second name of a log and is removed at startup.
+	rotateKeepSuffix = ".keep"
 
 	// defaultMaxLogBytes triggers rotation of rpc.jsonl once it grows past this size.
 	defaultMaxLogBytes int64 = 8 << 20 // 8 MiB
@@ -53,8 +63,62 @@ var lifecycleBody = json.RawMessage(`{}`)
 // ErrClosed is returned by writes after Close on a disk-backed store.
 var ErrClosed = errors.New("rpc log store closed")
 
-// chmodPath is os.Chmod, replaceable in tests to simulate a failing chmod.
-var chmodPath = os.Chmod
+// ErrRotation wraps a log rotation that failed before its snapshot was
+// published. The previous log stays the active one and the rotation is retried
+// by the next append. Whether the record of the append that reports it was
+// written is answered by RecordWritten, not by this sentinel.
+var ErrRotation = errors.New("rpc log rotation failed")
+
+// ErrDirSync wraps a failed state-dir fsync after a rotation was published.
+// The published snapshot is the active log (the rotation is not repeated);
+// only the directory entries are not confirmed durable yet. The sync alone is
+// retried by every later append — whatever the log size, whether or not that
+// append's own write or rotation succeeds — and by Close, and each of them
+// reports it while it keeps failing. It can therefore accompany an append
+// whose record was not written: ask RecordWritten about the record.
+var ErrDirSync = errors.New("rpc log rotated but state dir sync failed")
+
+// maintenanceError is the error of an append whose record was written in full
+// to the open log handle while the log maintenance around it (rotation, or the
+// state-dir sync a published rotation still owes) failed. It wraps ErrRotation
+// and/or ErrDirSync.
+type maintenanceError struct{ err error }
+
+func (e *maintenanceError) Error() string {
+	return "record written, rpc log maintenance failed: " + e.err.Error()
+}
+
+func (e *maintenanceError) Unwrap() error { return e.err }
+
+// RecordWritten reports whether a non-nil error returned by AppendRPC,
+// RegisterManagedTab or RetireManagedTarget still means that this call's record
+// was written in full to the open log handle, only the maintenance around the
+// write having failed. It says nothing else: an append whose own write failed
+// reports false even when it also carries ErrDirSync for a sync owed by an
+// earlier rotation, so test the sentinels with errors.Is and the write with
+// RecordWritten. "Written" is not "recoverable after a restart": the directory
+// entries may be unconfirmed (ErrDirSync) or the name rpc.jsonl may no longer
+// lead to the open log (a refused rotation, ErrRotation).
+func RecordWritten(err error) bool {
+	var m *maintenanceError
+	return errors.As(err, &m)
+}
+
+// File-system steps, replaceable in tests to inject failures.
+var (
+	chmodPath  = os.Chmod
+	openFile   = os.OpenFile
+	linkPath   = os.Link
+	renamePath = os.Rename
+	syncFile   = (*os.File).Sync
+	// lstatPath inspects a backup slot or the staging link during rotation.
+	lstatPath = os.Lstat
+	// closeFile closes the writability probe's file and the log handle a
+	// published rotation replaced.
+	closeFile = (*os.File).Close
+	// probeWrite is the one-byte write of the startup writability probe.
+	probeWrite = (*os.File).Write
+)
 
 // RPCLogFile returns the on-disk RPC log filename under StateDir.
 func RPCLogFile() string { return rpcLogFile }
@@ -86,6 +150,11 @@ type Store struct {
 	// write must emit a separating '\n' first so records never glue together.
 	needNewline bool
 
+	// dirSyncPending is set when a rotation was published but the state dir
+	// could not be fsynced afterwards. It is retried by later appends (and
+	// Close) independently of rotation, which already happened.
+	dirSyncPending bool
+
 	// writeLog overrides the raw log write (tests inject short writes/errors).
 	// nil uses f.Write.
 	writeLog func(f *os.File, p []byte) (int, error)
@@ -111,7 +180,8 @@ type LogRecord struct {
 }
 
 // Open initializes rpc.jsonl on disk, or in-memory when cfg.StateDir is "" or
-// "-". A configured StateDir that cannot be created or written returns an error
+// "-". A disk state dir must belong to one Store (one daemon process) at a
+// time: nothing arbitrates between two writers of the same dir. A configured StateDir that cannot be created or written returns an error
 // rather than silently falling back to in-memory. The state dir, rpc.jsonl and
 // its rotated backups are restricted to the owner (0700 / 0600) before the log
 // is replayed; pre-existing wider modes are tightened, and a failure to do so
@@ -151,8 +221,43 @@ func Open(cfg OpenConfig) (*Store, error) {
 	if err := tightenPath(dir, stateDirPerm); err != nil {
 		return nil, fmt.Errorf("restrict state dir %q: %w", dir, err)
 	}
-	if !dirWritable(dir) {
-		return nil, fmt.Errorf("state dir %q is not writable", dir)
+	if err := probeDirWritable(dir); err != nil {
+		return nil, fmt.Errorf("state dir %q is not writable: %w", dir, err)
+	}
+	// Decide whether the log in this dir can be started from before the
+	// staging files of an interrupted rotation are removed and backup modes are
+	// tightened: a startup refused by one of the checks below (down to the
+	// open of rpc.jsonl) has not removed rpc.jsonl.tmp / rpc.jsonl.keep and has
+	// not changed a backup's mode. That is all it promises — the state dir's
+	// own mode was tightened above, a missing rpc.jsonl may have been linked
+	// back from rpc.jsonl.1, and a failure after the open (backup chmod,
+	// replay) comes after the cleanup.
+	//
+	// Opening follows symbolic links and creates what a dangling one points to;
+	// rotation only ever works on a regular rpc.jsonl. Refuse anything else
+	// here, before the open, so neither the link's destination nor rpc.jsonl.1
+	// is touched.
+	if fi, err := os.Lstat(logPath); err == nil && !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("rpc log %q is not a regular file (%s): refusing to open it; replace it with the regular log file or move it away",
+			logPath, fi.Mode().Type())
+	}
+	if err := restorePreviousLog(logPath, logger); err != nil {
+		return nil, err
+	}
+
+	// An existing log this process cannot open for reading and writing (mode,
+	// ownership) refuses startup here, before anything else in the dir changes.
+	f, err := openPrivateLog(logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR)
+	if err != nil {
+		return nil, fmt.Errorf("open rpc log %q: %w", logPath, err)
+	}
+
+	// A snapshot a previous process did not get to publish is not a log, and a
+	// staging link it left is only another name of one.
+	for _, suffix := range []string{rotateTmpSuffix, rotateKeepSuffix} {
+		if fi, err := os.Lstat(logPath + suffix); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(logPath + suffix)
+		}
 	}
 	for k := 1; k <= maxLogBackups; k++ {
 		backup := fmt.Sprintf("%s.%d", logPath, k)
@@ -161,13 +266,9 @@ func Open(cfg OpenConfig) (*Store, error) {
 			continue
 		}
 		if err := tightenPath(backup, logFilePerm); err != nil {
+			_ = f.Close()
 			return nil, fmt.Errorf("restrict rpc log backup %q: %w", backup, err)
 		}
-	}
-
-	f, err := openPrivateLog(logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR)
-	if err != nil {
-		return nil, fmt.Errorf("open rpc log %q: %w", logPath, err)
 	}
 
 	managed := make(map[string]time.Time)
@@ -242,13 +343,69 @@ func openPrivateLog(path string, flag int) (*os.File, error) {
 	return f, nil
 }
 
-func dirWritable(dir string) bool {
-	testPath := filepath.Join(dir, ".write-test")
-	if err := os.WriteFile(testPath, []byte("1"), logFilePerm); err != nil {
-		return false
+// probeDirWritable checks that a file can be created in dir and data written
+// to it (a dir can accept new names while writes fail: file size limit, quota,
+// full disk). It creates its own exclusively named file (never an existing
+// one), writes one byte, closes it and removes only that file — whatever
+// failed before. Write, close and removal errors are all reported.
+func probeDirWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".write-test-*")
+	if err != nil {
+		return err
 	}
-	_ = os.Remove(testPath)
-	return true
+	name := f.Name()
+	n, werr := probeWrite(f, []byte{'\n'})
+	if werr == nil && n != 1 {
+		werr = io.ErrShortWrite
+	}
+	if werr != nil {
+		werr = fmt.Errorf("write probe file: %w", werr)
+	}
+	cerr := closeFile(f)
+	if cerr != nil {
+		cerr = fmt.Errorf("close probe file: %w", cerr)
+	}
+	rerr := os.Remove(name)
+	if rerr != nil {
+		rerr = fmt.Errorf("remove probe file: %w", rerr)
+	}
+	return errors.Join(werr, cerr, rerr)
+}
+
+// restorePreviousLog handles a state dir that has rpc.jsonl.1 but no rpc.jsonl:
+// a rotation was interrupted after the log was moved away and before its
+// successor was published (daemons before the atomic rotation could stop
+// there), or the active log was removed. Creating an empty log would lose the
+// managed set, so the previous generation is linked back as the active log and
+// replayed as usual; the next rotation recognises the shared file and keeps a
+// single copy. Only when rpc.jsonl.1 does not exist either is this a first
+// start. A rpc.jsonl.1 that exists but cannot be used as a log (symlink, even a
+// dangling one, directory, or one that cannot be inspected) is an error: it may
+// hold the only recoverable generation, so it must not pass for absent.
+func restorePreviousLog(logPath string, logger *slog.Logger) error {
+	if _, err := os.Lstat(logPath); err == nil {
+		// Present: Open already refused anything but a regular file.
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("inspect rpc log %q: %w", logPath, err)
+	}
+	prev := logPath + ".1"
+	fi, err := os.Lstat(prev)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("rpc log %q is missing and its previous generation %q cannot be inspected: %w", logPath, prev, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("rpc log %q is missing and its previous generation %q is not a regular file (%s): refusing to start an empty log over it; restore it as a regular file or move it away",
+			logPath, prev, fi.Mode().Type())
+	}
+	if err := linkPath(prev, logPath); err != nil {
+		return fmt.Errorf("restore rpc log %q from %q: %w", logPath, prev, err)
+	}
+	logger.Warn("rpc log missing; restored the previous generation as the active log", "from", prev)
+	return nil
 }
 
 // replayLog reads the full log from the start, invoking fn per record, then
@@ -322,9 +479,11 @@ func (s *Store) Close() error {
 	defer s.mu.Unlock()
 	s.closed = true
 	if s.logFile != nil {
+		// Last chance to confirm a published rotation's directory entries.
+		syncErr := s.retryDirSyncLocked()
 		err := s.logFile.Close()
 		s.logFile = nil
-		return err
+		return errors.Join(err, syncErr)
 	}
 	return nil
 }
@@ -375,7 +534,10 @@ func (s *Store) AppendRPC(rec LogRecord) error {
 // The in-memory managed set is always updated. A non-nil error means the
 // lifecycle record was not written to rpc.jsonl, so the tab will not be
 // restored as managed after a restart (it is then left open, never adopted
-// by guesswork); callers should log it.
+// by guesswork); callers should log it. The exception is an error for which
+// RecordWritten is true: the record was written to the open log and only the
+// maintenance around it failed — which still does not confirm that a restart
+// reads it back (see RecordWritten).
 func (s *Store) RegisterManagedTab(targetID string, at time.Time) error {
 	if s == nil {
 		return fmt.Errorf("store not initialized")
@@ -406,7 +568,9 @@ func (s *Store) RegisterManagedTab(targetID string, at time.Time) error {
 // written to rpc.jsonl: the entry may reappear in the persisted set after a
 // restart, where it is harmless (recovery requires the exact target id to be
 // live) and is retired again once an enumeration confirms it is gone. Callers
-// should log it rather than treat the retirement as durable.
+// should log it rather than treat the retirement as durable. An error for
+// which RecordWritten is true means the record was written to the open log
+// and only the maintenance around it failed (see RecordWritten).
 func (s *Store) RetireManagedTarget(targetID string) (bool, error) {
 	if s == nil {
 		return false, fmt.Errorf("store not initialized")
@@ -451,57 +615,318 @@ func (s *Store) appendLocked(rec LogRecord) error {
 		}
 		return fmt.Errorf("log file not open")
 	}
-	if err := s.writeLinesLocked(line); err != nil {
-		return err
-	}
-	if s.maxLogBytes > 0 && s.logBytes >= s.maxLogBytes {
-		if err := s.rotateLocked(); err != nil && s.logger != nil {
-			s.logger.Warn("rpc log rotation failed", "err", err)
+	writeErr := s.writeLinesLocked(line)
+	// A directory sync owed by an earlier, already published rotation is
+	// retried on its own: it neither waits for the log to fill up again nor
+	// depends on what happens to this record or to the next rotation.
+	syncErr := s.retryDirSyncLocked()
+	if writeErr != nil {
+		if syncErr != nil {
+			return errors.Join(writeErr, syncErr)
 		}
+		return writeErr
+	}
+	var rotErr error
+	if s.maxLogBytes > 0 && s.logBytes >= s.maxLogBytes {
+		published, err := s.rotateLocked()
+		switch {
+		case published:
+			// The rotation synced the directory itself; its outcome replaces
+			// the retry above (same directory, later attempt). It is not a
+			// failed rotation (no ErrRotation): what it reports is that sync
+			// and/or the close of the handle it replaced.
+			syncErr = err
+		case err != nil:
+			rotErr = fmt.Errorf("%w (%s still active, retried on next append): %w", ErrRotation, rpcLogFile, err)
+		}
+	}
+	if rotErr == nil && syncErr == nil {
+		return nil
+	}
+	// Both are kept when both are unresolved: a rotation that could not start
+	// must not hide a sync that is still owed.
+	return &maintenanceError{err: errors.Join(rotErr, syncErr)}
+}
+
+// retryDirSyncLocked fsyncs the state dir when a published rotation still owes
+// that. Caller holds s.mu.
+func (s *Store) retryDirSyncLocked() error {
+	if !s.dirSyncPending {
+		return nil
+	}
+	if err := syncDir(filepath.Dir(s.logPath)); err != nil {
+		return fmt.Errorf("%w (rotated %s is active; the sync is retried by the next append and by Close): %w", ErrDirSync, rpcLogFile, err)
+	}
+	s.dirSyncPending = false
+	return nil
+}
+
+// requireActivePathLocked checks that the name rpc.jsonl still is a regular
+// file and the log this store appends to. Rotation depends on it: the previous
+// generation is kept by linking that name, and startup recovers from rpc.jsonl,
+// else from rpc.jsonl.1 only. With the name missing (or naming anything else)
+// the backups hold the only generation a restart can find, so rotation must
+// not move them. What a refusal leaves behind depends on when it is asked, so
+// the caller says that (see rotateLocked). It is a check, not a lock: the name
+// can still change between it and the step that relies on it. Caller holds
+// s.mu.
+func (s *Store) requireActivePathLocked() error {
+	active, err := s.logFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat rpc log: %w", err)
+	}
+	named, err := os.Lstat(s.logPath)
+	if err != nil {
+		return fmt.Errorf("active rpc log path unusable: %w", err)
+	}
+	if !named.Mode().IsRegular() || !os.SameFile(named, active) {
+		return fmt.Errorf("active rpc log path %q no longer names the open log", s.logPath)
 	}
 	return nil
 }
 
-// rotateLocked rolls rpc.jsonl into numbered backups and starts a fresh log,
-// seeding it with a snapshot of currently managed tabs so idle recovery still
-// works after reading only the current file. Caller holds s.mu.
-func (s *Store) rotateLocked() error {
-	if s.logFile == nil {
+// rotateLocked replaces rpc.jsonl with a snapshot of the currently managed
+// tabs, so idle recovery still works after reading only the current file, and
+// keeps the replaced log as rpc.jsonl.1. Caller holds s.mu.
+//
+// The sequence never leaves the state dir without a complete, replayable
+// generation under a name startup looks at (rpc.jsonl, else rpc.jsonl.1):
+//
+//  1. rpc.jsonl must name the open log (requireActivePathLocked);
+//  2. the snapshot is written in full to rpc.jsonl.tmp (exclusive, 0600) and
+//     fsynced;
+//  3. the open log becomes rpc.jsonl.1 without that name ever being free
+//     (keepPreviousLocked);
+//  4. rpc.jsonl is checked again — a name found removed or replaced since 1
+//     is not published over — and rpc.jsonl.tmp is renamed over it, the
+//     atomic publication; then the directory is fsynced. (Check and rename
+//     are not one step: see the comment at the check.)
+//
+// published reports whether 4 renamed. Until then every failure leaves the old
+// log active under its handle (appends keep working) and is returned for the
+// next append past the limit to retry; a retry does not push further backups
+// out. Once published the snapshot handle is the log handle — there is no
+// reopen that could fail, and nothing after the rename gives it up. Two things
+// can still fail then, neither of which makes the rotation unpublished: the
+// directory sync, wrapped in ErrDirSync and owed alone (dirSyncPending), and
+// the close of the replaced handle, reported once (that handle is gone and
+// nothing is retried) without ErrDirSync or ErrRotation. Both are returned
+// joined.
+func (s *Store) rotateLocked() (published bool, err error) {
+	if err := s.requireActivePathLocked(); err != nil {
+		return false, fmt.Errorf("rotation not started, backups left untouched: %w", err)
+	}
+	snapshot, err := s.managedSnapshotLocked()
+	if err != nil {
+		return false, err
+	}
+	tmpPath := s.logPath + rotateTmpSuffix
+	if err := os.Remove(tmpPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("remove stale snapshot: %w", err)
+	}
+	tmp, err := openFile(tmpPath, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_RDWR, logFilePerm)
+	if err != nil {
+		return false, fmt.Errorf("create snapshot: %w", err)
+	}
+	defer func() {
+		if !published {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if len(snapshot) > 0 {
+		n, err := s.rawWrite(tmp, snapshot)
+		if err == nil && n < len(snapshot) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return false, fmt.Errorf("write snapshot: %w", err)
+		}
+	}
+	if err := syncFile(tmp); err != nil {
+		return false, fmt.Errorf("sync snapshot: %w", err)
+	}
+	if err := s.keepPreviousLocked(); err != nil {
+		return false, err
+	}
+	// Writing the snapshot and keeping the previous generation took time: the
+	// name may have gone or changed hands since the first check. The backups
+	// have been shifted by now and rpc.jsonl.1 is the open log, so refusing
+	// here loses nothing: appends keep reaching the file startup falls back to
+	// when rpc.jsonl is absent.
+	//
+	// This check and the rename below are two system calls. A file put under
+	// the name between them is replaced by the snapshot; nothing here can
+	// close that window, and with the state dir owned by this one process
+	// nothing is expected to use it.
+	if err := s.requireActivePathLocked(); err != nil {
+		return false, fmt.Errorf("snapshot not published, %s.1 is the open log: %w", rpcLogFile, err)
+	}
+	if err := renamePath(tmpPath, s.logPath); err != nil {
+		return false, fmt.Errorf("publish snapshot: %w", err)
+	}
+	published = true
+
+	// The switch is done in the namespace: adopt the published handle first,
+	// whatever closing the replaced one or the directory sync says.
+	old := s.logFile
+	s.logFile = tmp
+	s.logBytes = int64(len(snapshot))
+	s.needNewline = false
+
+	// The replaced log is rpc.jsonl.1 now. A close that fails may mean its last
+	// writes did not reach the disk, so the append is told (the snapshot, which
+	// holds the managed set, is unaffected and stays the log).
+	closeErr := closeFile(old)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("%s rotated and active, but closing the previous log (now %s.1) failed: %w", rpcLogFile, rpcLogFile, closeErr)
+	}
+
+	// A directory that cannot be synced only weakens the power-loss guarantee
+	// (either generation is recoverable); it is reported and retried alone.
+	s.dirSyncPending = true
+	return true, errors.Join(closeErr, s.retryDirSyncLocked())
+}
+
+// keepPreviousLocked makes the open log rpc.jsonl.1. The name rpc.jsonl.1 is
+// what startup falls back to, so it is never free and never names anything but
+// a complete generation while this runs:
+//
+//  1. the active log is hard linked to the private name rpc.jsonl.keep and the
+//     link is checked to be the open log. Nothing has moved yet, so a link the
+//     file system refuses (no space, no hard links) or a name that changed
+//     hands leaves every backup where it was;
+//  2. the generation currently in rpc.jsonl.1 gets the additional name
+//     rpc.jsonl.2 (hard link), after the older ones moved up as far as the
+//     first free slot (the oldest is replaced);
+//  3. rpc.jsonl.keep is renamed over rpc.jsonl.1 — atomically replacing it.
+//
+// A retry after a failure at any step finds what the failed attempt left and
+// discards no further generation: a rpc.jsonl.1 that already is the open log is
+// reused, and a rpc.jsonl.1 that already has its second name is not shifted
+// again. A backup slot or the staging link that cannot be inspected (any error
+// but "does not exist") stops the attempt with that error before anything
+// moves: an unreadable slot is not a free one, and not proof that an earlier
+// attempt did not get that far. Caller holds s.mu.
+func (s *Store) keepPreviousLocked() error {
+	backup := func(k int) string { return fmt.Sprintf("%s.%d", s.logPath, k) }
+
+	active, err := s.logFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat rpc log: %w", err)
+	}
+	prev, prevErr := lstatPath(backup(1))
+	if prevErr != nil && !errors.Is(prevErr, fs.ErrNotExist) {
+		return fmt.Errorf("inspect rpc log backup: %w", prevErr)
+	}
+	if prevErr == nil && os.SameFile(prev, active) {
 		return nil
 	}
-	if err := s.logFile.Close(); err != nil && s.logger != nil {
-		s.logger.Warn("closing rpc log before rotation failed", "err", err)
-	}
-	s.logFile = nil
 
-	if maxLogBackups <= 0 {
-		_ = os.Remove(s.logPath)
-	} else {
-		_ = os.Remove(fmt.Sprintf("%s.%d", s.logPath, maxLogBackups))
-		for k := maxLogBackups - 1; k >= 1; k-- {
-			_ = os.Rename(fmt.Sprintf("%s.%d", s.logPath, k), fmt.Sprintf("%s.%d", s.logPath, k+1))
+	keepPath := s.logPath + rotateKeepSuffix
+	if err := os.Remove(keepPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove stale rpc log link: %w", err)
+	}
+	if err := linkPath(s.logPath, keepPath); err != nil {
+		return fmt.Errorf("keep previous rpc log: %w", err)
+	}
+	staged := true
+	defer func() {
+		if staged {
+			_ = os.Remove(keepPath)
 		}
-		_ = os.Rename(s.logPath, fmt.Sprintf("%s.1", s.logPath))
+	}()
+	// Identity is judged only once the link could be inspected: a failed
+	// inspection says nothing about what the name leads to.
+	staging, err := lstatPath(keepPath)
+	if err != nil {
+		return fmt.Errorf("keep previous rpc log: inspect staging link, backups left untouched: %w", err)
+	}
+	if !os.SameFile(staging, active) {
+		return fmt.Errorf("keep previous rpc log: active rpc log path %q no longer names the open log, backups left untouched", s.logPath)
 	}
 
-	f, err := openPrivateLog(s.logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR|os.O_TRUNC)
+	if prevErr == nil && maxLogBackups > 1 {
+		if err := s.shiftBackupsLocked(prev, backup); err != nil {
+			return err
+		}
+	}
+	if err := renamePath(keepPath, backup(1)); err != nil {
+		return fmt.Errorf("publish previous rpc log: %w", err)
+	}
+	staged = false
+	return nil
+}
+
+// shiftBackupsLocked gives the generation in rpc.jsonl.1 (prev) the name
+// rpc.jsonl.2 as well, moving older backups up first. rpc.jsonl.1 itself keeps
+// its name; the caller replaces it atomically afterwards. Every slot is
+// inspected before the first one moves, and an inspection error is returned as
+// it is: shifting on a guess would push a generation out on every retry.
+// Caller holds s.mu.
+func (s *Store) shiftBackupsLocked(prev fs.FileInfo, backup func(int) string) error {
+	free := maxLogBackups
+	for k := maxLogBackups; k >= 2; k-- {
+		fi, err := lstatPath(backup(k))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			free = k
+		case err != nil:
+			return fmt.Errorf("inspect rpc log backup, backups left untouched: %w", err)
+		case k == 2 && os.SameFile(fi, prev):
+			// An earlier attempt got this far.
+			return nil
+		}
+	}
+	for k := free - 1; k >= 2; k-- {
+		if err := renamePath(backup(k), backup(k+1)); err != nil {
+			return fmt.Errorf("shift rpc log backup: %w", err)
+		}
+	}
+	if !prev.Mode().IsRegular() {
+		// Not a generation startup would use (it refuses such a rpc.jsonl.1),
+		// and not something to hard link: move it out of the way as it is.
+		if err := renamePath(backup(1), backup(2)); err != nil {
+			return fmt.Errorf("shift rpc log backup: %w", err)
+		}
+		return nil
+	}
+	if maxLogBackups == 2 {
+		// The only older slot is replaced; link cannot do that.
+		if err := os.Remove(backup(2)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("shift rpc log backup: %w", err)
+		}
+	}
+	if err := linkPath(backup(1), backup(2)); err != nil {
+		return fmt.Errorf("shift rpc log backup: %w", err)
+	}
+	return nil
+}
+
+// syncDir flushes directory entries (the rotation's link and rename) to disk.
+// Windows cannot sync a directory handle, so it is a no-op there.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
-	s.logFile = f
-	s.logBytes = 0
-	s.needNewline = false
-	return s.writeManagedSnapshotLocked()
+	err = syncFile(d)
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
-// writeManagedSnapshotLocked writes one managed_tab_open record per currently
-// managed tab (sorted by target id for determinism) to the current log, keeping
-// each tab's full target identity and last-activity time. Retired tabs are not
-// in s.managed and therefore never reseeded. Caller holds s.mu.
-func (s *Store) writeManagedSnapshotLocked() error {
-	if len(s.managed) == 0 {
-		return nil
-	}
+// managedSnapshotLocked renders one managed_tab_open record per currently
+// managed tab (sorted by target id for determinism), keeping each tab's full
+// target identity and last-activity time. Retired tabs are not in s.managed and
+// therefore never reseeded; an empty set yields an empty snapshot. Caller
+// holds s.mu.
+func (s *Store) managedSnapshotLocked() ([]byte, error) {
 	targets := make([]string, 0, len(s.managed))
 	for id := range s.managed {
 		targets = append(targets, id)
@@ -518,12 +943,12 @@ func (s *Store) writeManagedSnapshotLocked() error {
 			Time:   s.managed[id],
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		buf.Write(data)
 		buf.WriteByte('\n')
 	}
-	return s.writeLinesLocked(buf.Bytes())
+	return buf.Bytes(), nil
 }
 
 // writeLinesLocked appends p (one or more complete, newline-terminated lines)
@@ -533,7 +958,7 @@ func (s *Store) writeManagedSnapshotLocked() error {
 // re-arms the boundary repair for the next call. Caller holds s.mu.
 func (s *Store) writeLinesLocked(p []byte) error {
 	if s.needNewline {
-		n, err := s.rawWriteLocked([]byte{'\n'})
+		n, err := s.rawWrite(s.logFile, []byte{'\n'})
 		if n > 0 {
 			s.logBytes += int64(n)
 			s.needNewline = false
@@ -544,7 +969,7 @@ func (s *Store) writeLinesLocked(p []byte) error {
 			return fmt.Errorf("restore rpc log line boundary: %w", err)
 		}
 	}
-	n, err := s.rawWriteLocked(p)
+	n, err := s.rawWrite(s.logFile, p)
 	if n > len(p) {
 		n = len(p)
 	}
@@ -558,12 +983,13 @@ func (s *Store) writeLinesLocked(p []byte) error {
 	return err
 }
 
-// rawWriteLocked performs one raw write to the current log. Caller holds s.mu.
-func (s *Store) rawWriteLocked(p []byte) (int, error) {
+// rawWrite performs one raw write to f (the current log, or a rotation's
+// snapshot file). Caller holds s.mu.
+func (s *Store) rawWrite(f *os.File, p []byte) (int, error) {
 	if s.writeLog != nil {
-		return s.writeLog(s.logFile, p)
+		return s.writeLog(f, p)
 	}
-	return s.logFile.Write(p)
+	return f.Write(p)
 }
 
 // ManagedTab is one persisted daemon-created tab.

@@ -383,9 +383,10 @@ func TestAppendRefusedWhileBoundaryRepairFails(t *testing.T) {
 	requireManaged(t, s2, "aa11", "bb22")
 }
 
-// The rotation snapshot shares the write path: a short snapshot write must not
-// make the following append glue onto the snapshot fragment.
-func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
+// A short snapshot write never reaches rpc.jsonl: the snapshot is written to
+// its own file and discarded, the append reports the failed rotation, and the
+// old log keeps every record with intact line boundaries.
+func TestShortSnapshotWriteLeavesLogIntact(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, rpcLogFile)
 	t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
@@ -413,16 +414,17 @@ func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
 		return n, syscall.ENOSPC
 	}
 	s.mu.Unlock()
-	if err := s.AppendRPC(LogRecord{
+	err := s.AppendRPC(LogRecord{
 		Action: protocol.MethodGoto,
 		Body:   json.RawMessage(`{"jsonrpc":"2.0","method":"goto","params":{"tab":"aa11","url":"https://ex"},"id":2}`),
 		OK:     true,
 		Time:   t0.Add(2 * time.Minute),
-	}); err != nil {
-		t.Fatal(err)
+	})
+	if !errors.Is(err, ErrRotation) || !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("append with failing rotation: %v", err)
 	}
-	if _, err := os.Stat(logPath + ".1"); err != nil {
-		t.Fatalf("expected rotation: %v", err)
+	if _, err := os.Lstat(logPath + rotateTmpSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot fragment left behind: %v", err)
 	}
 	requireLogBytesMatchFile(t, s, logPath)
 
@@ -439,18 +441,9 @@ func TestAppendAfterShortSnapshotWriteDoesNotGlue(t *testing.T) {
 	}
 
 	valid, invalid := readLogLines(t, logPath)
-	if len(valid) != 2 || invalid != 1 {
+	if len(valid) != 4 || invalid != 0 {
 		t.Fatalf("lines: valid=%d invalid=%d", len(valid), invalid)
 	}
-	s2, err := Open(OpenConfig{StateDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s2.Close()
-	managed := s2.ReplayManagedTabActivity()
-	for _, tab := range []string{"aa11", "cc33"} {
-		if _, ok := managed[managedTarget(tab)]; !ok {
-			t.Fatalf("managed tab %q lost after short snapshot write: %#v", tab, managed)
-		}
-	}
+	s2 := mustOpenDisk(t, dir)
+	requireManaged(t, s2, "aa11", "bb22", "cc33")
 }

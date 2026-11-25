@@ -101,7 +101,11 @@ sudo loginctl enable-linger "$USER"
 
   Tab-related RPC log lines live in `rpc.jsonl` under `{StateDir}`, so idle cleanup can be rebuilt after daemon
   restarts by intersecting live CDP tabs with the log's per-tab activity. The log auto-rotates past ~8 MiB into
-  `rpc.jsonl.1`… backups (3 kept). Because the log keeps request bodies (which may
+  `rpc.jsonl.1`… backups (3 kept; the switch is atomic and needs hard-link support
+  in the state directory, which must belong to this one daemon process — sharing it between daemons
+  is not supported — and be on a local file system: NFS and other network file systems are not supported). `rpc.jsonl` and its backups are plain regular files — configuring the log as a symlink is
+  not supported: a symlink (dangling or not) under that name makes startup fail rather than follow it. If the log cannot be confirmed at shutdown (e.g. a
+  state-directory sync keeps failing) the daemon logs `daemon exited` with that error and exits non-zero. Because the log keeps request bodies (which may
   contain passwords or tokens), the state directory is owner-only (`0700`) and the log and
   its backups are `0600`; wider modes left by older versions are tightened on startup, and
   startup fails if they cannot be. The unit's `ReadWritePaths=` already

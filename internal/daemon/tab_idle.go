@@ -67,7 +67,7 @@ func (s *Server) markTabManagedLocked(tid target.ID) {
 		return
 	}
 	if err := s.store.RegisterManagedTab(string(tid), now.UTC()); err != nil {
-		s.logManagedPersistFailure("managed tab not persisted; it will not be restored for idle cleanup after a daemon restart", tid, err)
+		s.logManagedPersistFailure(msgManagedOpenNotPersisted, msgManagedOpenWritten, tid, err)
 	}
 }
 
@@ -166,7 +166,7 @@ func (s *Server) forgetTabManagedLocked(tid target.ID) {
 	// then reappear (harmlessly: recovery needs the exact target id) after a
 	// restart.
 	if _, err := s.store.RetireManagedTarget(string(tid)); err != nil {
-		s.logManagedPersistFailure("managed tab retirement not persisted; the stale entry stays in rpc.jsonl until rotation or the next restart reconciliation", tid, err)
+		s.logManagedPersistFailure(msgManagedRetireNotPersisted, msgManagedRetireWritten, tid, err)
 	}
 }
 
@@ -181,9 +181,31 @@ func (s *Server) forgetUnregisteredManaged(tid target.ID) {
 	}
 }
 
-func (s *Server) logManagedPersistFailure(msg string, tid target.ID, err error) {
+// Lifecycle persistence warnings. The "written" pair is for errors that
+// store.RecordWritten accepts: the record went to the open log handle and the
+// log maintenance around the write (rotation, or the state-dir sync a published
+// rotation owes) failed. That is all it proves. Whether a restart reads the
+// record back is not known here — the directory entries may be unconfirmed, or
+// the name rpc.jsonl may no longer lead to the open log, in which case a
+// restart recovers an older generation — so these messages promise neither
+// persistence nor recovery.
+const (
+	msgManagedOpenNotPersisted   = "managed tab not persisted; it will not be restored for idle cleanup after a daemon restart"
+	msgManagedOpenWritten        = "managed tab record written to the open rpc log, but rpc log maintenance failed; whether a daemon restart restores the tab is not confirmed (see err; retried on the next append)"
+	msgManagedRetireNotPersisted = "managed tab retirement not persisted; the stale entry stays in rpc.jsonl until rotation or the next restart reconciliation"
+	msgManagedRetireWritten      = "managed tab retirement written to the open rpc log, but rpc log maintenance failed; whether a daemon restart still sees the tab as managed is not confirmed (see err; retried on the next append)"
+)
+
+// logManagedPersistFailure reports a lifecycle write error: notWritten when the
+// record was not written, written when it reached the open log handle
+// (store.RecordWritten) and only the maintenance around it failed.
+func (s *Server) logManagedPersistFailure(notWritten, written string, tid target.ID, err error) {
 	if s.logger == nil {
 		return
+	}
+	msg := notWritten
+	if store.RecordWritten(err) {
+		msg = written
 	}
 	if errors.Is(err, store.ErrClosed) {
 		// Shutdown already closed the log; nothing actionable.

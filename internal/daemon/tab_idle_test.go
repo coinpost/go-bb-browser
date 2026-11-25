@@ -517,6 +517,12 @@ func TestUnwritableStateDirErrors(t *testing.T) {
 		t.Skip("cannot chmod read-only:", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(readOnlyDir, 0o755) })
+	// An inherited ACL can still grant file creation despite the mode bits.
+	if f, err := os.CreateTemp(readOnlyDir, "check-*"); err == nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		t.Skip("mode 0555 does not stop file creation here (ACL)")
+	}
 
 	cfg := Config{
 		DebuggerURL:    "127.0.0.1:9222",
