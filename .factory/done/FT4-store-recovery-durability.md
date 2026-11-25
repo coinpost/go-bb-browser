@@ -285,3 +285,10 @@ Codex 只读审查 origin/main...HEAD 全部 15 个变更文件及完整线程�
 本机真实 SIGKILL 覆盖快照 fsync、暂存链接、较旧备份改名/链接、.1 发布、active 发布六个边界，各 3 次共 18 次重启恢复及后续轮转通过；真实 RLIMIT_FSIZE=0 下启动返回 EFBIG 且保留既有 .write-test，3/3 通过。未做物理断电、实际磁盘满/介质 EIO、无硬链接文件系统、原生 Linux、真实 Chrome 或 systemd 部署；Windows 轮转仍不支持，无 UI 改动。
 
 第 5 轮审查通过，review/ → ready/；仅保留以上非阻塞项供 owner 查看。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。未合并、打 tag、发布、启用任务或移动 FT2/FT3/FT6，FT21 保持 stop。无新增可见 /tmp 路径，coder 报告工作树/TMPDIR 外仅授权 review 锁心跳；临时诊断与报告按流程结束清理。
+
+## factory · 2026-11-25 10:19
+ship 完成。merge: 7b8aab43feaf205ecc73269a489d400487323c6b（parents: fb2c535b1273627cb7082bc59a9bb24c9e04b8ff + 9b2f1c2add0f52f35b93c1a992e137b48e4c3294），已普通推送 main。已审 head 9b2f1c2add0f52f35b93c1a992e137b48e4c3294 为远端 main 祖先。未打 tag、未发版、未删除代码分支、未改 workflow 或 factory.toml。
+
+测试命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过：11 个有测试包 ok（bb-browser、bb-daemon、deploy、deploy/systemd、internal/browser、internal/daemon、internal/site、internal/state、internal/store、internal/timeout、pkg/daemonclient），pkg/protocol 无测试文件；go.mod/go.sum 未变。
+
+不修改先前 review 正文与 verdict: pass（factory · review · 2026-11-25 10:09）。保留三项 owner 验收边界：单进程独占状态目录（00:17）、日志不配置成符号链接（08:27）、本机文件系统且不支持 NFS 等网络文件系统（09:35）。无 source 或 owner Closes/Fixes/Resolves 链接，无需关闭 issue/PR。按既有顺序，本项合入远端 base 后将安排 FT2 backlog → new；本 run 不启动 FT2 构建或审查，不移动 FT3/FT6，FT5 保持 stop。
