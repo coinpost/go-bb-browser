@@ -30,7 +30,11 @@ type runFlagKind func(name string) (known bool, noOptDefVal string)
 //
 // Rules:
 //   - Before the first bare "--", a --name that is a CLI flag is a CLI flag (reserved names
-//     win). "-h" is --help. After the "--" every --name belongs to the adapter.
+//     win). "-h" is --help and, as in pflag, "-h=value" is --help=value. After the "--" every
+//     --name belongs to the adapter.
+//   - The first bare "--" ends the CLI flags. When no script path has been seen yet, the token
+//     right after it is the script path verbatim, whatever it looks like ("--foo.js", "-h",
+//     another "--"); it is never read as a flag.
 //   - Any other --name value / --name=value is an adapter named argument. The value is passed
 //     verbatim (may be empty, may contain "="); the split form needs a next token that does
 //     not start with "--", otherwise: flag --name needs a value.
@@ -51,6 +55,14 @@ func parseRunArgs(tokens []string, kind runFlagKind) (runArgs, error) {
 				out.globals = append(out.globals, runGlobal{"help", "true"})
 				continue
 			}
+			if value, ok := strings.CutPrefix(tok, "-h="); ok {
+				// pflag's shorthand form with an explicit value; the bool is checked by pflag.
+				out.globals = append(out.globals, runGlobal{"help", value})
+				continue
+			}
+		} else if !haveScript {
+			out.script, haveScript = tok, true
+			continue
 		}
 		if !strings.HasPrefix(tok, "--") {
 			if haveScript {
@@ -94,7 +106,9 @@ func parseRunArgs(tokens []string, kind runFlagKind) (runArgs, error) {
 }
 
 // parseRunCommand parses tokens for the run command and applies the CLI flags found among
-// them through pflag (type checking, Changed tracking). help reports that --help/-h was given.
+// them through pflag (type checking, Changed tracking, last value wins). help reports that the
+// help flag ended up true (--help, -h, --help=true, -h=1, ...): the caller prints help and sends
+// nothing. An explicit false (--help=false, -h=false) is a normal run and needs a script.
 func parseRunCommand(cmd *cobra.Command, tokens []string) (parsed runArgs, help bool, err error) {
 	flags := cmd.Flags()
 	flags.AddFlagSet(cmd.InheritedFlags())
