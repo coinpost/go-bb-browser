@@ -204,3 +204,24 @@ factory · review · 2026-11-25 01:00 的正文与 verdict: fix（head: b9f94f6a
 未做真实断电/kill -9、原生 Linux/Windows、无硬链接文件系统、真实 Chrome 或 systemd 部署验收；本轮未逐项核对 ACL skip。无 UI 改动。未 ship、未发 tag、未发布、未移动 FT2/FT3/FT6；round 保留累增至 4，后续复审仍需在当前 owner 边界内独立判断，不直接沿用旧 verdict 为 pass。
 
 临时文件均留本 run TMPDIR 并在结束清理；coder 报告一次设置 TMPDIR 前的只读目录枚举，无写入、未 source 外部 env.sh；TMPDIR 外仅授权 build 锁心跳，无新增可见 /tmp 路径。
+
+
+## factory · review · 2026-11-25 08:52
+head: a983fc3a6e79d34d11d623db2b60a0950c457a83
+verdict: fix
+fix:
+- [P1] internal/store/store.go:731：快照 rename 已生效但返回错误时，关闭新句柄并继续写旧 .1，后续轮转永久被路径检查拒绝，重启只读新快照而丢失后续受管记录。用现有 renamePath 注入点实际执行本地改名后返回 ENOENT、立即撤销注入，Codex 5/5、经理独立 1/1 复现 later 仅在 .1、重启只恢复 first。Linux rename(2) 明确记载 NFS 执行成功后重传返回失败的语义，未挂载真实 NFS。发布返回错误后核对 active 与新旧句柄 inode；确认已经发布则接管新句柄并同步目录，确认未发布才按原路径重试，无法判定时保留待核验状态，不得持续写错一代。增加永久回归。
+notes:
+- [P2] internal/store/store.go:816：备份发布 ENOSPC 后重试忽略 .2 的 lstat(EIO)，再次顺移已处理备份，3/3 追加返回 nil 但 .2/.3 变为同一代、较旧审计历史丢失。非 ENOENT 的检查错误应在顺移前返回并保留原始错误。
+- [P2] internal/store/store.go:738：发布后旧日志 Close(EIO) 仅 warn，3/3 追加仍返回 nil；保留已接管的新句柄，将旧句柄关闭错误与目录同步错误合并为维护错误返回，保持 RecordWritten 语义。
+- [P2] internal/store/store.go:339：可写探测只创建空文件，不再实际写入；真实子进程 RLIMIT_FSIZE=0 下对照一字节写 EFBIG，Open 却成功、首条记录写失败，3/3。应在独占探测文件写一个字节并检查写入、短写与关闭错误，始终只清理自己的文件。
+- [P3] internal/store/store.go:796：.keep 的 lstat(EIO) 被误报为路径替换且原错误丢失；单独以 %w 返回检查错误，仅在取得 inode 后判断身份。
+- [P3] internal/store/store.go:238：普通 active 为 0400 时最终 Open 返回 EACCES，但此前已删 .tmp/.keep 并收紧 .2 权限，3/3；应先确认 active 可读写打开，或收窄文档中拒绝启动不改已有文件的保证。
+
+Codex 只读审查 origin/main...HEAD 全部 14 个变更文件，base/merge-base fb2c535，无代码更改或提交，工作树及索引干净。按 owner 单 daemon 独占状态目录、日志不配置成符号链接边界审查，不将跨进程或符号链接布局当阻塞。此前启动顺序 P1 已修复，此次 P1 是独立的发布结果不确定问题；来源核对：https://man7.org/linux/man-pages/man2/rename.2.html BUGS。
+
+完整配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 通过；另全量 race count=1 与 store/daemon 核心 race count=3 通过。11 个有测试包通过，Node adapter 与两条权限测试实际执行；仅两个子进程 helper 按设计 skip，pkg/protocol 无测试文件。临时 overlay 的预期正确性断言失败用于确认缺陷，不是仓库原测试失败。经理核对 P1 测试源码、日志、控制流，并独立复跑确认。无安装，已有 Go 1.27.4；隔离 HOME/XDG/工具缓存，既有模块缓存只读复制，离线测试。
+
+第 4 轮仍有 P1，round: 4 已达到/超过 max_rounds: 3，本项留在 review/ 等 owner 决定，不自动移回 new/。若继续修复，请 owner 添加说明并移至 new/；本轮不改 branch/round，不移动 FT2/FT3/FT6。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。未合并、打 tag、发布或启用任务。
+
+未做真实 NFS 挂载、断电、kill -9、物理磁盘故障、无硬链接文件系统、原生 Linux/Windows、真实 Chrome 或 systemd 部署验收；Windows 轮转仍按不支持边界记录。无 UI 改动。临时诊断与报告按流程结束清理；无新增可见 /tmp 路径，TMPDIR 外主动写入仅授权 review 锁心跳。通知发送成功。
