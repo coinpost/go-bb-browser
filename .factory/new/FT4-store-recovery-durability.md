@@ -182,3 +182,11 @@ FT4 再排一轮，只移回 new，不启动开发或审查。
 按 owner 此次说明，将本项从 review/ 移回 new/，保留 branch 与 round: 3，不重置轮次。本 run 只做卡片移动与记录，不启动开发、build、review 或 ship，不改代码与配置。
 
 factory · review · 2026-11-25 01:00 的正文与 verdict: fix（head: b9f94f6a33b7b5814345e115e57cfe4518ae153b；P1 启动先删 .tmp/.keep 再验证 active，链接目标日志可能丢失）保持原样，待后续工厂处理。不修改先前 owner 单进程独占状态目录边界（Guoyin / factory · 2026-11-25 00:17）。未移动 FT2/FT3/FT6。
+
+## Guoyin · 2026-11-25 08:27
+补充一下日志不会配置成符号链接的文件
+
+## factory · 2026-11-25 08:27
+按 owner 此次说明，日志文件不配置成符号链接是本项使用前提。factory · review · 2026-11-25 01:00 中仅因日志为符号链接才成立的发现（含 fix 中的 P1：active 为符号链接并指向 .tmp/.keep 时，启动先删除 .tmp/.keep 再验证 active，可能丢失链接目标日志；以及 notes 中与符号链接备份相关的项）不作为此边界内的交付阻塞。
+
+此边界不得扩大为豁免普通文件日志的恢复问题、线程竞争或磁盘错误。不修改先前 review 正文与 verdict: fix，不自动改为 pass，不将本项移至 ready/。保留先前 owner 单进程独占状态目录边界（Guoyin / factory · 2026-11-25 00:17）以及 08:23 再排一轮、只移回 new、不启动开发或审查的说明。本 run 不改 round/branch，不移动本项，不启动 build/review/ship，不改代码与配置。
