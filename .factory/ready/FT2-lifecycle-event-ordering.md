@@ -130,3 +130,22 @@ round: 1
 经理独立重跑配置完整测试（gofmt + go vet ./... + go test -race ./...）：exit 0。never 路径未修改，工作区干净，提交仅含本项范围。
 
 外部写入：coder 报告本机无参数 mktemp 忽略 TMPDIR，曾产生四个系统 per-user 临时目录，已由 coder 删除；未报告精确路径。经理 /tmp 前后清单无新增。无新安装。Claude Code 5 小时额度已用 71%，返回时约 2 小时 43 分钟后重置；本次无须重试。
+
+
+## factory · review · 2026-11-25 10:55
+head: 429acb3766d665bc094ebaa0fb5c4955e8bcb13b
+verdict: pass
+notes:
+- [P2] internal/daemon/browser_reconnect.go:169: 读线程已为 targetDestroyed(A) 记录时间戳、A 已停止解析但通知尚未入队时，关停两次排空仍可见空队列，重放仍有 A；最终排空前应与读线程建立边界，等待边界前已读通知完成入队或溢出登记。
+- [P2] internal/daemon/server.go:299: 队列满导致销毁通知丢弃后若 CDP 断线，最终排空只处理队列，已 doomed 的受管目标仍可能留在持久化记录；应在 lifeMu 下结算注册表中确切销毁证据，不把枚举失败当作消失。
+- [P2] internal/daemon/browser_reconnect.go:167: 最终同步 drainTargetEvents 会逐个等待 ForgetTarget，未受收尾预算约束；14 个已附着目标 detach 等待的探针耗时 14.03 秒，超过默认 settleBudget 11 秒。应让最终事件处理与附件释放受期限约束，并优先记录已确认退役。
+- [P2] internal/daemon/browser_reconnect.go:362: watchCDPSession 未纳入后台任务等待且只监听 session context；正常返回后断开 stub 仍触发 fatalCDPLost。应监听本次运行停止信号，释放会话前等待 watcher 退出。
+- [P2] internal/daemon/server.go:417: Serve 错误路径丢弃 shutdownHTTP 的错误；请求耗尽第二段 60 秒预算被强制断开时只返回 accept 错误。应保留原服务错误并合并排空错误；411 行 fatal 分支同理。
+
+Codex 独立审查 origin/main...HEAD，未发现 P0/P1。coder 因上述五个 P2 建议修改，但工厂规则只以 P0/P1 阻断，故 verdict: pass，review/ → ready/；这些非阻断问题保留供 owner 决定，不宣称无缺陷。
+
+配置完整测试 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` exit 0，经理核验日志及干净工作区。工作树外 overlay 探针复现上述五项，另验证 HTTP listener 出错但在途 RPC 正常完成时 retirement 可落盘。分支与 main 可干净合并，审查未改文件、无提交、无新安装。
+
+独立重跑 FT28 溢出/缺席枚举/旧事件回归，并以完整 target ID 重放“旧 created(A) 排队 → 溢出 → 应用不含 A 的枚举 → 消费旧事件”；两种丢弃变体各 5 次，A 未复活，B 仍可解析。原溢出旧事件问题已有覆盖，无须重复实现。
+
+未检查：真实 Chrome、二进制进程级 SIGTERM、Linux；环境 macOS arm64、Go 1.27.4、loopback CDP stub。脚本测试隔离 HOME/XDG/cache。无新安装。/tmp 前后清单无新增；除 run lock 与 git worktree index 元数据外无额外外部写入。未合并 main、未打 tag、未发布。
