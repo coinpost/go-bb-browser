@@ -217,15 +217,20 @@ func Open(cfg OpenConfig) (*Store, error) {
 	if err := probeDirWritable(dir); err != nil {
 		return nil, fmt.Errorf("state dir %q is not writable: %w", dir, err)
 	}
-	for k := 1; k <= maxLogBackups; k++ {
-		backup := fmt.Sprintf("%s.%d", logPath, k)
-		fi, err := os.Lstat(backup)
-		if err != nil || !fi.Mode().IsRegular() {
-			continue
-		}
-		if err := tightenPath(backup, logFilePerm); err != nil {
-			return nil, fmt.Errorf("restrict rpc log backup %q: %w", backup, err)
-		}
+	// Decide whether this dir can be started from before changing anything in
+	// it (the probe above only ever touched its own file): a refused startup
+	// leaves staging files and backup modes exactly as it found them.
+	//
+	// Opening follows symbolic links and creates what a dangling one points to;
+	// rotation only ever works on a regular rpc.jsonl. Refuse anything else
+	// here, before the open, so neither the link's destination nor rpc.jsonl.1
+	// is touched.
+	if fi, err := os.Lstat(logPath); err == nil && !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("rpc log %q is not a regular file (%s): refusing to open it; replace it with the regular log file or move it away",
+			logPath, fi.Mode().Type())
+	}
+	if err := restorePreviousLog(logPath, logger); err != nil {
+		return nil, err
 	}
 
 	// A snapshot a previous process did not get to publish is not a log, and a
@@ -235,16 +240,15 @@ func Open(cfg OpenConfig) (*Store, error) {
 			_ = os.Remove(logPath + suffix)
 		}
 	}
-	if err := restorePreviousLog(logPath, logger); err != nil {
-		return nil, err
-	}
-	// Opening follows symbolic links and creates what a dangling one points to;
-	// rotation only ever works on a regular rpc.jsonl. Refuse anything else
-	// here, before the open, so neither the link's destination nor rpc.jsonl.1
-	// is touched.
-	if fi, err := os.Lstat(logPath); err == nil && !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("rpc log %q is not a regular file (%s): refusing to open it; replace it with the regular log file or move it away",
-			logPath, fi.Mode().Type())
+	for k := 1; k <= maxLogBackups; k++ {
+		backup := fmt.Sprintf("%s.%d", logPath, k)
+		fi, err := os.Lstat(backup)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if err := tightenPath(backup, logFilePerm); err != nil {
+			return nil, fmt.Errorf("restrict rpc log backup %q: %w", backup, err)
+		}
 	}
 
 	f, err := openPrivateLog(logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR)
@@ -351,7 +355,7 @@ func probeDirWritable(dir string) error {
 // hold the only recoverable generation, so it must not pass for absent.
 func restorePreviousLog(logPath string, logger *slog.Logger) error {
 	if _, err := os.Lstat(logPath); err == nil {
-		// Present, whatever it is: Open decides whether it is usable.
+		// Present: Open already refused anything but a regular file.
 		return nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("inspect rpc log %q: %w", logPath, err)
@@ -631,7 +635,10 @@ func (s *Store) retryDirSyncLocked() error {
 // generation is kept by linking that name, and startup recovers from rpc.jsonl,
 // else from rpc.jsonl.1 only. With the name missing (or naming anything else)
 // the backups hold the only generation a restart can find, so rotation must
-// not move them. Caller holds s.mu.
+// not move them. What a refusal leaves behind depends on when it is asked, so
+// the caller says that (see rotateLocked). It is a check, not a lock: the name
+// can still change between it and the step that relies on it. Caller holds
+// s.mu.
 func (s *Store) requireActivePathLocked() error {
 	active, err := s.logFile.Stat()
 	if err != nil {
@@ -639,10 +646,10 @@ func (s *Store) requireActivePathLocked() error {
 	}
 	named, err := os.Lstat(s.logPath)
 	if err != nil {
-		return fmt.Errorf("active rpc log path unusable, backups left untouched: %w", err)
+		return fmt.Errorf("active rpc log path unusable: %w", err)
 	}
 	if !named.Mode().IsRegular() || !os.SameFile(named, active) {
-		return fmt.Errorf("active rpc log path %q no longer names the open log, backups left untouched", s.logPath)
+		return fmt.Errorf("active rpc log path %q no longer names the open log", s.logPath)
 	}
 	return nil
 }
@@ -659,9 +666,10 @@ func (s *Store) requireActivePathLocked() error {
 //     fsynced;
 //  3. the open log becomes rpc.jsonl.1 without that name ever being free
 //     (keepPreviousLocked);
-//  4. rpc.jsonl is checked again — a name removed or replaced since 1 is not
-//     published over — and rpc.jsonl.tmp is renamed over it, the atomic
-//     publication; then the directory is fsynced.
+//  4. rpc.jsonl is checked again — a name found removed or replaced since 1
+//     is not published over — and rpc.jsonl.tmp is renamed over it, the
+//     atomic publication; then the directory is fsynced. (Check and rename
+//     are not one step: see the comment at the check.)
 //
 // published reports whether 4 renamed. Until then every failure leaves the old
 // log active under its handle (appends keep working) and is returned for the
@@ -671,7 +679,7 @@ func (s *Store) requireActivePathLocked() error {
 // wrapped in ErrDirSync and owed alone (dirSyncPending).
 func (s *Store) rotateLocked() (published bool, err error) {
 	if err := s.requireActivePathLocked(); err != nil {
-		return false, err
+		return false, fmt.Errorf("rotation not started, backups left untouched: %w", err)
 	}
 	snapshot, err := s.managedSnapshotLocked()
 	if err != nil {
@@ -708,10 +716,17 @@ func (s *Store) rotateLocked() (published bool, err error) {
 		return false, err
 	}
 	// Writing the snapshot and keeping the previous generation took time: the
-	// name may have gone or changed hands since the first check. rpc.jsonl.1
-	// now is the open log, so refusing here loses nothing.
+	// name may have gone or changed hands since the first check. The backups
+	// have been shifted by now and rpc.jsonl.1 is the open log, so refusing
+	// here loses nothing: appends keep reaching the file startup falls back to
+	// when rpc.jsonl is absent.
+	//
+	// This check and the rename below are two system calls. A file put under
+	// the name between them is replaced by the snapshot; nothing here can
+	// close that window, and with the state dir owned by this one process
+	// nothing is expected to use it.
 	if err := s.requireActivePathLocked(); err != nil {
-		return false, err
+		return false, fmt.Errorf("snapshot not published, %s.1 is the open log: %w", rpcLogFile, err)
 	}
 	if err := renamePath(tmpPath, s.logPath); err != nil {
 		return false, fmt.Errorf("publish snapshot: %w", err)

@@ -710,3 +710,75 @@ func TestRotationRefusesSymlinkedActiveLog(t *testing.T) {
 	}
 	requireRestart(t, dir, want)
 }
+
+// A startup that is refused changes nothing in the state dir: whether the dir
+// can be started from is decided before the staging files of an interrupted
+// rotation are removed and before backup modes are tightened. Once the entry
+// that made startup refuse is moved away, the usual cleanup happens.
+func TestRefusedStartupLeavesStateDirAsFound(t *testing.T) {
+	cases := []struct {
+		name    string
+		blocker func(logPath string) string // the entry startup refuses
+		wantErr string
+	}{
+		{"rpc.jsonl is a directory", func(logPath string) string { return logPath }, "not a regular file"},
+		{"rpc.jsonl missing and rpc.jsonl.1 is a directory", func(logPath string) string { return logPath + ".1" }, "previous generation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "state")
+			mkdirMode(t, dir, 0o700)
+			logPath := filepath.Join(dir, rpcLogFile)
+			blocker := tc.blocker(logPath)
+			if err := os.Mkdir(blocker, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			staged := map[string][]byte{
+				logPath + rotateTmpSuffix:  managedOpenLine(t, "aa11"),
+				logPath + rotateKeepSuffix: managedOpenLine(t, "bb22"),
+			}
+			for path, data := range staged {
+				writeFileMode(t, path, data, 0o600)
+			}
+			older := managedOpenLine(t, "cc33")
+			writeFileMode(t, backupPath(dir, 2), older, 0o644)
+
+			for attempt := 1; attempt <= 2; attempt++ {
+				s, err := Open(OpenConfig{StateDir: dir})
+				if err == nil {
+					_ = s.Close()
+					t.Fatalf("attempt %d: Open succeeded", attempt)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("attempt %d: unexpected error: %v", attempt, err)
+				}
+				for path, data := range staged {
+					if got := mustReadFile(t, path); !bytes.Equal(got, data) {
+						t.Fatalf("attempt %d: %s changed: %q", attempt, filepath.Base(path), got)
+					}
+				}
+				fi, err := os.Stat(backupPath(dir, 2))
+				if err != nil || fi.Mode().Perm() != 0o644 || !bytes.Equal(mustReadFile(t, backupPath(dir, 2)), older) {
+					t.Fatalf("attempt %d: rpc.jsonl.2 was touched (mode %v, err %v)", attempt, fi.Mode().Perm(), err)
+				}
+				if fi, err := os.Lstat(blocker); err != nil || !fi.IsDir() {
+					t.Fatalf("attempt %d: refused entry changed (%v)", attempt, err)
+				}
+			}
+
+			if err := os.Rename(blocker, filepath.Join(dir, "set-aside")); err != nil {
+				t.Fatal(err)
+			}
+			s, err := Open(OpenConfig{StateDir: dir})
+			if err != nil {
+				t.Fatalf("Open after moving the entry away: %v", err)
+			}
+			defer s.Close()
+			requireManaged(t, s)
+			requireNoRotationLeftovers(t, logPath)
+			if fi, err := os.Stat(backupPath(dir, 2)); err != nil || fi.Mode().Perm() != 0o600 {
+				t.Fatalf("rpc.jsonl.2 not tightened after a successful start (%v)", err)
+			}
+		})
+	}
+}
