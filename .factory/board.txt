@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-Nothing at your gates | 1 with the agent | 22 done | 23 sent back
-Drawn Nov 25, 10:48 | https://github.com/coinpost/go-bb-browser
+1 at your gates | 0 with the agent | 22 done | 23 sent back
+Drawn Nov 25, 10:56 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (2)                                 never built
     FT3     3d  创建在途关停收尾与唯一释放记账
@@ -10,14 +10,15 @@ BACKLOG (2)                                 never built
 NEW (0)                                     avg stay 3h
     Nothing here
 
-REVIEW (1)                                  avg stay 2h
-    FT2     1m  生命周期事件溢出重同步与优雅关停次序
-
-READY (0)                                   avg stay 2h
+REVIEW (0)                                  avg stay 2h
     Nothing here
 
+READY (1) [!]                               avg stay 2h
+  * FT2     1m  生命周期事件溢出重同步与优雅关停次序
+                > Check, then ship
+
 DONE (22)
-    FT4    29m  日志尾行、轮转恢复与安全可写探测 (round 5)
+    FT4    37m  日志尾行、轮转恢复与安全可写探测 (round 5)
     FT7    11h  target释放与观测writer退役同步 (round 6)
     FT28   23h  [P1] bb-daemon 支持完整 CDP target ID：自动化精确寻址，保留短 ID
                 兼容 (round 9)
