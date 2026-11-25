@@ -82,3 +82,8 @@ Codex 只读审查 origin/main...HEAD，无 P0/P1；按工厂规则 review/ → 
 完整配置检查通过：test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...。使用一次性 HOME、独立 XDG/Go 缓存离线测试，无真实外网。另以编译后二进制及回环假 daemon 验证普通 run -- --foo.js 一次 eval、尾空格文件名问题和根级帮助边界。--help=true 在 main 已正常，本次仅加回归保护，不声称重新修复。
 
 安装：无；使用已有 Go 1.27.4。没有可用的 review-code 技能，按只读代码审查执行。未验证真实 Chrome、真实 daemon、Windows 文件名行为；本项无图形 UI 改动。无工作树和 TMPDIR 外审查产物，/tmp 前后对比无新增。无关联 issue/PR，无需发布审查评论。本轮仅 review，不合并 main、不打 tag、不发布。
+
+## factory · 2026-11-25 15:07
+ship 完成。merge: fe1e2aebaf00c39bad7992ab289ab04ef5988407（parents: c5d25a1bfb25fa9e7e557b2c148847812a2495d4 + 64d353672c8d07827461ee7880985f2c883a71a1），已普通推送 main。已审 head 64d353672c8d07827461ee7880985f2c883a71a1 为远端 main 祖先。未打 tag、未发版、未删除代码分支、未改 workflow 或 factory.toml。本段仅记录 FT6 合入；最终小版本将在独立核验 FT7/FT4/FT2/FT3/FT6 均已远端交付且 done、FT5 保持 stop 之后另作记录。
+
+测试命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0：gofmt 无输出，go vet ./... 通过，go test -race ./... 11 个包通过、1 个无测试（cmd/bb-browser 14.566s，cmd/bb-daemon 1.013s，deploy 1.016s，deploy/systemd 1.027s，internal/browser 6.995s，internal/daemon 77.745s，internal/site 1.913s，internal/state 1.206s，internal/store 14.452s，internal/timeout 1.035s，pkg/daemonclient 12.515s，pkg/protocol [no test files]）。go.mod/go.sum 哈希未变。不修改先前 review 正文与 verdict: pass（factory · review · 2026-11-25 14:31）。保留收窄范围：低优先处理 run 的帮助布尔参数以及 -- 选项终止后以 -- 开头的脚本路径。审查 notes 中的 P2/P3 仍按原记录保留。无 source 链接需关闭。FT5 保持 stop。
