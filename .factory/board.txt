@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-1 at your gates | 0 with the agent | 24 done | 24 sent back
-Drawn Nov 25, 14:32 | https://github.com/coinpost/go-bb-browser
+Nothing at your gates | 0 with the agent | 25 done | 24 sent back
+Drawn Nov 25, 15:07 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (0)                                 never built
     Nothing here
@@ -12,16 +12,15 @@ NEW (0)                                     avg stay 3h
 REVIEW (0)                                  avg stay 2h
     Nothing here
 
-READY (1) [!]                               avg stay 2h
-  * FT6     1m  run帮助布尔参数与选项终止符兼容
-                > Check, then ship
+READY (0)                                   avg stay 1h
+    Nothing here
 
-DONE (24)
-    FT3    16m  创建在途关停收尾与唯一释放记账 (round 2)
-    FT2     3h  生命周期事件溢出重同步与优雅关停次序
+DONE (25)
+    FT6     1m  run帮助布尔参数与选项终止符兼容
+    FT3    51m  创建在途关停收尾与唯一释放记账 (round 2)
+    FT2     4h  生命周期事件溢出重同步与优雅关停次序
     FT4     4h  日志尾行、轮转恢复与安全可写探测 (round 5)
-    FT7    15h  target释放与观测writer退役同步 (round 6)
-    ... 20 more in .factory/done/
+    ... 21 more in .factory/done/
 
 * waits for you. [!] a stage that holds one.
 Each item's thread is its file in .factory/<folder>/.
