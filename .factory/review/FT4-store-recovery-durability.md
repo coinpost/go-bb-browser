@@ -225,3 +225,15 @@ Codex 只读审查 origin/main...HEAD 全部 14 个变更文件，base/merge-bas
 第 4 轮仍有 P1，round: 4 已达到/超过 max_rounds: 3，本项留在 review/ 等 owner 决定，不自动移回 new/。若继续修复，请 owner 添加说明并移至 new/；本轮不改 branch/round，不移动 FT2/FT3/FT6。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。未合并、打 tag、发布或启用任务。
 
 未做真实 NFS 挂载、断电、kill -9、物理磁盘故障、无硬链接文件系统、原生 Linux/Windows、真实 Chrome 或 systemd 部署验收；Windows 轮转仍按不支持边界记录。无 UI 改动。临时诊断与报告按流程结束清理；无新增可见 /tmp 路径，TMPDIR 外主动写入仅授权 review 锁心跳。通知发送成功。
+
+## Guoyin · 2026-11-25 09:35
+日志目录只用本机文件系统，不支持 NFS 等网络文件系统；按这个边界收窄 FT4 验收范围。
+
+## factory · 2026-11-25 09:35
+按 owner 此次说明，本项仅支持本机文件系统，不支持 NFS 等网络文件系统；仅依赖网络文件系统特殊语义的故障不列为当前验收阻塞。
+
+factory · review · 2026-11-25 08:52 的 P1（internal/store/store.go:731：快照 rename 已生效但返回错误后继续写旧 .1，丢失后续受管记录）在当前报告中由测试注入复现（实际执行本地改名后返回 ENOENT），并引用 Linux rename(2) 对 NFS「执行成功后重传返回失败」的记载，但未做真实 NFS 挂载核验，也未提供该问题在本机文件系统上实际触发的证据。按 owner 本机文件系统边界，该 P1 不作为当前交付阻塞。不宣称本机绝不可能出现同一语义，也不把此次测试注入说成真实 NFS 复现。
+
+此边界不得豁免本机普通文件上的磁盘满、权限错误、进程中断，以及轮转/恢复/线程竞争问题。该审查 notes 中的 P2/P3（备份发布 ENOSPC 后重试忽略检查错误、发布后旧日志 Close 错误仅 warn、可写探测未实际写入、.keep lstat 错误误报、拒绝启动仍改已有文件等）仍按原记录处理。保留先前 owner 单进程独占状态目录边界（Guoyin / factory · 2026-11-25 00:17）与日志不配置成符号链接边界（Guoyin / factory · 2026-11-25 08:27）。
+
+不修改先前 review 正文与 verdict: fix，不自动改为 pass，不将本项移至 ready/ 或 new/，不把此次说明解释为 ship 批准。本 run 不改 round/branch，不启动 build/review/ship，不改代码与配置。
