@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
+	"github.com/coinpost/go-bb-browser/internal/browser"
 	"github.com/coinpost/go-bb-browser/internal/state"
 	"github.com/coinpost/go-bb-browser/internal/store"
 	"github.com/coinpost/go-bb-browser/internal/timeout"
@@ -79,11 +80,18 @@ type Server struct {
 	// shutdownTimeout bounds http.Server.Shutdown. Zero uses the default.
 	// A timed-out shutdown gets one more timeout.Operation to drain handlers.
 	shutdownTimeout time.Duration
+	// settleTimeout bounds each wait of stopBackground. Zero uses the default
+	// (settleBudget).
+	settleTimeout time.Duration
 
 	// CDP loss triggers fatal exit (supervisor restart) instead of in-process reconnect.
 	fatalOnce sync.Once
 	fatalCh   chan error
-	stopRun   context.CancelFunc
+	// stopRun cancels the context of the background work ListenAndServe owns
+	// (bg). That context is not derived from the caller's: the caller's stop
+	// signal only stops the HTTP service, see stopBackground.
+	stopRun context.CancelFunc
+	bg      background
 
 	// SkipBrowserAttach skips CDP connect in ListenAndServe (tests without Chrome).
 	SkipBrowserAttach bool
@@ -214,7 +222,113 @@ func newHTTPServer(handler http.Handler) *http.Server {
 	}
 }
 
-// ListenAndServe starts the HTTP server until ctx is cancelled or Listen fails.
+// background is the work one ListenAndServe call owns besides the HTTP
+// service: the target sync loop of the session it attached (the only consumer
+// of that session's lifecycle queue) and the periodic tasks (CDP watchdog,
+// idle and observer sweepers). All of it runs on one context, cancelled by
+// stopRun; stopBackground ends it. Written before the goroutines start and by
+// the ListenAndServe goroutine only.
+type background struct {
+	// sess is the session whose lifecycle queue syncDone's loop consumes; nil
+	// when no browser was attached.
+	sess *browser.Session
+	// settle is closed to ask the sync loop to finish its work and return
+	// (settleTargets); nil outside ListenAndServe, where the loop only ends
+	// with its context.
+	settle chan struct{}
+	// syncDone is closed when the sync loop has returned.
+	syncDone chan struct{}
+	// tasks counts the periodic tasks.
+	tasks sync.WaitGroup
+}
+
+// goTask runs f as one of the periodic background tasks.
+func (s *Server) goTask(f func()) {
+	s.bg.tasks.Go(f)
+}
+
+// settleBudget bounds each wait of stopBackground: the sync loop's final
+// settlement sends at most maxSettleEnumerations enumerations of at most
+// CDPWatchdogTimeout each on top of whatever resync it was in.
+func (s *Server) settleBudget() time.Duration {
+	if s.settleTimeout > 0 {
+		return s.settleTimeout
+	}
+	probe := s.cfg.CDPWatchdogTimeout
+	if probe <= 0 {
+		probe = DefaultCDPWatchdogTimeout
+	}
+	return (maxSettleEnumerations+1)*probe + 5*time.Second
+}
+
+// stopBackground ends the background work once the HTTP service has stopped,
+// before the session is released and the RPC log closed. settle says that the
+// browser connection is still to be trusted (not a fatal CDP loss or a failed
+// startup).
+//
+//  1. With settle, the sync loop is asked to finish: it applies every lifecycle
+//     event the connection has read and answers the enumeration requests still
+//     open (settleTargets), then returns. In-flight RPCs have drained by now,
+//     so nothing produces further requests.
+//  2. The background context is cancelled and the loop and the periodic tasks
+//     are waited for.
+//  3. Events read meanwhile and still queued are applied (no browser round
+//     trip): a destroyed notification the daemon was told about is not lost
+//     because the loop had already stopped — the fatal path ends here.
+//
+// Every wait is bounded by settleBudget. A loop that does not return in time
+// is abandoned with a warning: nothing is concluded for it, the session and
+// log are closed regardless, and a write that loses that race gets
+// store.ErrClosed. What stays unsettled (a retirement not written) is settled
+// by the first successful enumeration of the next daemon process.
+func (s *Server) stopBackground(settle bool) {
+	budget := s.settleBudget()
+	bg := &s.bg
+	if settle && bg.syncDone != nil && bg.settle != nil {
+		close(bg.settle)
+		if !waitClosed(bg.syncDone, budget) && s.logger != nil {
+			s.logger.Warn("target lifecycle settlement did not finish in time; stopping it", "budget", budget)
+		}
+	}
+	if s.stopRun != nil {
+		s.stopRun()
+	}
+	if bg.syncDone != nil {
+		if waitClosed(bg.syncDone, budget) {
+			// The loop has returned: this goroutine is now the only consumer.
+			s.drainTargetEvents(bg.sess)
+		} else if s.logger != nil {
+			s.logger.Warn("target sync did not stop in time; lifecycle events still queued are not applied", "budget", budget)
+		}
+	}
+	tasksDone := make(chan struct{})
+	go func() { bg.tasks.Wait(); close(tasksDone) }()
+	if !waitClosed(tasksDone, budget) && s.logger != nil {
+		s.logger.Warn("background tasks did not stop in time", "budget", budget)
+	}
+}
+
+// waitClosed waits for done at most d and reports whether it was closed.
+func waitClosed(done <-chan struct{}, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
+// ListenAndServe starts the HTTP server until ctx is cancelled, the browser
+// connection is lost or the HTTP service fails.
+//
+// Shutdown order, the same on all three exits: (1) the HTTP server stops
+// accepting and in-flight requests drain (shutdownHTTP) while the browser
+// session, the target sync loop and the RPC log keep working for them; (2) the
+// lifecycle events read so far are applied and the background work stops
+// (stopBackground); (3) the session is released; (4) the RPC log is closed.
+// Cancelling ctx therefore does not cancel the background work by itself.
 //
 // The RPC log is closed last. Its close error (a state-dir sync still owed by
 // a rotation, or the file close itself) is part of the result: it is joined to
@@ -222,16 +336,20 @@ func newHTTPServer(handler http.Handler) *http.Server {
 // clean shutdown returns it alone — the daemon must not exit silently with its
 // log unconfirmed.
 func (s *Server) ListenAndServe(ctx context.Context) (retErr error) {
-	runCtx, stopRun := context.WithCancel(ctx)
+	runCtx, stopRun := context.WithCancel(context.WithoutCancel(ctx))
 	s.stopRun = stopRun
 	s.fatalCh = make(chan error, 1)
+	s.bg.settle = make(chan struct{})
+	// Until the service is up, the caller's stop signal still aborts startup
+	// work (the first enumeration); afterwards it only starts the shutdown.
+	startupDone := context.AfterFunc(ctx, stopRun)
+	defer startupDone()
 
 	defer func() {
 		if err := s.closeAudit(); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("close rpc log (its state on disk is not confirmed): %w", err))
 		}
 	}()
-	// shutdownHTTP drains handlers before the session and audit store are closed.
 	defer func() {
 		s.tabMu.Lock()
 		if s.sessDone != nil {
@@ -241,6 +359,10 @@ func (s *Server) ListenAndServe(ctx context.Context) (retErr error) {
 		s.sessDone = nil
 		s.tabMu.Unlock()
 	}()
+	// Runs first: the background work stops before the session and the log go.
+	// settle is set once the HTTP service has stopped in an orderly way.
+	settle := false
+	defer func() { s.stopBackground(settle && runCtx.Err() == nil) }()
 
 	if !s.SkipBrowserAttach && s.tabHook == nil {
 		if err := s.connectBrowser(runCtx); err != nil {
@@ -267,24 +389,33 @@ func (s *Server) ListenAndServe(ctx context.Context) (retErr error) {
 	}()
 
 	if s.cfg.TabIdleTimeout > 0 {
-		go s.runTabIdleSweeper(runCtx)
+		s.goTask(func() { s.runTabIdleSweeper(runCtx) })
 	}
 	if s.cfg.ObserverIdleTimeout > 0 {
-		go s.runObserverSweeper(runCtx)
+		s.goTask(func() { s.runObserverSweeper(runCtx) })
 	}
+	startupDone()
 
 	select {
 	case <-ctx.Done():
-		if err := s.shutdownHTTP(srv); err != nil {
+		err := s.shutdownHTTP(srv)
+		settle = true
+		if err != nil {
 			return fmt.Errorf("http shutdown: %w", err)
 		}
 		<-errCh
 		return nil
 	case err := <-s.fatalCh:
+		// fatalCDPLost cancelled the background context: the connection is not
+		// asked anything any more, stopBackground only applies what was read.
 		_ = s.shutdownHTTP(srv)
 		<-errCh
 		return err
 	case err := <-errCh:
+		// The listener failed; requests already accepted still get to finish
+		// before the session goes.
+		_ = s.shutdownHTTP(srv)
+		settle = true
 		return err
 	}
 }

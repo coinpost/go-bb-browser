@@ -71,7 +71,12 @@ func (s *Server) connectBrowser(ctx context.Context) error {
 	s.browserLastProbe = time.Now()
 	s.tabMu.Unlock()
 	s.watchCDPSession(sess)
-	go s.runTargetSync(ctx, sess)
+	s.bg.sess = sess
+	s.bg.syncDone = make(chan struct{})
+	go func(done chan struct{}) {
+		defer close(done)
+		s.runTargetSync(ctx, sess)
+	}(s.bg.syncDone)
 	// Parent ctx has no deadline. Keep the old PageTargets 60s cap so a hung
 	// Target.getTargets cannot block Listen forever, while SIGTERM still cancels.
 	listCtx, cancel := context.WithTimeout(ctx, timeout.Operation)
@@ -84,7 +89,7 @@ func (s *Server) connectBrowser(ctx context.Context) error {
 	// enumeration failed, runTargetSync retries it; recovery must not run on a
 	// failed enumeration, which would retire still-live tabs.
 	s.syncInitialTargets(sess, w, targets, terr)
-	go s.runCDPWatchdog(ctx, sess)
+	s.goTask(func() { s.runCDPWatchdog(ctx, sess) })
 	if s.logger != nil {
 		s.logger.Info("browser CDP session connected", "debugger", s.cfg.DebuggerURL)
 	}
@@ -108,7 +113,15 @@ func (s *Server) syncInitialTargets(conn targetDirtyMarker, w *state.Window, tar
 	return nil
 }
 
-// runTargetSync is the only consumer of the session's lifecycle event queue.
+// maxSettleEnumerations bounds the enumerations of the final settlement: one
+// answers the requests still open, a second one the request that answer itself
+// may leave (it is opened after everything the first could not order).
+const maxSettleEnumerations = 2
+
+// runTargetSync is the only consumer of the session's lifecycle event queue
+// while it runs. It returns at once when ctx ends, leaving the queue as it is;
+// when ListenAndServe asks it to settle (s.bg.settle, after the in-flight RPCs
+// have drained) it finishes with settleTargets first.
 func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 	if sess == nil {
 		return
@@ -119,34 +132,18 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.bg.settle:
+			s.settleTargets(ctx, sess)
+			return
 		case ev := <-sess.TargetEvents():
 			s.applyTargetEvent(sess, ev)
 			// Handle what is already queued before looking at the dirty flag,
 			// so one resync answers a whole burst of events.
-		drain:
-			for range cap(sess.TargetEvents()) {
-				select {
-				case ev := <-sess.TargetEvents():
-					s.applyTargetEvent(sess, ev)
-				default:
-					break drain
-				}
-			}
+			s.drainTargetEvents(sess)
 		case <-retry.C:
 		}
 		if sess.ConsumeTargetDirty() {
-			probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
-			// Window before the request: RPCs keep registering and removing tabs
-			// while this resync is in flight.
-			w := s.tabs.OpenWindow()
-			infos, err := sess.PageTargetsContext(probe)
-			cancel()
-			if err == nil {
-				// Also settles managed tabs persisted by a previous process when
-				// the startup enumeration failed.
-				s.applyEnumeration(sess, w, infos)
-			} else {
-				s.tabs.Abandon(w)
+			if err := s.resyncTargets(ctx, sess); err != nil {
 				sess.MarkTargetDirty()
 				s.triggerBrowserProbe()
 				if s.logger != nil {
@@ -155,6 +152,74 @@ func (s *Server) runTargetSync(ctx context.Context, sess *browser.Session) {
 			}
 		}
 	}
+}
+
+// drainTargetEvents applies the lifecycle events queued right now, at most one
+// queue length of them, without waiting for more. Only the queue's consumer
+// may call it.
+func (s *Server) drainTargetEvents(sess *browser.Session) {
+	if sess == nil {
+		return
+	}
+	for range cap(sess.TargetEvents()) {
+		select {
+		case ev := <-sess.TargetEvents():
+			s.applyTargetEvent(sess, ev)
+		default:
+			return
+		}
+	}
+}
+
+// resyncTargets answers a request for a fresh enumeration (queue overflow,
+// evidence that could not be ordered, a failed earlier attempt). A failed or
+// timed-out round trip changes nothing: it is no evidence about any target.
+func (s *Server) resyncTargets(ctx context.Context, sess *browser.Session) error {
+	probe, cancel := context.WithTimeout(ctx, s.cfg.CDPWatchdogTimeout)
+	defer cancel()
+	// Window before the request: RPCs keep registering and removing tabs
+	// while this resync is in flight.
+	w := s.tabs.OpenWindow()
+	infos, err := sess.PageTargetsContext(probe)
+	if err != nil {
+		s.tabs.Abandon(w)
+		return err
+	}
+	// Also settles managed tabs persisted by a previous process when
+	// the startup enumeration failed.
+	s.applyEnumeration(sess, w, infos)
+	return nil
+}
+
+// settleTargets is the sync loop's last act in a graceful shutdown. The HTTP
+// service has stopped and its requests have drained, so the lifecycle evidence
+// still outstanding is finite: the events the connection reader has queued,
+// and the enumeration requests left by a dropped event or by evidence that
+// could not be ordered. Both are applied — every queued event, and at most
+// maxSettleEnumerations bounded enumerations while one is requested — so that
+// a tab the browser reported gone before the daemon stops has its retirement
+// written to the RPC log, which is closed only afterwards.
+//
+// The boundary is what the reader has read when the queue is found empty: a
+// notification still on the wire, or never sent because the connection ended,
+// is not waited for. An enumeration that fails or times out ends the
+// settlement without concluding anything — no target is retired on it; the
+// next daemon process settles its persisted managed tabs with its first
+// successful enumeration.
+func (s *Server) settleTargets(ctx context.Context, sess *browser.Session) {
+	for range maxSettleEnumerations {
+		s.drainTargetEvents(sess)
+		if !sess.ConsumeTargetDirty() {
+			return
+		}
+		if err := s.resyncTargets(ctx, sess); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("final target enumeration before shutdown failed; nothing is concluded from it", "err", err)
+			}
+			return
+		}
+	}
+	s.drainTargetEvents(sess)
 }
 
 // applyTargetEvent applies one queued lifecycle event. "Gone" is always
