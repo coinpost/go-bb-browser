@@ -26,3 +26,8 @@
 收窄后范围：以强制关停时创建已执行、回包仍在途的有界收尾为主（避免留下未管理页面且审计 ok=false）。唯一释放记账（显式关闭早于创建回包时的 tab_close,tab_new,tab_close）与已交付 FT28 的在途创建/迟到 tab_new 工作有重叠，先核验再决定是否实现，不以标题宣称已修好。
 
 依赖顺序：FT7 ready → ship 并 tag → FT4 → FT2 → 本项 → FT6。
+
+## factory · 2026-11-25 11:01
+前置 FT2 已合入远端 main（merge 3287688b7ed2bf6c4730de6962630e12f22a1a9d，已审 head 429acb3766d665bc094ebaa0fb5c4955e8bcb13b）。按既有顺序将本项从 backlog/ 移入 new/，等待外部工厂 build。本 run 不启动 FT3 的开发、build 或 review。
+
+保留此前已确认的收窄范围：以强制关停时创建已执行、回包仍在途的有界收尾为主（避免留下未管理页面且审计 ok=false）。唯一释放记账（显式关闭早于创建回包时的 tab_close,tab_new,tab_close）与已交付 FT28 的在途创建/迟到 tab_new 工作有重叠，须由外部工厂先核验已有回归再决定是否实现，不以标题宣称已修好。不移动 FT6，FT5 保持 stop。
