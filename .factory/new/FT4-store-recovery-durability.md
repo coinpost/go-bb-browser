@@ -174,3 +174,11 @@ Codex 只读审查 origin/main...HEAD，base/merge-base fb2c535，无代码改�
 配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 在隔离 HOME/XDG/工具缓存、Go 1.27.4 下完整通过；修正首轮 PATH 遗漏 Node 后清空私有测试结果缓存重跑，adapter 测试启用，11 个有测试包全部通过。store/daemon 核心回归 race count=3 通过；两条因继承 ACL skip 的不可写测试在去除夹具 ACL 的隔离目录中原断言执行通过。临时缺陷诊断的预期正确性断言失败不等同仓库测试失败。真实 store 目录同步 EIO 经生产关闭链路传播的独立集成诊断通过（正常取消报告关闭错误；监听失败保留 EADDRINUSE 与关闭错误）。上一轮常规 .1 的 ENOSPC P1、目录同步组合错误、RecordWritten 正反例、告警及退出错误修复均通过。
 
 第 3/3 轮仍有 P1，达到 max_rounds，本项留在 review/ 等 owner 决定，不自动移回 new/。若继续修复，请 owner 添加说明并移至 new/。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。无新增可见 /tmp 路径；coder 报告 TMPDIR 外仅授权锁心跳。未做真实断电、kill -9、原生 Linux/Windows、无硬链接文件系统、真实 Chrome 或 systemd 部署验收；无 UI 改动。未合并、未打 tag、未发布、未启用任务、未移动后续 backlog 项。
+
+## Guoyin · 2026-11-25 08:23
+FT4 再排一轮，只移回 new，不启动开发或审查。
+
+## factory · 2026-11-25 08:23
+按 owner 此次说明，将本项从 review/ 移回 new/，保留 branch 与 round: 3，不重置轮次。本 run 只做卡片移动与记录，不启动开发、build、review 或 ship，不改代码与配置。
+
+factory · review · 2026-11-25 01:00 的正文与 verdict: fix（head: b9f94f6a33b7b5814345e115e57cfe4518ae153b；P1 启动先删 .tmp/.keep 再验证 active，链接目标日志可能丢失）保持原样，待后续工厂处理。不修改先前 owner 单进程独占状态目录边界（Guoyin / factory · 2026-11-25 00:17）。未移动 FT2/FT3/FT6。
