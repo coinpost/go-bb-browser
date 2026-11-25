@@ -90,3 +90,22 @@ Scope/Decisions：只改创建收尾、相关 Session 期限和回归文档；�
 未检查：真实非 headless Chrome、realchrome、Linux、进程崩溃；pipeline 强停使用缩短预算而非生产15s+60s，其 ctx 未取消仅日志非硬断言；srv.Close 与通知之间提交窗口、入口检查与派发之间取消未固定调度。创建往返自身66s期限的 hint 仍可能含 one RPC is limited to 60s（附未知结果说明）。UI 未改动。请 review 特别核验强停通知/提交边界及期限语义，不将未知身份宣称为保证清理。
 
 范围偏差：coder 写入工作树/TMPDIR 以外的自身 memory 工具链笔记和索引（非项目代码）；定位工具链运行 mise ls/which 是否更新其缓存/状态未确认。manager 未授权该笔记写入且未擅自删除外部文件。/tmp 顶层扫描无新增，不能据此保证已有目录内无新增。
+
+
+## factory · review · 2026-11-25 14:03
+head: 74345e9e2f00208515199d8b89a77974bde76a1a
+verdict: pass
+notes:
+- [P2] internal/daemon/server.go:461: 强停先 srv.Close() 后关闭创建 gate，连接已关闭但 gate 尚未关闭时仍可提交。生产 15s+60s 预算，8 个流水线创建并行 80 个列表请求，仅在客户端观察到各自 EOF 后释放 CDP 回复，5/8 成功提交、页面保留且重放受管；缩短预算单请求重复 11/12 误提交。建议第二次排空失败后先关闭 gate，再强关 HTTP；回归以客户端 EOF 为释放条件。
+- [P2] internal/daemon/tab_create.go:272: 入口检查后 OpenWindow 等锁期间取消，实际派发前没有复查。固定等待 registry 锁、取消再放锁，生产 Session 仍派发创建；扣留回复超过 5s 后留下未受管页且失败审计 target 为空。建议取得窗口后、派发前复查取消和 gate，未发送则释放窗口。
+- [P2] internal/daemon/tab_create.go:304: 最后 250ms 等待的 timer 分支仍随机丢弃已缓冲完整 ID。固定生产 Session 已解码 ID 进入缓冲、handler 在定时器就绪后继续，16 次中 8 次留下页面且失败审计 target 为空。建议该分支也优先非阻塞读取回复；比例只描述固定调度。
+- [P3] internal/daemon/tab_create.go:306: 最后等待期丢弃明确 CDP 拒绝，生产 Session 已解码 Not allowed 却报告无答复和可能未受管。保留明确协议错误，只有无法确定结果时报告未知。
+- [P3] README.md:121: 普通 HTTP/1.1 流水线连接断开可能未取消 handler context；主动断连后释放回复，仍成功创建、无 close、重放受管。文档须明确以 handler context 实际取消为准，daemon 强停另有 gate 通知。
+
+Codex 只读审查覆盖 main 3287688 至本 head 的全部 5 个提交，无 P0/P1，按工厂规则第 2/3 轮 review/ → ready/；上述 P2/P3 保留供 owner 判断，不表示边界缺口已修复。上一轮 P1（生产 Session 60s 截断额外收尾）已修复，完整套件中真实第 61 秒回包回归通过。
+
+配置检查 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0；11 个包通过、1 个无测试，daemon 78.376s。额外诊断：生产排空 75.003s、等待明确 gate 信号后回复，精确关闭 A、失败审计带完整 ID，B 保留且重放无 A；目标锁忙 5.002s 返回并释放窗口；提交锁前后取消、普通缓冲回复、唯一成功释放记账、回滚失败等回归以 -race -short -count=8 通过。观察型诊断退出 0 不代表没有缺陷，notes 依据页面/审计/重放状态判定。
+
+manager 核验 head 未变、工作树干净、diff --check 通过、未改 never 路径、与当前 main 可无冲突合并。Go 1.27.4 darwin/arm64，本地锁定依赖、离线隔离 HOME/XDG/cache，无安装。无可用 review-code skill。未检查真实非 headless Chrome、Linux/systemd 或进程崩溃；UI 未改。无 linked issue/PR，故无 GitHub 评论。
+
+临时文件：审查诊断在本 run TMPDIR；进程自身在其外仅刷新本 run 锁和 worktree git 索引。Codex harness 另维护会话、快照、锁及缓存状态，不作为项目改动；同期共享状态变化不能归因于本轮。/tmp 顶层前后无新增，不据此保证已有目录或已删除文件从未写入。未合入 main、未打 tag、未发布。
