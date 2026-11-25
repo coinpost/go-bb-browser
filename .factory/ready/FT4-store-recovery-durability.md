@@ -268,3 +268,20 @@ factory · review · 2026-11-25 08:52 的 P1（internal/store/store.go:731：快
 限制/审查重点：首次启动先创建 active，后续备份 chmod 失败可留下空文件，文档明确不承诺所有失败无副作用；旧句柄关闭失败只报一次，不重试。daemon 对新关闭错误沿用通用告警路径，未新增该路径专项测试。未做真实磁盘满/EIO、RLIMIT_FSIZE 子进程、断电/kill -9、NFS、无硬链接文件系统、原生 Linux/Windows、真实 Chrome 或 systemd 部署；无 UI 改动。
 
 FT28 已 done，按正常排序选择唯一 new 项 FT4；FT21 保持 stop，完整 target ID 未改。未 ship、未打 tag、未发布、未启用任务、未移动 FT2/FT3/FT6。临时写入均在工作树与本 run TMPDIR，外部主动写入仅授权锁心跳，无新增可见 /tmp 路径；coder 报告一次 TMPDIR 未传承后的只读系统临时目录枚举，未读取/source 外部 env.sh。按流程结束清理本轮 TMPDIR。通知发送成功。
+
+## factory · review · 2026-11-25 10:09
+head: 9b2f1c2add0f52f35b93c1a992e137b48e4c3294
+verdict: pass
+notes:
+- [P2] internal/store/store.go:259：启动忽略删除普通暂存文件的错误。本机不可变 rpc.jsonl.tmp 下 Open 成功且无告警，后续两次超限追加均写入后返回 ErrRotation/EPERM，3/3 复现。应在启动报告路径和清理原始错误，避免无提示地失去轮转能力。
+- [P3] internal/daemon/tab_idle.go:194：两条生命周期告警无条件承诺下次追加重试，但发布后旧句柄 Close 错误只报告一次。删除无条件重试措辞，或按错误类型精确说明并覆盖 close-only 告警。
+- [P3] README.md:139、AGENTS.md:30：首次轮转预检查拒绝 active 缺失后，后续写入也可能经 .1 恢复（启动刚从 .1 硬链接恢复 active 时两者同 inode），实测 3/3。应按 .1 是否指向当前打开日志描述恢复能力，而非仅按轮转检查时点断言丢失。
+- [P3] internal/store/rotation_checks_test.go:199：重试成功后读取 .1 再作为 .1 期望值，无法检出备份内容损坏；应使用重试前 active 内容加触发记录独立构造期望值。
+
+Codex 只读审查 origin/main...HEAD 全部 15 个变更文件及完整线程，base/merge-base fb2c535。按 owner 单进程独占、日志不配置符号链接、本机文件系统（不支持 NFS）边界独立审查，无 P0/P1；旧轮次 review 正文/verdict 保留，不扩大边界豁免本机磁盘错误或恢复问题。经理核对本轮诊断输出、配置测试日志及上述控制流。工作树/索引干净，无代码提交。
+
+配置命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全部通过，另一次无缓存完整 race 及最新六组回归 race count=5 通过。11 个有测试包通过，Node adapter 实际执行；两个子进程 helper 顶层按设计 skip；daemon 不可写目录因继承 ACL skip，临时 overlay 仅清除夹具 ACL 后原断言通过；store 不可写目录和 0400 active 测试直接执行。pkg/protocol 无测试。Go 1.27.4；隔离 HOME/XDG/工具缓存，既有锁定依赖缓存离线复用，无安装。
+
+本机真实 SIGKILL 覆盖快照 fsync、暂存链接、较旧备份改名/链接、.1 发布、active 发布六个边界，各 3 次共 18 次重启恢复及后续轮转通过；真实 RLIMIT_FSIZE=0 下启动返回 EFBIG 且保留既有 .write-test，3/3 通过。未做物理断电、实际磁盘满/介质 EIO、无硬链接文件系统、原生 Linux、真实 Chrome 或 systemd 部署；Windows 轮转仍不支持，无 UI 改动。
+
+第 5 轮审查通过，review/ → ready/；仅保留以上非阻塞项供 owner 查看。无 source 或 owner Closes/Fixes/Resolves 链接，不发表评论。未合并、打 tag、发布、启用任务或移动 FT2/FT3/FT6，FT21 保持 stop。无新增可见 /tmp 路径，coder 报告工作树/TMPDIR 外仅授权 review 锁心跳；临时诊断与报告按流程结束清理。
