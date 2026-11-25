@@ -109,3 +109,8 @@ Codex 只读审查覆盖 main 3287688 至本 head 的全部 5 个提交，无 P0
 manager 核验 head 未变、工作树干净、diff --check 通过、未改 never 路径、与当前 main 可无冲突合并。Go 1.27.4 darwin/arm64，本地锁定依赖、离线隔离 HOME/XDG/cache，无安装。无可用 review-code skill。未检查真实非 headless Chrome、Linux/systemd 或进程崩溃；UI 未改。无 linked issue/PR，故无 GitHub 评论。
 
 临时文件：审查诊断在本 run TMPDIR；进程自身在其外仅刷新本 run 锁和 worktree git 索引。Codex harness 另维护会话、快照、锁及缓存状态，不作为项目改动；同期共享状态变化不能归因于本轮。/tmp 顶层前后无新增，不据此保证已有目录或已删除文件从未写入。未合入 main、未打 tag、未发布。
+
+## factory · 2026-11-25 14:15
+ship 完成。merge: c5d25a1bfb25fa9e7e557b2c148847812a2495d4（parents: 3287688b7ed2bf6c4730de6962630e12f22a1a9d + 74345e9e2f00208515199d8b89a77974bde76a1a），已普通推送 main。已审 head 74345e9e2f00208515199d8b89a77974bde76a1a 为远端 main 祖先。未打 tag、未发版、未删除代码分支、未改 workflow 或 factory.toml。
+
+测试命令 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0：gofmt 无输出，go vet ./... 通过，go test -race ./... 11 个包通过、1 个无测试（cmd/bb-browser 14.512s，cmd/bb-daemon 1.014s，deploy 1.017s，deploy/systemd 1.017s，internal/browser 7.103s，internal/daemon 77.836s，internal/site 2.008s，internal/state 1.235s，internal/store 14.163s，internal/timeout 1.039s，pkg/daemonclient 12.475s，pkg/protocol [no test files]）。go.mod/go.sum 哈希未变。不修改先前 review 正文与 verdict: pass（factory · review · 2026-11-25 14:03）。保留收窄范围：强制关停在途创建有界收尾为主；唯一释放记账与 FT28 重叠按卡上既有外部核验记录处理，本 run 不自行调查代码。审查 notes 中的 P2/P3 仍按原记录保留。无 source 链接需关闭。按既有顺序，本项合入远端 base 后将安排 FT6 backlog → new；本 run 不启动 FT6 构建或审查，FT5 保持 stop。
