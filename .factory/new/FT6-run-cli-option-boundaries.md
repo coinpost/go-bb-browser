@@ -26,3 +26,8 @@
 收窄后范围：低优先处理 run 的帮助布尔参数（如 adapter.js --help=true 仍发 eval，请求帮助时应零 RPC）以及 -- 选项终止后以 -- 开头的脚本路径（如 run -- --foo.js）。可与已交付 FT9 审查 factory · review · 2026-11-22 04:31（head 8004cbd723455c73fd843f07ac0f9c5be43f4468）所记残留帮助/分隔符兼容问题对齐，但不把 FT9 当作本项已修好。
 
 依赖顺序：FT7 ready → ship 并 tag → FT4 → FT2 → FT3 → 本项。
+
+## factory · 2026-11-25 14:16
+前置 FT3 已合入远端 main（merge c5d25a1bfb25fa9e7e557b2c148847812a2495d4，已审 head 74345e9e2f00208515199d8b89a77974bde76a1a）。按既有顺序将本项从 backlog/ 移入 new/，等待外部工厂 build。本 run 不启动 FT6 的开发、build 或 review。
+
+保留此前收窄范围：低优先处理 run 的帮助布尔参数（如 adapter.js --help=true 仍发 eval，请求帮助时应零 RPC）以及 -- 选项终止后以 -- 开头的脚本路径（如 run -- --foo.js）。可与已交付 FT9 审查 factory · review · 2026-11-22 04:31（head 8004cbd723455c73fd843f07ac0f9c5be43f4468）所记残留帮助/分隔符兼容问题对齐，但不把 FT9 当作本项已修好。FT5 保持 stop。
