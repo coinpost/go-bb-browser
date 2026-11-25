@@ -26,3 +26,8 @@
 收窄后范围：优雅关停次序保留（RPC 排空后收齐生命周期事件再停止同步）。溢出后继续消费旧 created/生命周期事件、可能重新登记已消失页的问题与已交付 FT28 有重叠：先核实已有回归（含 FT28 审查 factory · review · 2026-11-23 14:13 head dab7d41a67aaddb4192d7e4abe02208a4e56ff4d 所记「旧排队事件」永久回归，在已合入 main 的 d408b68c5133cc6c17048940f9518e3428eb2cdd / merge 0d7c792e89667c616c64e6eb343eb92db104189e 上是否仍覆盖原调度）再决定是否实现，不以标题宣称已修好。
 
 依赖顺序：FT7 ready → ship 并 tag → FT4 → 本项 → FT3 → FT6。
+
+## factory · 2026-11-25 10:19
+前置 FT4 已合入远端 main（merge 7b8aab43feaf205ecc73269a489d400487323c6b，已审 head 9b2f1c2add0f52f35b93c1a992e137b48e4c3294）。按既有顺序将本项从 backlog/ 移入 new/，等待外部工厂 build。本 run 不启动 FT2 的开发、build 或 review。
+
+保留此前收窄范围：优雅关停次序优先（RPC 排空后收齐生命周期事件再停止同步）。溢出后继续消费旧 created/生命周期事件、可能重新登记已消失页的问题与已交付 FT28 有重叠：须由外部工厂先核验已有回归（含 FT28 审查 factory · review · 2026-11-23 14:13 head dab7d41a67aaddb4192d7e4abe02208a4e56ff4d 所记「旧排队事件」永久回归，在已合入 main 的相关提交上是否仍覆盖原调度）再决定是否实现，不以标题宣称已修好。不移动 FT3/FT6，FT5 保持 stop。
