@@ -16,8 +16,9 @@ builds:
       - -X main.version={{.Version}}
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
-    goos: [linux]
-    goarch: [amd64]
+    targets:
+      - linux_amd64
+      - darwin_arm64
 
   - id: bb-daemon
     main: ./cmd/bb-daemon
@@ -29,8 +30,9 @@ builds:
       - -X main.version={{.Version}}
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
-    goos: [linux]
-    goarch: [amd64]
+    targets:
+      - linux_amd64
+      - darwin_arm64
 
 archives:
   - id: default

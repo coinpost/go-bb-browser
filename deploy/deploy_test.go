@@ -86,9 +86,11 @@ func TestStaticComposeUsesProvisionedStateDir(t *testing.T) {
 	}
 }
 
-// Static check: GoReleaser no longer builds or pushes Docker images, and
-// only builds linux/amd64 binaries for bb-browser and bb-daemon.
-func TestStaticGoReleaserLinuxAmd64BinariesOnly(t *testing.T) {
+// Static check: GoReleaser does not build or push Docker images, and
+// builds only linux/amd64 and darwin/arm64 binaries for bb-browser and
+// bb-daemon. targets is used so a goos×goarch product does not add
+// linux/arm64, darwin/amd64, or Windows.
+func TestStaticGoReleaserLinuxAmd64AndDarwinArm64BinariesOnly(t *testing.T) {
 	lines := instructions(t, ".goreleaser.yaml")
 	for _, forbidden := range []string{"dockers:", "docker_manifests:"} {
 		if slices.Contains(lines, forbidden) {
@@ -103,13 +105,21 @@ func TestStaticGoReleaserLinuxAmd64BinariesOnly(t *testing.T) {
 		}
 		return n
 	}
-	if got := count("goos: [linux]"); got != 2 {
-		t.Errorf("goos: [linux] appears %d times, want 2 (bb-browser and bb-daemon)", got)
+	if got := count("- linux_amd64"); got != 2 {
+		t.Errorf("- linux_amd64 appears %d times, want 2 (bb-browser and bb-daemon)", got)
 	}
-	if got := count("goarch: [amd64]"); got != 2 {
-		t.Errorf("goarch: [amd64] appears %d times, want 2 (bb-browser and bb-daemon)", got)
+	if got := count("- darwin_arm64"); got != 2 {
+		t.Errorf("- darwin_arm64 appears %d times, want 2 (bb-browser and bb-daemon)", got)
 	}
-	for _, leftover := range []string{"goos: [linux, darwin, windows]", "goarch: [amd64, arm64]"} {
+	for _, leftover := range []string{
+		"goos: [linux, darwin, windows]",
+		"goos: [linux, darwin]",
+		"goarch: [amd64, arm64]",
+		"- linux_arm64",
+		"- darwin_amd64",
+		"- windows_amd64",
+		"- windows_arm64",
+	} {
 		if slices.Contains(lines, leftover) {
 			t.Errorf(".goreleaser.yaml still contains %q", leftover)
 		}
