@@ -1,6 +1,6 @@
 ---
 branch: factory/FT3-create-shutdown-accounting
-round: 1
+round: 2
 ---
 # 创建在途关停收尾与唯一释放记账
 
@@ -74,3 +74,19 @@ notes:
 Codex 只读审查；工作树干净，无提交、无安装。配置检查 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 退出 0（11 个包通过、1 个无测试）。上述失败是额外诊断发现的必需行为验收缺口，不是配置检查失败；P1 来自生产 60s 超时截断收尾，不因诊断测试失败自动提升等级。诊断在隔离副本中执行，使用 throwaway HOME/XDG/cache 和本地锁定依赖，无外网测试。FT28 唯一成功关闭/失败创建审计回归通过。补验提交后响应前取消会保留受管状态；取消后超过 5s 的回复不猜测关闭且窗口释放。
 
 未检查真实非 headless Chrome、Linux、进程中途崩溃。UI 未改动。临时文件均在本 run TMPDIR 内（另触碰本 run 锁和 git 索引），/tmp 顶层前后无新增；不据此保证既有目录无新增。第 1/3 轮，review/ → new/，下一轮修复 fix 列表并保留 notes 供后续检查；未合并 main、未打 tag、未发布。
+
+
+## factory · plan · 2026-11-25 13:53
+第 2 轮沿用现有计划，修复最新 review 的 P1 fix，并补齐同节相关 P2/P3 notes。Behaviour：RPC 60s 仍为提交上限，生产 Session 的创建往返独立保留至 RPC 期限后 5s 收尾加 1s 余量；迟到完整 id 只供精确回滚及失败审计。HTTP 强停显式通知在途创建；lifeMu 内、registry 修改前检查取消；入口已取消不派发，放弃等待前优先读取已缓冲回复。错误明确区分拒绝、身份未知与回滚失败。
+Scope/Decisions：只改创建收尾、相关 Session 期限和回归文档；不恢复 FT21/短 ID，不发布。强停通知点为 shutdownHTTP 返回后进入 settleCreations；srv.Close 与通知之间已完成的提交视为已提交。Checking：真实生产 60s Session 回归及固定调度取消/缓冲回归，完整配置检查，离线隔离 HOME/XDG/cache。
+
+## factory · 2026-11-25 13:53
+第 2 轮修复完成，new/ → review/。branch: factory/FT3-create-shutdown-accounting；head: 74345e9（代码 f99afa5，文档 74345e9）。未合入 main、未打 tag、未发布；FT28 已 done，FT21 保持 stop。
+
+实现：生产 Session 遵从创建调用方独立期限，不再以 Operation 60s 截断额外收尾；RPC 提交仍不超过 60s。增加强停 gate 通知与提交检查，取消检查移入 lifeMu 临界区，已提交后取消保留受管；已取消入口不派发，abort/timer 时优先消费已缓冲 id，取消往返后最多再等 250ms 获取已知 id；断线未知身份和回滚失败告警如实描述，不猜测认领或误关其它页面。
+
+检查：Claude Code 报告完整配置检查两次通过，创建相关测试 -race -short -count=30 共 1380 PASS；生产 Session 回归真实等待 60s 后再 1s 释放回复，非缩短 Operation，覆盖完整 id 精确关闭、失败审计及无受管。coder 在 TMPDIR 副本还原相关修复验证测试会失败。manager 独立执行完整配置命令通过（部分 Go 缓存命中），并以 -race -count=1 非缓存执行生产60s、pipeline、lifeMu、缓冲回复四项回归通过（62.756s）。测试离线，HOME/XDG/Go cache 在 run TMPDIR 内。提交范围、never 路径、工作树干净及 diff --check 通过。无安装，使用既有 Go 1.27.4。
+
+未检查：真实非 headless Chrome、realchrome、Linux、进程崩溃；pipeline 强停使用缩短预算而非生产15s+60s，其 ctx 未取消仅日志非硬断言；srv.Close 与通知之间提交窗口、入口检查与派发之间取消未固定调度。创建往返自身66s期限的 hint 仍可能含 one RPC is limited to 60s（附未知结果说明）。UI 未改动。请 review 特别核验强停通知/提交边界及期限语义，不将未知身份宣称为保证清理。
+
+范围偏差：coder 写入工作树/TMPDIR 以外的自身 memory 工具链笔记和索引（非项目代码）；定位工具链运行 mise ls/which 是否更新其缓存/状态未确认。manager 未授权该笔记写入且未擅自删除外部文件。/tmp 顶层扫描无新增，不能据此保证已有目录内无新增。
