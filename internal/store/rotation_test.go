@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -529,12 +530,27 @@ func TestProbeDirWritable(t *testing.T) {
 	}
 }
 
+// dropInheritedACL removes the access control list a test fixture inherited
+// from its parent directory, so that its mode bits alone decide access. macOS
+// directories can carry inheritable entries that grant what the mode denies;
+// on other systems the mode already bounds what an ACL grants.
+func dropInheritedACL(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	if out, err := exec.Command("/bin/chmod", "-N", path).CombinedOutput(); err != nil {
+		t.Fatalf("remove ACL from %s: %v: %s", path, err, out)
+	}
+}
+
 // A state dir files cannot be created in still fails startup.
 func TestOpenFailsWhenStateDirNotWritable(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs POSIX permissions and a non-root user")
 	}
 	dir := t.TempDir()
+	dropInheritedACL(t, dir)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}

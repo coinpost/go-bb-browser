@@ -711,9 +711,10 @@ func TestRotationRefusesSymlinkedActiveLog(t *testing.T) {
 	requireRestart(t, dir, want)
 }
 
-// A startup that is refused changes nothing in the state dir: whether the dir
-// can be started from is decided before the staging files of an interrupted
-// rotation are removed and before backup modes are tightened. Once the entry
+// A startup refused by the checks on rpc.jsonl / rpc.jsonl.1 removes no staging
+// file and changes no backup's mode: whether the log can be started from is
+// decided before the staging files of an interrupted rotation are removed and
+// before backup modes are tightened. Once the entry
 // that made startup refuse is moved away, the usual cleanup happens.
 func TestRefusedStartupLeavesStateDirAsFound(t *testing.T) {
 	cases := []struct {
