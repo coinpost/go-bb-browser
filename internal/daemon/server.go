@@ -80,9 +80,19 @@ type Server struct {
 	// shutdownTimeout bounds http.Server.Shutdown. Zero uses the default.
 	// A timed-out shutdown gets one more timeout.Operation to drain handlers.
 	shutdownTimeout time.Duration
+	// shutdownDrainTimeout is a test-only override of that second wait, after
+	// which the connections are closed (forced stop). Zero uses
+	// timeout.Operation.
+	shutdownDrainTimeout time.Duration
 	// settleTimeout bounds each wait of stopBackground. Zero uses the default
 	// (settleBudget).
 	settleTimeout time.Duration
+
+	// creates tracks the tab_new requests whose creation is in flight (see
+	// tab_create.go). createSettle is a test-only override of
+	// createSettleTimeout; zero uses the default.
+	creates      createGate
+	createSettle time.Duration
 
 	// CDP loss triggers fatal exit (supervisor restart) instead of in-process reconnect.
 	fatalOnce sync.Once
@@ -266,6 +276,10 @@ func (s *Server) settleBudget() time.Duration {
 // browser connection is still to be trusted (not a fatal CDP loss or a failed
 // startup).
 //
+//  0. The tab_new requests whose creation is still in flight (only a forced
+//     HTTP stop leaves any) settle, bounded, and no further creation is sent
+//     (settleCreations): their rollback and their audit line still find the
+//     session and the log.
 //  1. With settle, the sync loop is asked to finish: it applies every lifecycle
 //     event the connection has read and answers the enumeration requests still
 //     open (settleTargets), then returns. In-flight RPCs have drained by now,
@@ -276,12 +290,14 @@ func (s *Server) settleBudget() time.Duration {
 //     trip): a destroyed notification the daemon was told about is not lost
 //     because the loop had already stopped — the fatal path ends here.
 //
-// Every wait is bounded by settleBudget. A loop that does not return in time
+// Every wait of steps 1-3 is bounded by settleBudget, step 0 by the creation
+// settlement and rollback timeouts. A loop that does not return in time
 // is abandoned with a warning: nothing is concluded for it, the session and
 // log are closed regardless, and a write that loses that race gets
 // store.ErrClosed. What stays unsettled (a retirement not written) is settled
 // by the first successful enumeration of the next daemon process.
 func (s *Server) stopBackground(settle bool) {
+	s.settleCreations(settle)
 	budget := s.settleBudget()
 	bg := &s.bg
 	if settle && bg.syncDone != nil && bg.settle != nil {
@@ -431,7 +447,11 @@ func (s *Server) shutdownHTTP(srv *http.Server) error {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	shutdownCtx, cancel = context.WithTimeout(context.Background(), timeout.Operation)
+	drain := s.shutdownDrainTimeout
+	if drain <= 0 {
+		drain = timeout.Operation
+	}
+	shutdownCtx, cancel = context.WithTimeout(context.Background(), drain)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		_ = srv.Close()
