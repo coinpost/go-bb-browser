@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/target"
+	"github.com/coinpost/go-bb-browser/internal/browser"
 	"github.com/coinpost/go-bb-browser/internal/timeout"
 )
 
@@ -35,12 +36,38 @@ import (
 //     may have been left open, unmanaged.
 //
 // The commit is the boundary: a request that ends after commitCreatedTab keeps
-// its managed tab (idle cleanup and restart recovery own it from there).
+// its managed tab (idle cleanup and restart recovery own it from there). The
+// boundary is decided inside the commit's lifeMu section (creationEnded is
+// asked there, before the registry is touched), so a request that ends while
+// the handler waits for that lock is still rolled back.
+//
+// "The request ended" has two sources: its context (client gone, operation
+// budget) and the creation gate being shut. The second one is needed because
+// net/http does not cancel a handler's context when it closes a connection on
+// which the client had already sent its next request (HTTP/1.1 pipelining: the
+// background read that would notice the close is not running then). A forced
+// HTTP stop therefore tells the creations in flight explicitly.
+//
+// Time: the RPC keeps its timeout.Operation limit — a reply after it is never
+// committed. The round trip itself gets a deadline of its own, the settlement
+// later (plus createDeadlineMargin, so that the handler's settlement timer and
+// not the connection decides), and the session honours that deadline instead
+// of cutting the round trip at timeout.Operation.
 
 // createSettleTimeout bounds how long a tab_new whose request has ended waits
 // for the Target.createTarget reply still in flight. With createRollbackTimeout
 // it must stay below the flush margin of the HTTP write timeout.
 const createSettleTimeout = 5 * time.Second
+
+// createDeadlineMargin is how much later than the end of the settlement the
+// creation round trip's own deadline lies.
+const createDeadlineMargin = time.Second
+
+// createCancelGrace bounds the wait for the round trip to return after the
+// handler cancelled it. A context-aware connection returns at once, either with
+// the cancellation or with the reply that won the race against it; the bound is
+// for connections that ignore the context.
+const createCancelGrace = 250 * time.Millisecond
 
 // createShutdownMargin is added to the waits of settleCreations for the steps
 // around the two bounded round trips.
@@ -54,6 +81,7 @@ type createGate struct {
 	closed bool
 	n      int
 	idle   chan struct{} // closed when n drops to zero; nil while nobody waits
+	stop   chan struct{} // closed when the gate is shut (closed is true)
 	abort  chan struct{} // closed when shutdown stops waiting for replies
 	ended  bool          // abort is closed
 }
@@ -83,7 +111,13 @@ func (g *createGate) end() {
 func (g *createGate) shut() <-chan struct{} {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.closed = true
+	if g.stop == nil {
+		g.stop = make(chan struct{})
+	}
+	if !g.closed {
+		g.closed = true
+		close(g.stop)
+	}
 	if g.n == 0 {
 		done := make(chan struct{})
 		close(done)
@@ -93,6 +127,24 @@ func (g *createGate) shut() <-chan struct{} {
 		g.idle = make(chan struct{})
 	}
 	return g.idle
+}
+
+// stopped is closed once the gate is shut: the HTTP service has stopped, so
+// every creation still in flight belongs to a request nobody can be answered
+// any more, whatever its context says.
+func (g *createGate) stopped() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stop == nil {
+		g.stop = make(chan struct{})
+	}
+	return g.stop
+}
+
+func (g *createGate) isShut() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed
 }
 
 // aborted is closed once shutdown no longer waits for creation replies.
@@ -132,8 +184,11 @@ func (s *Server) createSettleBudget() time.Duration {
 
 // settleCreations is the first step of stopBackground: the HTTP service has
 // stopped, the session, the target sync loop and the RPC log still work. No
-// creation is sent from here on, and the tab_new requests still in flight get
-// to finish their settlement (see the top of this file) so that their rollback
+// creation is sent from here on. Shutting the gate is also the explicit notice
+// to the tab_new requests still in flight that their request is over (their
+// context need not say so, see the top of this file): they enter their
+// settlement now and commit nothing any more. They get
+// to finish that settlement (see the top of this file) so that their rollback
 // reaches the browser and their audit line reaches the log.
 //
 // It never waits without bound. With trust (the connection is still to be
@@ -163,32 +218,68 @@ type createReply struct {
 	err error
 }
 
+// Steps of a creation announced to Server.createStepHook.
+const (
+	createStepSettling  = "settling"  // the request ended, the handler waits for the reply
+	createStepReplied   = "replied"   // the round trip's reply is in the handler's buffer
+	createStepCommit    = "commit"    // about to take lifeMu for the commit
+	createStepCommitted = "committed" // the commit section was left with the tab committed
+)
+
+func (s *Server) createStep(step string) {
+	if s.createStepHook != nil {
+		s.createStepHook(step)
+	}
+}
+
+// creationEnded reports whether the request of a creation is over — nobody can
+// be given its tab any more — and why.
+func (s *Server) creationEnded(ctx context.Context) (reason string, ended bool) {
+	if ctx.Err() != nil {
+		return requestEndedHint(ctx), true
+	}
+	if s.creates.isShut() {
+		return "the daemon is shutting down and its HTTP service has stopped", true
+	}
+	return "", false
+}
+
+// createDeadline is the deadline of the creation round trip of a request with
+// context ctx: the settlement (and a margin) after the request's own deadline.
+func (s *Server) createDeadline(ctx context.Context) time.Time {
+	end, ok := ctx.Deadline()
+	if !ok {
+		end = time.Now().Add(timeout.Operation)
+	}
+	return end.Add(s.createSettleBudget() + createDeadlineMargin)
+}
+
 // requestCreatedTarget sends Target.createTarget and waits for its reply.
 // answered is false when the request ended first and no reply arrived within
 // the settlement: nothing is known about the creation then, and the round trip
 // is cancelled (a reply after that is dropped by the connection). The round
 // trip itself runs on a context that keeps the request's values but not its
-// cancellation.
+// cancellation, with the deadline of createDeadline.
+//
+// A reply that has arrived is never given up for a timer or for the shutdown's
+// abort: before the wait is abandoned the buffer is read once more, and after
+// the round trip was cancelled its result is still taken when it names a tab.
 func (s *Server) requestCreatedTarget(ctx context.Context, conn tabConn, url string, silent bool) (reply createReply, answered bool) {
-	cctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	cctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), s.createDeadline(ctx))
 	defer cancel()
 	ch := make(chan createReply, 1)
 	go func() {
 		tid, err := createPageTarget(cctx, conn, url, silent)
 		ch <- createReply{tid: tid, err: err}
+		s.createStep(createStepReplied)
 	}()
 	select {
 	case r := <-ch:
 		return r, true
 	case <-ctx.Done():
+	case <-s.creates.stopped():
 	}
-	// A reply that is already here counts even when shutdown has stopped
-	// waiting.
-	select {
-	case r := <-ch:
-		return r, true
-	default:
-	}
+	s.createStep(createStepSettling)
 	t := time.NewTimer(s.createSettleBudget())
 	defer t.Stop()
 	select {
@@ -197,7 +288,42 @@ func (s *Server) requestCreatedTarget(ctx context.Context, conn tabConn, url str
 	case <-t.C:
 	case <-s.creates.aborted():
 	}
+	// Go's select picks at random among the ready cases: a reply that is
+	// already here must not lose to the timer or the abort.
+	select {
+	case r := <-ch:
+		return r, true
+	default:
+	}
+	// End the round trip. What it returns now is either the cancellation (the
+	// creation's outcome stays unknown) or a reply that won the race against
+	// it; only a reply naming a tab is knowledge.
+	cancel()
+	g := time.NewTimer(createCancelGrace)
+	defer g.Stop()
+	select {
+	case r := <-ch:
+		if r.err == nil && r.tid != "" {
+			return r, true
+		}
+	case <-g.C:
+	}
 	return createReply{}, false
+}
+
+// createOutcomeUnknown reports whether a failed Target.createTarget leaves open
+// whether the browser created a tab: the round trip ended without an answer
+// from the browser (connection lost or cancelled, deadline) as opposed to the
+// browser refusing the command or a request that was never sent.
+func createOutcomeUnknown(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	switch browser.ErrorKindOf(err) {
+	case browser.ErrorTransport, browser.ErrorTimeout:
+		return true
+	}
+	return false
 }
 
 // requestEndedHint says why a request's context is done.

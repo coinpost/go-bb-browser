@@ -666,8 +666,12 @@ func TestForcedShutdownWithoutCreateReplyIsBounded(t *testing.T) {
 // is accounted as failed, without a target.
 func TestCDPLossWithCreateReplyInFlightIsBounded(t *testing.T) {
 	st := newCDPStub(t, ovfB)
-	d := startShutdownDaemon(t, st, time.Minute, forcedStop)
-	_, _, release := startCreateInFlight(t, d)
+	logs := &settleLogBuf{}
+	d := startShutdownDaemon(t, st, time.Minute, func(s *Server) {
+		forcedStop(s)
+		s.logger = logs.logger()
+	})
+	_, answer, release := startCreateInFlight(t, d)
 	defer release()
 
 	st.writeMu.Lock()
@@ -677,6 +681,20 @@ func TestCDPLossWithCreateReplyInFlightIsBounded(t *testing.T) {
 	err := d.finish(shutdownTestWait)
 	if err == nil || !strings.Contains(err.Error(), "cdp session lost") {
 		t.Fatalf("CDP loss returned %v", err)
+	}
+	// The browser had executed the creation; the lost round trip is not a
+	// refusal. Answer and warning state the boundary instead of a bare
+	// "context canceled".
+	select {
+	case r := <-answer:
+		if msg, hint := settleErrText(r); msg != "failed to create tab" || !strings.Contains(hint, "whether it created a tab is not known") {
+			t.Errorf("tab_new answered %v / %v, want the unknown outcome spelled out", r.Result, r.Error)
+		}
+	case <-time.After(shutdownTestWait):
+		t.Error("tab_new was never answered")
+	}
+	if out := logs.String(); !strings.Contains(out, "a tab may have been created, its id is not known, it is not managed and was not closed") {
+		t.Errorf("no warning about the possibly unmanaged tab:\n%s", out)
 	}
 	if closed := st.closedTargets(); len(closed) != 0 {
 		t.Errorf("Target.closeTarget sent for %v", closed)

@@ -94,8 +94,21 @@ func (s *Server) markTabManagedLocked(tid target.ID) {
 // target Chrome still lists as a discovery, which is not the managed tab this
 // call created: its managed lifecycle ended with the close. Nothing is
 // concluded from the failed enumeration itself.
-func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Window, tid target.ID) bool {
+//
+// A creation whose request is over (creationEnded) is not committed at all:
+// ended then says why, the window is abandoned and nothing is registered. The
+// caller rolls the tab back. Once the commit section is left with the tab
+// committed, the end of the request changes nothing any more.
+func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Window, tid target.ID) (committed bool, ended string) {
+	s.createStep(createStepCommit)
 	s.lifeMu.Lock()
+	// The boundary between "rolled back" and "managed": asked here, where no
+	// commit can be under way, and before the registry is touched.
+	if reason, over := s.creationEnded(ctx); over {
+		s.tabs.Abandon(w)
+		s.lifeMu.Unlock()
+		return false, reason
+	}
 	ok, verify := s.tabs.CommitCreated(w, tid)
 	var check *state.Window
 	if ok {
@@ -105,8 +118,11 @@ func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Wi
 		}
 	}
 	s.lifeMu.Unlock()
+	if ok {
+		s.createStep(createStepCommitted)
+	}
 	if check == nil {
-		return ok
+		return ok, ""
 	}
 	if infos, err := pageTargets(ctx, conn); err != nil {
 		s.tabs.Abandon(check)
@@ -114,33 +130,31 @@ func (s *Server) commitCreatedTab(ctx context.Context, conn tabConn, w *state.Wi
 	} else {
 		s.applyEnumeration(conn, check, infos)
 	}
-	return !s.tabs.ReportedGone(check, tid) && s.tabs.Has(tid)
+	return !s.tabs.ReportedGone(check, tid) && s.tabs.Has(tid), ""
 }
 
 // rollbackCreatedTab closes a tab this daemon just created but could not
 // commit, and describes the outcome for the caller. It is one bounded attempt
-// on exactly that target id.
-func (s *Server) rollbackCreatedTab(ctx context.Context, conn tabConn, tid target.ID) string {
+// on exactly that target id. closed is false when the tab may still be open:
+// the caller must not report it as rolled back.
+func (s *Server) rollbackCreatedTab(ctx context.Context, conn tabConn, tid target.ID) (cleanup string, closed bool) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), createRollbackTimeout)
 	defer cancel()
 	unlock, ok := s.lockTab(rctx, string(tid))
 	if !ok {
-		return "not closed (tab busy)"
+		return "not closed (tab busy)", false
 	}
 	defer unlock()
 	err := closeTarget(rctx, conn, tid)
 	switch {
 	case err == nil:
 		s.removeTargetState(tid)
-		return "closed"
+		return "closed", true
 	case browser.ErrorKindOf(err) == browser.ErrorTargetGone:
 		s.removeTargetState(tid)
-		return "already gone"
+		return "already gone", true
 	default:
-		if s.logger != nil {
-			s.logger.Warn("tab_new rollback failed; the tab may still be open and is not managed", "tab", string(tid), "err", err)
-		}
-		return "not closed (" + err.Error() + ")"
+		return "not closed (" + err.Error() + ")", false
 	}
 }
 

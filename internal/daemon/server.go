@@ -93,6 +93,10 @@ type Server struct {
 	// createSettleTimeout; zero uses the default.
 	creates      createGate
 	createSettle time.Duration
+	// createStepHook is nil outside tests. Creation regressions set it to learn
+	// when a tab_new reaches one of its steps (createStep*); it runs on the
+	// goroutine that reached the step.
+	createStepHook func(step string)
 
 	// CDP loss triggers fatal exit (supervisor restart) instead of in-process reconnect.
 	fatalOnce sync.Once

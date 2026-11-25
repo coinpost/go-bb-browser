@@ -1044,6 +1044,23 @@ func (s *Session) CreatePageTarget(initialURL string, silent bool) (target.ID, e
 	return s.CreatePageTargetContext(context.Background(), initialURL, silent)
 }
 
+// createTargetContext is the context of one Target.createTarget round trip on
+// the session context sess. A caller that brings a deadline owns the bound: the
+// daemon lets a creation outlive its RPC by a bounded settlement so that the
+// reply — the only thing that names the created tab — can still be acted on,
+// and cutting the round trip at timeout.Operation here would drop exactly that
+// reply. Without a caller deadline the round trip is bounded by
+// timeout.Operation as every other command.
+func createTargetContext(sess, caller context.Context) (context.Context, context.CancelFunc) {
+	if deadline, ok := caller.Deadline(); ok {
+		return context.WithDeadline(sess, deadline)
+	}
+	return context.WithTimeout(sess, timeout.Operation)
+}
+
+// CreatePageTargetContext is CreatePageTarget bounded by ctx: its cancellation
+// ends the round trip, and its deadline, when it has one, replaces the default
+// timeout.Operation bound (createTargetContext).
 func (s *Session) CreatePageTargetContext(ctx context.Context, initialURL string, silent bool) (target.ID, error) {
 	if s == nil {
 		return "", fmt.Errorf("browser session is nil")
@@ -1056,7 +1073,7 @@ func (s *Session) CreatePageTargetContext(ctx context.Context, initialURL string
 	if silent {
 		params = params.WithBackground(true).WithFocus(false)
 	}
-	opCtx, cancel := context.WithTimeout(s.ctx, timeout.Operation)
+	opCtx, cancel := createTargetContext(s.ctx, ctx)
 	stop := context.AfterFunc(ctx, cancel)
 	defer cancel()
 	defer stop()
