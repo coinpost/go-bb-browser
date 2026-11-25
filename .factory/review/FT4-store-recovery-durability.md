@@ -1,6 +1,6 @@
 ---
 branch: factory/FT4-store-recovery-durability
-round: 3
+round: 4
 ---
 # 日志尾行、轮转恢复与安全可写探测
 
@@ -190,3 +190,17 @@ factory · review · 2026-11-25 01:00 的正文与 verdict: fix（head: b9f94f6a
 按 owner 此次说明，日志文件不配置成符号链接是本项使用前提。factory · review · 2026-11-25 01:00 中仅因日志为符号链接才成立的发现（含 fix 中的 P1：active 为符号链接并指向 .tmp/.keep 时，启动先删除 .tmp/.keep 再验证 active，可能丢失链接目标日志；以及 notes 中与符号链接备份相关的项）不作为此边界内的交付阻塞。
 
 此边界不得扩大为豁免普通文件日志的恢复问题、线程竞争或磁盘错误。不修改先前 review 正文与 verdict: fix，不自动改为 pass，不将本项移至 ready/。保留先前 owner 单进程独占状态目录边界（Guoyin / factory · 2026-11-25 00:17）以及 08:23 再排一轮、只移回 new、不启动开发或审查的说明。本 run 不改 round/branch，不移动本项，不启动 build/review/ship，不改代码与配置。
+
+## factory · plan · 2026-11-25 08:38
+第 4 轮补充：owner 在私聊明确授权“ft4 我移回 new 了，你让 cc 去build”，本轮启动 build，沿用原分支与历史轮次、不重置 round。按已记录的单进程独占、日志不配置为符号链接边界，上一轮仅因符号链接成立的 P1/P2 不作交付阻塞；不引入跨进程锁或 Windows 推测兼容层。维持普通文件启动/恢复与事务轮转，纠正 .1 发布前后名字丢失恢复语义、最终检查与 rename 非原子窗口。小范围调整启动校验顺序，并增加拒绝启动时现有文件不被修改的永久回归；执行完整配置测试。
+
+## factory · 2026-11-25 08:38
+第 4 轮 Claude Code 构建完成，new/ → review/。branch: factory/FT4-store-recovery-durability；head: a983fc3a6e79d34d11d623db2b60a0950c457a83。
+
+启动先拒绝非普通 active、执行必要恢复，再清理 .tmp/.keep 与收紧备份权限；新增目录型非法入口回归，拒绝启动时保留暂存内容和备份权限。符号链接重叠目标 P1 随顺序调整一并避免，但不把其作为 owner 验收要求；符号链接 .1 的 P2 未额外扩展实现，按 owner 不配置此类日志的边界不作阻塞。修正轮转拒绝错误的“backups left untouched”过度承诺，README/AGENTS/systemd 文档区分 .1 发布前后的恢复能力，明确最终复验与 rename 并非原子操作。
+
+测试：coder 完整配置测试（含 count=1）、store race count=5 通过；新增 TestRefusedStartupLeavesStateDirAsFound 在旧 store.go 上失败、当前通过。经理独立隔离 HOME/XDG/GOCACHE，离线复跑 `test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...` 全部通过，Node 在 PATH，adapter 测试启用。无新增安装，使用已有 Go 1.27.4 与只读模块下载缓存。起点 origin/main@fb2c535、仅本项五个提交，无 never 路径修改，工作树和索引干净。代码分支已推送。
+
+未做真实断电/kill -9、原生 Linux/Windows、无硬链接文件系统、真实 Chrome 或 systemd 部署验收；本轮未逐项核对 ACL skip。无 UI 改动。未 ship、未发 tag、未发布、未移动 FT2/FT3/FT6；round 保留累增至 4，后续复审仍需在当前 owner 边界内独立判断，不直接沿用旧 verdict 为 pass。
+
+临时文件均留本 run TMPDIR 并在结束清理；coder 报告一次设置 TMPDIR 前的只读目录枚举，无写入、未 source 外部 env.sh；TMPDIR 外仅授权 build 锁心跳，无新增可见 /tmp 路径。
