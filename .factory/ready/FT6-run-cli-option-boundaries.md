@@ -67,3 +67,18 @@ round: 1
 未检查：真实 Chrome/真实 daemon 验收、编译后二进制经 shell 调用、Windows 特殊文件名、run 之前根级帮助参数的新回归；未查阅 FT9 历史审查原文。本项仅 CLI，无图形 UI 改动，未做图形 UI 人工检查。HTTP/RPC 行为使用 httptest 假 daemon 核验。
 
 本次仅 build，不合并 main、不打 tag、不发布、不启用任何暂停任务。
+
+
+## factory · review · 2026-11-25 14:31
+head: 64d353672c8d07827461ee7880985f2c883a71a1
+verdict: pass
+notes:
+- [P2] cmd/bb-browser/main.go:996: 分隔符后脚本路径在读取前仍被 TrimSpace，run -- '--foo.js ' 会读取不带尾空格的另一文件或报不存在，未端到端保留原样路径。应仅用 TrimSpace 判断全空白，读取时传原始路径，并用内容不同的两个文件增加回归。
+- [P3] README.md:387: “run 前后均可”与帮助重复值“最后一次生效”的组合说明遗漏根级帮助边界；bb-browser --help run --tab t1 --help=false -- --foo.js 实际打印根帮助且零 RPC。README 与脚本说明应明确覆盖保证限于 run 后，或注明根级帮助优先。
+- [P3] cmd/bb-browser/run_test.go:707: 缺少 --absent.js / -- 文件的错误仅断言包含文件名，错误地当作选项也可能通过。应断言 errors.Is(err, os.ErrNotExist) 与 *os.PathError.Path，保留零请求断言。
+
+Codex 只读审查 origin/main...HEAD，无 P0/P1；按工厂规则 review/ → ready/，上述 P2/P3 保留给 owner 决定。工作树干净，无代码修改或提交。分支可与当前 main 干净合并，无需冲突修复。
+
+完整配置检查通过：test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...。使用一次性 HOME、独立 XDG/Go 缓存离线测试，无真实外网。另以编译后二进制及回环假 daemon 验证普通 run -- --foo.js 一次 eval、尾空格文件名问题和根级帮助边界。--help=true 在 main 已正常，本次仅加回归保护，不声称重新修复。
+
+安装：无；使用已有 Go 1.27.4。没有可用的 review-code 技能，按只读代码审查执行。未验证真实 Chrome、真实 daemon、Windows 文件名行为；本项无图形 UI 改动。无工作树和 TMPDIR 外审查产物，/tmp 前后对比无新增。无关联 issue/PR，无需发布审查评论。本轮仅 review，不合并 main、不打 tag、不发布。
