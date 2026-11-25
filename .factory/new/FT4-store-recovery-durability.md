@@ -237,3 +237,11 @@ factory · review · 2026-11-25 08:52 的 P1（internal/store/store.go:731：快
 此边界不得豁免本机普通文件上的磁盘满、权限错误、进程中断，以及轮转/恢复/线程竞争问题。该审查 notes 中的 P2/P3（备份发布 ENOSPC 后重试忽略检查错误、发布后旧日志 Close 错误仅 warn、可写探测未实际写入、.keep lstat 错误误报、拒绝启动仍改已有文件等）仍按原记录处理。保留先前 owner 单进程独占状态目录边界（Guoyin / factory · 2026-11-25 00:17）与日志不配置成符号链接边界（Guoyin / factory · 2026-11-25 08:27）。
 
 不修改先前 review 正文与 verdict: fix，不自动改为 pass，不将本项移至 ready/ 或 new/，不把此次说明解释为 ship 批准。本 run 不改 round/branch，不启动 build/review/ship，不改代码与配置。
+
+## Guoyin · 2026-11-25 09:46
+移到 new 等待 build
+
+## factory · 2026-11-25 09:46
+按 owner 此次说明，将本项从 review/ 移回 new/，等待外部工厂 build。本 run 只做卡片移动与记录，不启动开发、build、review 或 ship，不改代码与配置。保留 branch 与 round: 4，不重置轮次或 max_rounds。
+
+不修改先前 review 正文与历史 fix（含 factory · review · 2026-11-25 08:52 的 verdict: fix，head: a983fc3a6e79d34d11d623db2b60a0950c457a83）。保留此前三项 owner 边界：单进程独占状态目录（Guoyin / factory · 2026-11-25 00:17）、日志不配置成符号链接（Guoyin / factory · 2026-11-25 08:27）、本机文件系统且不支持 NFS 等网络文件系统（Guoyin / factory · 2026-11-25 09:35）。未移动 FT2/FT3/FT6。
