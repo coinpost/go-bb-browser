@@ -363,9 +363,13 @@ func TestShutdownWaitsForHandlerBeforeClosingAudit(t *testing.T) {
 		done <- srv.ListenAndServe(ctx)
 	}()
 
+	// One connection per request: with keep-alives the transport can leave a
+	// dialed, never used connection behind, which http.Server.Shutdown waits
+	// five seconds for before it counts as idle.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		res, getErr := http.Get("http://" + addr + "/live")
+		res, getErr := client.Get("http://" + addr + "/live")
 		if getErr == nil {
 			res.Body.Close()
 			break
@@ -378,7 +382,7 @@ func TestShutdownWaitsForHandlerBeforeClosingAudit(t *testing.T) {
 
 	clientErr := make(chan error, 1)
 	go func() {
-		res, postErr := http.Post("http://"+addr+"/v1", "application/json", strings.NewReader(rpcReq(protocol.MethodTabList, map[string]any{}, 1)))
+		res, postErr := client.Post("http://"+addr+"/v1", "application/json", strings.NewReader(rpcReq(protocol.MethodTabList, map[string]any{}, 1)))
 		if res != nil {
 			res.Body.Close()
 		}
