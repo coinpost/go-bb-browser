@@ -125,3 +125,63 @@ func TestAPITokenAllowLoopbackFlagAndEnvironment(t *testing.T) {
 		}
 	}
 }
+
+func TestDebuggerURLFlagDefaultAndPrecedence(t *testing.T) {
+	const env = "BB_BROWSER_DEBUGGER_URL"
+	for _, tc := range []struct {
+		name   string
+		env    *string // nil: variable not set at all
+		args   []string
+		want   string
+		usage  string // default shown by the flag's usage
+		reject bool   // Config.Validate must refuse the result
+	}{
+		{name: "no env, no flag", want: "127.0.0.1:9222", usage: "127.0.0.1:9222"},
+		{name: "empty env, no flag", env: new(""), want: "127.0.0.1:9222", usage: "127.0.0.1:9222"},
+		{name: "env overrides default", env: new("http://chrome:9333"), want: "http://chrome:9333", usage: "http://chrome:9333"},
+		{name: "flag overrides default", args: []string{"--debugger-url", "127.0.0.1:9444"}, want: "127.0.0.1:9444", usage: "127.0.0.1:9222"},
+		{name: "flag overrides env", env: new("http://chrome:9333"), args: []string{"--debugger-url=127.0.0.1:9444"}, want: "127.0.0.1:9444", usage: "http://chrome:9333"},
+		{name: "explicit empty flag", args: []string{"--debugger-url="}, want: "", usage: "127.0.0.1:9222", reject: true},
+		{name: "explicit empty flag beats env", env: new("http://chrome:9333"), args: []string{"--debugger-url", ""}, want: "", usage: "http://chrome:9333", reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Setenv first so the original value is restored, then drop the variable when the case wants it unset.
+			t.Setenv(env, "")
+			if tc.env == nil {
+				if err := os.Unsetenv(env); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv(env, *tc.env)
+			}
+			fs := flag.NewFlagSet("bb-daemon", flag.ContinueOnError)
+			var usage bytes.Buffer
+			fs.SetOutput(&usage)
+			got := debuggerURLFlag(fs)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if *got != tc.want {
+				t.Fatalf("got %q, want %q", *got, tc.want)
+			}
+			if def := fs.Lookup("debugger-url").DefValue; def != tc.usage {
+				t.Fatalf("usage default %q, want %q", def, tc.usage)
+			}
+			fs.PrintDefaults()
+			if help := usage.String(); !strings.Contains(help, `(default "`+tc.usage+`")`) || strings.Contains(help, "required") {
+				t.Fatalf("unexpected usage text: %q", help)
+			}
+			cfg := daemon.Config{DebuggerURL: *got}
+			err := cfg.Validate()
+			if tc.reject {
+				if err == nil || !strings.Contains(err.Error(), "debugger URL is required") {
+					t.Fatalf("explicitly empty --debugger-url: got err %v, want the required-URL validation error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+		})
+	}
+}

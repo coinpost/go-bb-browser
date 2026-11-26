@@ -21,6 +21,10 @@ var (
 	date    = "unknown"
 )
 
+// defaultDebuggerURL is used when neither --debugger-url nor a non-empty
+// BB_BROWSER_DEBUGGER_URL is given: Chrome's conventional remote debugging port on loopback.
+const defaultDebuggerURL = "127.0.0.1:9222"
+
 func main() {
 	os.Exit(run())
 }
@@ -30,7 +34,7 @@ func run() int {
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&showVersion, "v", false, "print version and exit (shorthand)")
 
-	debuggerURL := flag.String("debugger-url", envOrDefault("BB_BROWSER_DEBUGGER_URL", ""), "Chrome DevTools endpoint (ws/http URL or host:port); required")
+	debuggerURL := debuggerURLFlag(flag.CommandLine)
 	listen := flag.String("listen", envOrDefault("BB_BROWSER_LISTEN", daemon.DefaultListenAddr), "HTTP listen address for the daemon API")
 	var apiTokens apiTokenFlags
 	flag.Var(&apiTokens, "api-token", "allowed API token (repeatable; merged with BB_BROWSER_API_TOKEN and token file)")
@@ -115,6 +119,13 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// debuggerURLFlag registers --debugger-url. Precedence: explicit flag (an explicitly
+// empty value included, which Config.Validate rejects), then a non-empty
+// BB_BROWSER_DEBUGGER_URL, then defaultDebuggerURL.
+func debuggerURLFlag(fs *flag.FlagSet) *string {
+	return fs.String("debugger-url", envOrDefault("BB_BROWSER_DEBUGGER_URL", defaultDebuggerURL), "Chrome DevTools endpoint (ws/http URL or host:port)")
 }
 
 func newLogger(level, format string) (*slog.Logger, error) {

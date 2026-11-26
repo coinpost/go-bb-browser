@@ -24,8 +24,8 @@ go test ./...
 2. 启动守护进程（附加到上一步的调试端口）：
 
    ```bash
-   export BB_BROWSER_DEBUGGER_URL=127.0.0.1:9222   # 或每次传 --debugger-url
    ./bb-daemon
+   # 默认附加 127.0.0.1:9222；其他端点用 --debugger-url 或 BB_BROWSER_DEBUGGER_URL
    # 默认监听 127.0.0.1:8787；可用 --listen 或 BB_BROWSER_LISTEN
    ```
 
@@ -73,7 +73,7 @@ flowchart LR
 
 | 变量 | 含义 |
 |------|------|
-| `BB_BROWSER_DEBUGGER_URL` | Chrome DevTools 端点（`host:port` 或 ws/http URL），等价 `--debugger-url` |
+| `BB_BROWSER_DEBUGGER_URL` | Chrome DevTools 端点（`host:port` 或 ws/http URL），等价 `--debugger-url`；两者都未给出（或变量为空）时默认 `127.0.0.1:9222`，标志覆盖环境变量，显式传空的 `--debugger-url` 仍报错 |
 | `BB_BROWSER_LISTEN` | daemon 监听地址，默认 `127.0.0.1:8787` |
 | `BB_BROWSER_API_TOKEN` | daemon API token 白名单，英文逗号分隔，与可重复的 `--api-token` 合并；CLI 使用同名变量或 `--api-token` 发送单个 token（标志覆盖环境变量） |
 | `BB_BROWSER_API_TOKEN_ALLOW_LOOPBACK` | 等价 `--api-token-allow-loopback`，默认 `false`；仅真实 TCP 回环对端且无代理头的 `POST /v1` 免 token；布尔值支持 `true/false`、`1/0`、`t/f` 及其 `strconv.ParseBool` 大小写形式，非法或空值回退 `false`，标志覆盖环境变量 |
