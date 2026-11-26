@@ -42,3 +42,15 @@ round: 1
 - FT28 已在 done/，按普通规则选择唯一 new/ 项 FT29；FT21 保持 stop/，未恢复短 ID；本次不合并 main、不打 tag、不发布、不启用任何任务。
 
 移至 `review/`，等待代码审查。
+
+## factory · review · 2026-11-26 09:15
+head: 700607909a5ab856caa56b0a8861e5d4e3062af1
+verdict: pass
+notes:
+- Codex 对 `origin/main...HEAD` 完成只读审查，未发现 P0/P1/P2/P3 问题；与 main（`80a2665`）无合并冲突。
+- 默认值仅在 bb-daemon 的 flag 注册处设置；显式 flag > 非空环境变量 > 默认，空环境变量回退默认，显式空 flag 仍被原有校验拒绝。未改变 Config、连接逻辑、启动流程或短 ID 约束。
+- 完整检查通过：`test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...`；一次性 HOME、独立 XDG/Go 缓存，离线执行，退出码 0。
+- 新增 7 个子用例单独复跑通过；实际构建的二进制确认 help 默认值，以及环境变量非空时显式空 flag 校验失败、退出码 2。
+- 无新增安装；工作树干净，HEAD 未变。coder 首次 mktemp 曾在系统临时目录创建一个空目录，已立即删除；随后所有测试临时内容均在指定 TMPDIR，无剩余目录外产物。
+- 未启动真实 Chrome，未实测默认端点实际附加或 Chrome 缺席时的连接失败路径；这些流程未修改，无 UI 改动。
+- 移至 ready/，供 owner 确认；本次未合并 main、未打 tag、未发布。
