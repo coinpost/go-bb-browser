@@ -1,7 +1,7 @@
 go-bb-browser - factory board
 =============================
-Nothing at your gates | 1 with the agent | 25 done | 24 sent back
-Drawn Nov 26, 09:10 | https://github.com/coinpost/go-bb-browser
+1 at your gates | 0 with the agent | 25 done | 24 sent back
+Drawn Nov 26, 09:15 | https://github.com/coinpost/go-bb-browser
 
 BACKLOG (0)                                 never built
     Nothing here
@@ -9,11 +9,12 @@ BACKLOG (0)                                 never built
 NEW (0)                                     avg stay 3h
     Nothing here
 
-REVIEW (1)                                  avg stay 2h
-    FT29    1m  bb-daemon --debugger-url 默认值 127.0.0.1:9222
-
-READY (0)                                   avg stay 1h
+REVIEW (0)                                  avg stay 2h
     Nothing here
+
+READY (1) [!]                               avg stay 1h
+  * FT29    1m  bb-daemon --debugger-url 默认值 127.0.0.1:9222
+                > Check, then ship
 
 DONE (25)
     FT6    18h  run帮助布尔参数与选项终止符兼容
